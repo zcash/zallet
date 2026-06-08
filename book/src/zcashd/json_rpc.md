@@ -57,6 +57,26 @@ Changes to response:
   listed in a new `derived_transparent` field (an array of objects) instead of
   the `transparent` field.
 
+### `z_exportviewingkey`
+
+Changes to parameters:
+- Sprout addresses are rejected; Zallet does not support Sprout.
+- Unified Addresses are now accepted in addition to Sapling addresses.
+- New `ivk` optional boolean parameter (default `false`).
+
+Changes to response:
+- For a Sapling address, the account's Sapling extended full viewing key
+  (`zxviews…`) is returned, as in `zcashd`. This key cannot be exported from an
+  imported view-only account, as the wallet cannot reconstruct the extended
+  full viewing key.
+- For a Unified Address, the account's unified full viewing key (`uview…`) is
+  returned.
+- If `ivk` is `true`, the account's unified incoming viewing key (`uivk…`) is
+  returned instead of the full viewing key. This also works for imported
+  view-only accounts. Note that a UIVK grants incoming viewing capability for
+  every pool in the account, even when the queried address is a Sapling
+  address.
+
 ### `getrawtransaction`
 
 Changes to parameters:

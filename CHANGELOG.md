@@ -8,6 +8,15 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- RPC methods:
+  - `z_exportviewingkey`. In addition to the `zcashd` behaviour (exporting the
+    Sapling extended full viewing key for a Sapling address), it accepts
+    unified addresses (returning the account's unified full viewing key), and
+    an optional `ivk` argument that exports the account's unified incoming
+    viewing key instead.
+
 ### Changed
 
 - `zallet rpc help` is now answered locally instead of being sent to the
@@ -148,6 +157,7 @@ be considered breaking changes.
   - `z_shieldcoinbase`
 
 ### Changed
+
 - **This release is not compatible with wallets created by earlier alpha
   releases.** The embedded Zaino chain indexer made a backwards-incompatible
   change to its database format (zingolabs/zaino#914), which this release pulls
@@ -181,6 +191,7 @@ be considered breaking changes.
   embedding them in the HTTP URL.
 
 ### Fixed
+
 - `walletlock` now awaits aborted relock tasks before returning, preventing a race
   where a rapid `walletpassphrase` after `walletlock` could leave the wallet locked
   despite reporting success.
