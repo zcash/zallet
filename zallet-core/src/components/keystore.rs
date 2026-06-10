@@ -380,6 +380,9 @@ impl KeyStore {
         let mut relock_task = self.relock_task.lock().await;
         if let Some((_, existing_timeout)) = relock_task.take() {
             existing_timeout.abort();
+            // Wait for the task to either finish or abort, to ensure there's zero
+            // possibility of a subsequent `unlock` having its identities cleared.
+            let _ = existing_timeout.await;
         }
 
         self.identities.write().await.clear();
