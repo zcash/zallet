@@ -8,6 +8,13 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- JSON-RPC async operations (`z_sendmany`, `z_shieldcoinbase`) are now bounded
+  to 64 in-flight operations, and finished operations are pruned automatically
+  when new async RPCs are started. This prevents authenticated callers from
+  exhausting wallet memory by flooding the operation queue.
+
 ## [0.1.0-beta.1] - 2026-07-12
 
 ### Added

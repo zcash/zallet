@@ -15,6 +15,12 @@ use uuid::Uuid;
 
 use super::server::LegacyCode;
 
+/// Maximum number of in-flight async operations.
+///
+/// Matches Bitcoin Core's `DEFAULT_HTTP_WORKQUEUE` (64), which bounds the depth of
+/// the RPC work queue in `zcashd`.
+pub(super) const MAX_ASYNC_OPERATIONS: usize = 64;
+
 /// An async operation ID.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize, Documented, JsonSchema)]
 #[serde(try_from = "String")]
@@ -71,6 +77,10 @@ impl OperationState {
             "success" => Some(Self::Success),
             _ => None,
         }
+    }
+
+    pub(super) fn is_finished(self) -> bool {
+        matches!(self, Self::Success | Self::Failed | Self::Cancelled)
     }
 }
 
