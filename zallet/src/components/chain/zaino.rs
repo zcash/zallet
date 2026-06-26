@@ -258,6 +258,10 @@ impl ZainoChain {
 impl Chain for ZainoChain {
     type View = ZainoChainView;
 
+    fn params(&self) -> &Network {
+        &self.params
+    }
+
     async fn reported_upgrades(&self) -> Result<Vec<ReportedUpgrade>, Error> {
         let info = self
             .fetcher

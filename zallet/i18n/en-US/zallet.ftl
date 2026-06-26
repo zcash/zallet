@@ -158,10 +158,13 @@ err-init-rpc-auth-invalid = Invalid '{-cfg-rpc-auth}' configuration
 err-config-file-not-found = Configuration file at {$path} does not exist.
 err-config-file-invalid = Failed to parse configuration file at {$path}: {$error}
 err-init-incompatible-consensus =
-    The backing full node follows consensus rules that this {-zallet} build does
-    not recognize, so {-zallet} cannot maintain a correct view of the chain.
-    Unrecognized network upgrades: {$upgrades}.
-    Upgrade {-zallet} to a release that supports these network upgrades.
+    The backing full node follows consensus rules that this {-zallet} build cannot
+    interpret correctly, so {-zallet} cannot maintain a correct view of the chain.
+    Either the full node follows a network upgrade that this build does not recognize,
+    or it activates a recognized upgrade at a height that differs from what this build
+    expects.
+    Incompatible network upgrades: {$upgrades}.
+    Upgrade {-zallet} to a release whose consensus rules match the full node.
 
 ## Keystore errors
 

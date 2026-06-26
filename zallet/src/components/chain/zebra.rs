@@ -122,6 +122,10 @@ impl ZebraChain {
 impl Chain for ZebraChain {
     type View = ZebraChainView<ReadStateChainReader>;
 
+    fn params(&self) -> &Network {
+        &self.params
+    }
+
     async fn reported_upgrades(&self) -> Result<Vec<ReportedUpgrade>, Error> {
         // The backing zebrad is a separate process that may follow newer consensus rules
         // than this build of Zallet recognizes, so we ask it which upgrades it follows.

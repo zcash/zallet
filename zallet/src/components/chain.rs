@@ -28,6 +28,7 @@ use zcash_protocol::{
 
 use crate::error::{Error, ErrorKind};
 use crate::fl;
+use crate::network::Network;
 
 mod error;
 pub(crate) use error::ChainError;
@@ -60,6 +61,10 @@ pub(crate) type ChainBackend = ZebraChain;
 pub(crate) trait Chain: Clone + Send + Sync + 'static {
     /// A consistent, reorg-immune view of the chain captured by [`Chain::snapshot`].
     type View: ChainView;
+
+    /// The network this backend follows, used to look up the activation heights this
+    /// build of Zallet expects when checking consensus compatibility.
+    fn params(&self) -> &Network;
 
     /// The network upgrades the backing full node reports, in backend-neutral form.
     ///
@@ -119,38 +124,91 @@ pub(crate) struct ReportedUpgrade {
     status: UpgradeStatus,
 }
 
-/// A network upgrade that the backing full node follows but that this build of
-/// Zallet does not recognize.
-struct UnknownUpgrade {
-    /// The consensus branch ID reported by the full node.
-    branch_id: u32,
-    /// The full node’s name for the upgrade, used for diagnostics only.
-    name: String,
-    /// The activation height, if the upgrade is pending rather than already active.
-    pending_at: Option<u32>,
+/// A way in which the backing full node’s consensus rules are incompatible with this
+/// build of Zallet, such that Zallet could not maintain a correct view of the chain.
+enum Incompatibility {
+    /// The full node follows a network upgrade whose consensus branch ID this build of
+    /// Zallet does not recognize, and so cannot interpret.
+    UnknownUpgrade {
+        /// The consensus branch ID reported by the full node.
+        branch_id: u32,
+        /// The full node’s name for the upgrade, used for diagnostics only.
+        name: String,
+        /// The activation height, if the upgrade is pending rather than already active.
+        pending_at: Option<u32>,
+    },
+    /// The full node and this build of Zallet both recognize the upgrade’s consensus
+    /// branch ID, but disagree about the height at which it activates, and so about
+    /// where its consensus rules take effect.
+    ActivationHeightMismatch {
+        /// The recognized consensus branch ID.
+        branch_id: u32,
+        /// The full node’s name for the upgrade, used for diagnostics only.
+        name: String,
+        /// The activation height this build of Zallet expects, or `None` if it treats
+        /// the upgrade as not scheduled on this network.
+        expected: Option<u32>,
+        /// The activation height the full node reports, or `None` if the full node
+        /// treats the upgrade as disabled on this network.
+        node: Option<u32>,
+    },
 }
 
-impl UnknownUpgrade {
+impl Incompatibility {
     fn describe(&self) -> String {
-        match self.pending_at {
-            Some(height) => format!(
-                "{} (branch ID {:08x}, activates at height {height})",
-                self.name, self.branch_id,
-            ),
-            None => format!(
-                "{} (branch ID {:08x}, already active)",
-                self.name, self.branch_id
-            ),
+        match self {
+            Self::UnknownUpgrade {
+                branch_id,
+                name,
+                pending_at,
+            } => match pending_at {
+                Some(height) => format!(
+                    "{name} (branch ID {branch_id:08x}, unrecognized, activates at height {height})"
+                ),
+                None => {
+                    format!("{name} (branch ID {branch_id:08x}, unrecognized, already active)")
+                }
+            },
+            Self::ActivationHeightMismatch {
+                branch_id,
+                name,
+                expected,
+                node,
+            } => {
+                let show = |height: &Option<u32>| match height {
+                    Some(height) => height.to_string(),
+                    None => "not scheduled".to_string(),
+                };
+                format!(
+                    "{name} (branch ID {branch_id:08x}): full node activates at {}, \
+                     but this Zallet build expects {}",
+                    show(node),
+                    show(expected),
+                )
+            }
         }
     }
 }
 
-/// Identifies the network upgrades reported by the backing full node whose
-/// consensus branch IDs this build of Zallet cannot interpret.
+/// Identifies the ways in which the network upgrades reported by the backing full node
+/// are incompatible with this build of Zallet on `params`’s network.
 ///
-/// Upgrades with [`UpgradeStatus::Disabled`] are ignored: they have no activation
-/// height on the current network, and so will never take effect.
-fn detect_unknown_upgrades(upgrades: &[ReportedUpgrade]) -> Vec<UnknownUpgrade> {
+/// For each upgrade this checks two things:
+///
+/// * That this build recognizes the upgrade’s consensus branch ID, and so can interpret
+///   the consensus rules it selects.
+/// * That this build and the full node agree on the height at which those rules take
+///   effect.
+///
+/// An upgrade with no activation height on a side is treated as not scheduled there:
+/// [`UpgradeStatus::Disabled`] on the node, or a `None` from
+/// [`consensus::BranchId::height_bounds`] on our side. Such an upgrade never takes effect,
+/// so it is an incompatibility only when the two sides disagree about whether the upgrade
+/// is scheduled at all.
+fn detect_incompatibilities<P: consensus::Parameters>(
+    params: &P,
+    upgrades: &[ReportedUpgrade],
+) -> Vec<Incompatibility> {
     upgrades
         .iter()
         .filter_map(|upgrade| {
@@ -161,47 +219,59 @@ fn detect_unknown_upgrades(upgrades: &[ReportedUpgrade]) -> Vec<UnknownUpgrade> 
                 status,
             } = upgrade;
 
-            // If we can map the branch ID onto a set of consensus rules we were
-            // compiled with, then we understand this upgrade.
-            if consensus::BranchId::try_from(*branch_id).is_ok() {
-                None
-            } else {
-                let unknown = |pending_at| {
-                    Some(UnknownUpgrade {
+            // The height at which the full node switches to this upgrade’s consensus
+            // rules. A disabled upgrade never activates here.
+            let node_height = match status {
+                UpgradeStatus::Disabled => None,
+                UpgradeStatus::Active | UpgradeStatus::Pending => Some(*activation_height),
+            };
+
+            match consensus::BranchId::try_from(*branch_id) {
+                // We recognize this branch ID, so we know which consensus rules it
+                // selects. Verify that we also agree on where they take effect.
+                Ok(branch) => {
+                    let expected = branch
+                        .height_bounds(params)
+                        .map(|(activation, _)| u32::from(activation));
+                    (expected != node_height).then(|| Incompatibility::ActivationHeightMismatch {
                         branch_id: *branch_id,
                         name: name.clone(),
-                        pending_at,
+                        expected,
+                        node: node_height,
                     })
-                };
-
-                match status {
-                    // Never activates on this network, so we ignore it.
-                    UpgradeStatus::Disabled => None,
-                    UpgradeStatus::Active => unknown(None),
-                    UpgradeStatus::Pending => unknown(Some(*activation_height)),
                 }
+                // We cannot interpret this branch ID at all. Flag it unless it is
+                // disabled, in which case it will never take effect here.
+                Err(_) => node_height.map(|_| Incompatibility::UnknownUpgrade {
+                    branch_id: *branch_id,
+                    name: name.clone(),
+                    pending_at: match status {
+                        UpgradeStatus::Pending => Some(*activation_height),
+                        _ => None,
+                    },
+                }),
             }
         })
         .collect()
 }
 
-/// Refuses to continue if `chain`’s backing full node follows consensus rules that this
-/// build of Zallet does not recognize, and so cannot interpret correctly.
+/// Refuses to continue if `chain`’s backing full node follows consensus rules that are
+/// incompatible with this build of Zallet, and so cannot be interpreted correctly.
 pub(crate) async fn check_consensus_compatibility(chain: &impl Chain) -> Result<(), Error> {
     let upgrades = chain.reported_upgrades().await?;
 
-    let unknown = detect_unknown_upgrades(&upgrades);
-    if unknown.is_empty() {
+    let incompatibilities = detect_incompatibilities(chain.params(), &upgrades);
+    if incompatibilities.is_empty() {
         info!("Backing full node consensus rules are compatible with this Zallet build");
         return Ok(());
     }
 
-    let upgrades = unknown
+    let upgrades = incompatibilities
         .iter()
-        .map(UnknownUpgrade::describe)
+        .map(Incompatibility::describe)
         .collect::<Vec<_>>()
         .join(", ");
-    error!("Backing full node follows unrecognized consensus rules: {upgrades}");
+    error!("Backing full node follows incompatible consensus rules: {upgrades}");
     Err(ErrorKind::Init
         .context(fl!("err-init-incompatible-consensus", upgrades = upgrades))
         .into())
@@ -393,14 +463,14 @@ mod tests {
     };
     use zcash_protocol::{
         TxId,
-        consensus::{BlockHeight, BranchId},
+        consensus::{BlockHeight, BranchId, Network},
     };
 
     #[cfg(feature = "spend-index")]
     use super::SpendStatus;
     use super::{
-        BlockLocator, ChainBlock, ChainError, ChainTx, ChainView, ReportedUpgrade, UpgradeStatus,
-        detect_unknown_upgrades,
+        BlockLocator, ChainBlock, ChainError, ChainTx, ChainView, Incompatibility, ReportedUpgrade,
+        UpgradeStatus, detect_incompatibilities,
     };
     #[cfg(not(feature = "spend-index"))]
     use transparent::address::TransparentAddress;
@@ -553,48 +623,111 @@ mod tests {
         let _ = BlockLocator::from_blocks([block(10, 10), block(10, 9)]);
     }
 
+    /// The network whose activation heights we test against. Mainnet implements
+    /// [`zcash_protocol::consensus::Parameters`].
+    const PARAMS: Network = Network::MainNetwork;
+
     /// An invalid consensus branch ID, standing in for a network upgrade
     /// from the future that this build of Zallet has never heard of.
     const UNKNOWN_BRANCH_ID: u32 = 0xdead_beef;
 
-    fn upgrade(branch_id: u32, status: UpgradeStatus) -> ReportedUpgrade {
+    /// The mainnet activation height this build of Zallet expects for `branch`.
+    fn expected_height(branch: BranchId) -> u32 {
+        u32::from(
+            branch
+                .height_bounds(&PARAMS)
+                .expect("branch is scheduled on mainnet")
+                .0,
+        )
+    }
+
+    fn upgrade(branch_id: u32, height: u32, status: UpgradeStatus) -> ReportedUpgrade {
         ReportedUpgrade {
             branch_id,
-            // The upgrade name is diagnostic only; the branch ID and status drive the
+            // The upgrade name is diagnostic only; the branch ID and height drive the
             // check, so the name is fixed here.
             name: "test".into(),
-            activation_height: 1,
+            activation_height: height,
             status,
         }
     }
 
+    fn detect(upgrades: &[ReportedUpgrade]) -> Vec<Incompatibility> {
+        detect_incompatibilities(&PARAMS, upgrades)
+    }
+
     #[test]
-    fn recognized_upgrade_is_compatible() {
+    fn recognized_upgrade_with_matching_height_is_compatible() {
+        let branch = BranchId::Nu5;
+        let known = u32::from(branch);
+        let height = expected_height(branch);
+        assert!(detect(&[upgrade(known, height, UpgradeStatus::Active)]).is_empty());
+    }
+
+    #[test]
+    fn recognized_upgrade_with_mismatched_height_is_flagged() {
+        let branch = BranchId::Nu5;
+        let known = u32::from(branch);
+        let wrong = expected_height(branch) + 1;
+        let result = detect(&[upgrade(known, wrong, UpgradeStatus::Active)]);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            result[0],
+            Incompatibility::ActivationHeightMismatch {
+                branch_id,
+                expected: Some(_),
+                node: Some(node),
+                ..
+            } if branch_id == known && node == wrong
+        ));
+    }
+
+    #[test]
+    fn recognized_upgrade_disabled_by_node_is_flagged() {
+        // This build expects Nu5 to activate on mainnet, so a full node that reports it
+        // disabled disagrees about whether its consensus rules apply at all.
         let known = u32::from(BranchId::Nu5);
-        assert!(detect_unknown_upgrades(&[upgrade(known, UpgradeStatus::Active)]).is_empty());
+        let result = detect(&[upgrade(known, 0, UpgradeStatus::Disabled)]);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            result[0],
+            Incompatibility::ActivationHeightMismatch {
+                expected: Some(_),
+                node: None,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn unknown_active_upgrade_is_flagged() {
-        let unknown = detect_unknown_upgrades(&[upgrade(UNKNOWN_BRANCH_ID, UpgradeStatus::Active)]);
-        assert_eq!(unknown.len(), 1);
-        assert_eq!(unknown[0].branch_id, UNKNOWN_BRANCH_ID);
-        assert_eq!(unknown[0].pending_at, None);
+        let result = detect(&[upgrade(UNKNOWN_BRANCH_ID, 1, UpgradeStatus::Active)]);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            result[0],
+            Incompatibility::UnknownUpgrade {
+                branch_id: UNKNOWN_BRANCH_ID,
+                pending_at: None,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn unknown_pending_upgrade_is_flagged() {
-        let unknown =
-            detect_unknown_upgrades(&[upgrade(UNKNOWN_BRANCH_ID, UpgradeStatus::Pending)]);
-        assert_eq!(unknown.len(), 1);
-        assert_eq!(unknown[0].pending_at, Some(1));
+        let result = detect(&[upgrade(UNKNOWN_BRANCH_ID, 42, UpgradeStatus::Pending)]);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            result[0],
+            Incompatibility::UnknownUpgrade {
+                pending_at: Some(42),
+                ..
+            }
+        ));
     }
 
     #[test]
     fn unknown_disabled_upgrade_is_ignored() {
-        assert!(
-            detect_unknown_upgrades(&[upgrade(UNKNOWN_BRANCH_ID, UpgradeStatus::Disabled)])
-                .is_empty()
-        );
+        assert!(detect(&[upgrade(UNKNOWN_BRANCH_ID, 1, UpgradeStatus::Disabled)]).is_empty());
     }
 }
