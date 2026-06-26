@@ -165,6 +165,18 @@ err-init-incompatible-consensus =
     expects.
     Incompatible network upgrades: {$upgrades}.
     Upgrade {-zallet} to a release whose consensus rules match the full node.
+warn-init-pending-incompatible-consensus =
+    The backing full node is scheduled to activate consensus rules that this {-zallet}
+    build cannot interpret correctly. {-zallet} will operate normally until the chain
+    reaches height {$height}, then shut down to avoid presenting an incorrect view of the
+    chain.
+    Pending incompatible network upgrades: {$upgrades}.
+    Upgrade {-zallet} to a release whose consensus rules match the full node before then.
+warn-init-consensus-divergence-reached =
+    The chain has reached height {$height}, where the backing full node's consensus rules
+    diverge from what this {-zallet} build can interpret. Shutting down to avoid an
+    incorrect view of the chain. Upgrade {-zallet} to a release whose consensus rules match
+    the full node.
 
 ## Keystore errors
 

@@ -31,6 +31,7 @@
 //!   the `ChainView` being up to 100 blocks behind the wallet's view of the chain tip at
 //!   process start.
 
+use std::ops::ControlFlow;
 use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
@@ -69,7 +70,7 @@ use super::{
     chain::{Chain, ChainBlock, ChainError, ChainView},
     database::{Database, DbConnection},
 };
-use crate::{config::ZalletConfig, error::Error, network::Network};
+use crate::{config::ZalletConfig, error::Error, fl, network::Network};
 
 mod error;
 pub(crate) use error::SyncError;
@@ -85,6 +86,7 @@ impl WalletSync {
         config: &ZalletConfig,
         db: Database,
         chain: C,
+        shutdown_height: Option<BlockHeight>,
     ) -> Result<(TaskHandle, TaskHandle, TaskHandle, TaskHandle), Error> {
         let params = config.consensus.network();
         let recover_batch_size = config.sync.recover_batch_size();
@@ -131,6 +133,7 @@ impl WalletSync {
                     lower_boundary,
                     tip_change_signal_source,
                     decryptor,
+                    shutdown_height,
                 )
                 .await?;
                 Ok(())
@@ -399,6 +402,7 @@ where
 
 /// Keeps the wallet state up-to-date with the chain tip, and handles the mempool.
 #[tracing::instrument(skip_all)]
+#[allow(clippy::too_many_arguments)]
 async fn steady_state<C: Chain>(
     chain: C,
     params: &Network,
@@ -407,6 +411,7 @@ async fn steady_state<C: Chain>(
     lower_boundary: Arc<AtomicU32>,
     tip_change_signal: Arc<Notify>,
     decryptor: decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    shutdown_height: Option<BlockHeight>,
 ) -> Result<(), SyncError> {
     info!("Steady-state sync task started");
 
@@ -415,7 +420,7 @@ async fn steady_state<C: Chain>(
     tip_change_signal.notify_one();
 
     loop {
-        if let Err(error) = steady_state_iteration(
+        match steady_state_iteration(
             &chain,
             params,
             db_data,
@@ -423,19 +428,37 @@ async fn steady_state<C: Chain>(
             &lower_boundary,
             &tip_change_signal,
             &decryptor,
+            shutdown_height,
         )
         .await
         {
-            // A stale-view error means the captured snapshot referenced a non-finalized
-            // block that was reorged away mid-read. Discard the view, pause briefly, and
-            // loop to re-pin to the current tip. Progress already committed to the wallet
-            // (and recorded in `prev_tip`) is preserved across the retry.
-            if is_retryable(&error) {
-                warn!("Chain view became stale, re-pinning to the current tip: {error}");
-                time::sleep(REORG_RETRY_BACKOFF).await;
-                continue;
+            Ok(ControlFlow::Continue(())) => (),
+            // The chain reached a consensus-divergence height. Warn and end the task, which
+            // triggers a graceful shutdown of the whole wallet.
+            Ok(ControlFlow::Break(())) => {
+                if let Some(height) = shutdown_height {
+                    warn!(
+                        "{}",
+                        fl!(
+                            "warn-init-consensus-divergence-reached",
+                            height = u32::from(height)
+                        )
+                    );
+                }
+                return Ok(());
             }
-            return Err(error);
+            Err(error) => {
+                // A stale-view error means the captured snapshot referenced a non-finalized
+                // block that was reorged away mid-read. Discard the view, pause briefly, and
+                // loop to re-pin to the current tip. Progress already committed to the wallet
+                // (and recorded in `prev_tip`) is preserved across the retry.
+                if is_retryable(&error) {
+                    warn!("Chain view became stale, re-pinning to the current tip: {error}");
+                    time::sleep(REORG_RETRY_BACKOFF).await;
+                    continue;
+                }
+                return Err(error);
+            }
         }
     }
 }
@@ -443,6 +466,7 @@ async fn steady_state<C: Chain>(
 /// Performs one pass of [`steady_state`]: captures a fresh chain view, applies any new or
 /// reorged blocks to the wallet (advancing `prev_tip`), then streams the mempool until the
 /// view's tip changes.
+#[allow(clippy::too_many_arguments)]
 async fn steady_state_iteration<C: Chain>(
     chain: &C,
     params: &Network,
@@ -451,7 +475,8 @@ async fn steady_state_iteration<C: Chain>(
     lower_boundary: &AtomicU32,
     tip_change_signal: &Notify,
     decryptor: &decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
-) -> Result<(), SyncError> {
+    shutdown_height: Option<BlockHeight>,
+) -> Result<ControlFlow<()>, SyncError> {
     let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
     let current_tip = chain_view.tip().await.map_err(SyncError::Chain)?;
     let tip_changed = current_tip != *prev_tip;
@@ -495,6 +520,15 @@ async fn steady_state_iteration<C: Chain>(
         // Notify the wallet of block connections.
         while let Some(block) = blocks_to_apply.try_next().await.map_err(SyncError::Chain)? {
             let height = block.claimed_height();
+
+            // Stop before scanning the first block at or above a known consensus-divergence
+            // height: from here on the backing node follows rules this build cannot interpret,
+            // so scanning would corrupt the wallet's view. Returning ends the steady-state
+            // task, which triggers a graceful shutdown.
+            if shutdown_height.is_some_and(|h| height >= h) {
+                return Ok(ControlFlow::Break(()));
+            }
+
             assert_eq!(height, prev_tip.height + 1);
             let current_block = ChainBlock {
                 height,
@@ -537,7 +571,7 @@ async fn steady_state_iteration<C: Chain>(
         None => time::sleep(Duration::from_millis(500)).await,
     }
 
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }
 
 /// Recovers historic wallet state.
