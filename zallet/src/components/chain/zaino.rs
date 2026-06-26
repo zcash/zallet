@@ -252,10 +252,14 @@ impl ZainoChain {
 
         Ok((chain, task))
     }
+}
+
+impl Chain for ZainoChain {
+    type View = ZainoChainView;
 
     /// Refuses to continue if the backing full node follows consensus rules that
     /// this build of Zallet does not recognize.
-    pub(crate) async fn check_consensus_compatibility(&self) -> Result<(), Error> {
+    async fn check_consensus_compatibility(&self) -> Result<(), Error> {
         let info = self
             .fetcher
             .get_blockchain_info()
@@ -278,10 +282,6 @@ impl ZainoChain {
             .context(fl!("err-init-incompatible-consensus", upgrades = upgrades))
             .into())
     }
-}
-
-impl Chain for ZainoChain {
-    type View = ZainoChainView;
 
     async fn broadcast_transaction(&self, tx: &Transaction) -> Result<(), ChainError> {
         let mut tx_bytes = vec![];

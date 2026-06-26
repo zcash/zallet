@@ -22,6 +22,8 @@ use zcash_primitives::{
 };
 use zcash_protocol::{TxId, consensus::BlockHeight};
 
+use crate::error::Error;
+
 mod error;
 pub(crate) use error::ChainError;
 
@@ -53,6 +55,10 @@ pub(crate) type ChainBackend = ZebraChain;
 pub(crate) trait Chain: Clone + Send + Sync + 'static {
     /// A consistent, reorg-immune view of the chain captured by [`Chain::snapshot`].
     type View: ChainView;
+
+    /// Refuses to continue if the backing full node follows consensus rules that this
+    /// build of Zallet does not recognize, and so cannot interpret correctly.
+    fn check_consensus_compatibility(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Broadcasts a transaction to the network's mempool.
     fn broadcast_transaction(

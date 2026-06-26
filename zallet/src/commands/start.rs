@@ -6,7 +6,12 @@ use tokio::{pin, select};
 use crate::{
     cli::StartCmd,
     commands::AsyncRunnable,
-    components::{chain::ChainBackend, database::Database, json_rpc::JsonRpc, sync::WalletSync},
+    components::{
+        chain::{Chain, ChainBackend},
+        database::Database,
+        json_rpc::JsonRpc,
+        sync::WalletSync,
+    },
     config::ZalletConfig,
     error::Error,
     fl,

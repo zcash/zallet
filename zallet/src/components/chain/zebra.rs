@@ -120,6 +120,13 @@ impl ZebraChain {
 impl Chain for ZebraChain {
     type View = ZebraChainView<ReadStateChainReader>;
 
+    async fn check_consensus_compatibility(&self) -> Result<(), Error> {
+        // The in-process `zebra-state` backend derives consensus rules from the same
+        // `zebra-chain` crate this build of Zallet is compiled against, so it can never
+        // follow network upgrades that Zallet does not recognize.
+        Ok(())
+    }
+
     async fn broadcast_transaction(&self, tx: &Transaction) -> Result<(), ChainError> {
         let mut tx_bytes = vec![];
         tx.write(&mut tx_bytes).map_err(ChainError::backend)?;
