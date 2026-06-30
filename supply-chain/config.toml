@@ -30,6 +30,9 @@ audit-as-crates-io = false
 
 [policy.incrementalmerkletree]
 
+[policy.pczt]
+audit-as-crates-io = false
+
 [policy.shardtree]
 
 [policy.zcash_address]
@@ -392,6 +395,18 @@ criteria = "safe-to-deploy"
 
 [[exemptions.daggy]]
 version = "0.8.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.darling]]
+version = "0.23.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.darling_core]]
+version = "0.23.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.darling_macro]]
+version = "0.23.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.deadpool]]
@@ -1260,6 +1275,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.serde_spanned]]
 version = "1.1.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_with]]
+version = "3.21.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_with_macros]]
+version = "3.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.serdect]]

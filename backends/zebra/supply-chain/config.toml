@@ -30,6 +30,9 @@ audit-as-crates-io = false
 
 [policy.incrementalmerkletree]
 
+[policy.pczt]
+audit-as-crates-io = false
+
 [policy.shardtree]
 
 [policy.tower-batch-control]
@@ -426,12 +429,24 @@ criteria = "safe-to-deploy"
 version = "0.13.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.darling]]
+version = "0.21.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.darling_core]]
 version = "0.13.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.darling_core]]
+version = "0.21.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.darling_macro]]
 version = "0.20.11"
+criteria = "safe-to-deploy"
+
+[[exemptions.darling_macro]]
+version = "0.21.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.deadpool]]
@@ -1483,6 +1498,14 @@ version = "0.7.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.serde_with]]
+version = "3.17.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_with]]
+version = "3.17.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_with_macros]]
 version = "3.17.0"
 criteria = "safe-to-deploy"
 
