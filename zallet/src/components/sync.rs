@@ -106,8 +106,14 @@ impl WalletSync {
 
         // Ensure the wallet is in a state that the sync tasks can work with.
         let mut db_data = db.handle().await?;
-        let (starting_tip, starting_boundary) =
-            initialize(&chain, &params, db_data.as_mut(), decryptor.clone()).await?;
+        let (starting_tip, starting_boundary) = initialize(
+            &chain,
+            &params,
+            db_data.as_mut(),
+            decryptor.clone(),
+            shutdown_height,
+        )
+        .await?;
 
         // Manage the boundary between the `steady_state` and `recover_history` tasks with
         // an atomic.
@@ -152,6 +158,7 @@ impl WalletSync {
                     upper_boundary,
                     decryptor,
                     recover_batch_size,
+                    shutdown_height,
                 )
                 .await?;
                 Ok(())
@@ -192,6 +199,7 @@ async fn initialize<C: Chain>(
     params: &Network,
     db_data: &mut DbConnection,
     decryptor: decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    shutdown_height: Option<BlockHeight>,
 ) -> Result<(ChainBlock, BlockHeight), SyncError> {
     info!("Initializing wallet for syncing");
 
@@ -264,7 +272,15 @@ async fn initialize<C: Chain>(
                                     current_tip.height
                                 )))
                             })?;
-                        steps::scan_block(&chain_view, db_data, params, tip_block, &decryptor).await
+                        steps::scan_block(
+                            &chain_view,
+                            db_data,
+                            params,
+                            tip_block,
+                            &decryptor,
+                            shutdown_height,
+                        )
+                        .await
                     };
                     if let Err(e) = attempt.await {
                         warn!(
@@ -278,7 +294,22 @@ async fn initialize<C: Chain>(
             }
         };
 
-        steps::scan_blocks(chain_view, db_data, params, &scan_range, &decryptor).await?;
+        if steps::scan_blocks(
+            chain_view,
+            db_data,
+            params,
+            &scan_range,
+            &decryptor,
+            shutdown_height,
+        )
+        .await?
+        .is_break()
+        {
+            // The chain has already reached the consensus-divergence height during initial
+            // scanning. Stop here with the tip we have; `steady_state` will shut the wallet
+            // down rather than advance past the boundary.
+            break (current_tip, starting_boundary);
+        }
     };
 
     info!(
@@ -434,17 +465,16 @@ async fn steady_state<C: Chain>(
         {
             Ok(ControlFlow::Continue(())) => (),
             // The chain reached a consensus-divergence height. Warn and end the task, which
-            // triggers a graceful shutdown of the whole wallet.
-            Ok(ControlFlow::Break(())) => {
-                if let Some(height) = shutdown_height {
-                    warn!(
-                        "{}",
-                        fl!(
-                            "warn-init-consensus-divergence-reached",
-                            height = u32::from(height)
-                        )
-                    );
-                }
+            // triggers a graceful shutdown of the whole wallet. The iteration reports the
+            // boundary height it stopped at, so we log that directly.
+            Ok(ControlFlow::Break(height)) => {
+                warn!(
+                    "{}",
+                    fl!(
+                        "warn-init-consensus-divergence-reached",
+                        height = u32::from(height)
+                    )
+                );
                 return Ok(());
             }
             Err(error) => {
@@ -476,7 +506,7 @@ async fn steady_state_iteration<C: Chain>(
     tip_change_signal: &Notify,
     decryptor: &decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
     shutdown_height: Option<BlockHeight>,
-) -> Result<ControlFlow<()>, SyncError> {
+) -> Result<ControlFlow<BlockHeight>, SyncError> {
     let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
     let current_tip = chain_view.tip().await.map_err(SyncError::Chain)?;
     let tip_changed = current_tip != *prev_tip;
@@ -520,27 +550,43 @@ async fn steady_state_iteration<C: Chain>(
         // Notify the wallet of block connections.
         while let Some(block) = blocks_to_apply.try_next().await.map_err(SyncError::Chain)? {
             let height = block.claimed_height();
-
-            // Stop before scanning the first block at or above a known consensus-divergence
-            // height: from here on the backing node follows rules this build cannot interpret,
-            // so scanning would corrupt the wallet's view. Returning ends the steady-state
-            // task, which triggers a graceful shutdown.
-            if shutdown_height.is_some_and(|h| height >= h) {
-                return Ok(ControlFlow::Break(()));
-            }
-
             assert_eq!(height, prev_tip.height + 1);
             let current_block = ChainBlock {
                 height,
                 hash: block.header().hash(),
             };
-            db_data.update_chain_tip(height)?;
 
-            steps::scan_block(&chain_view, db_data, params, block, decryptor).await?;
+            // `scan_block` refuses to scan at or above a known consensus-divergence height,
+            // reporting the boundary instead. From there the backing node follows rules this
+            // build cannot interpret, so we stop without recording the unscanned block as our
+            // tip; ending the task triggers a graceful shutdown.
+            match steps::scan_block(
+                &chain_view,
+                db_data,
+                params,
+                block,
+                decryptor,
+                shutdown_height,
+            )
+            .await?
+            {
+                ControlFlow::Break(boundary) => return Ok(ControlFlow::Break(boundary)),
+                ControlFlow::Continue(()) => {}
+            }
+            db_data.update_chain_tip(height)?;
 
             // Now that we're done applying the block, update our chain pointer.
             *prev_tip = current_block;
         }
+    }
+
+    // The backing node's tip may itself sit at or beyond the divergence height — e.g. the
+    // chain advanced past it between the startup compatibility check and now, leaving the
+    // apply loop above with no blocks below the boundary to scan. In that case we must not
+    // stream its mempool either, as those transactions are validated under rules this build
+    // cannot interpret. Stop and shut down.
+    if let Some(boundary) = shutdown_height.filter(|h| current_tip.height >= *h) {
+        return Ok(ControlFlow::Break(boundary));
     }
 
     // If we have caught up to the chain tip, stream the mempool state into the wallet.
@@ -585,6 +631,7 @@ async fn recover_history<C: Chain>(
     upper_boundary: Arc<AtomicU32>,
     decryptor: decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
     batch_size: u32,
+    shutdown_height: Option<BlockHeight>,
 ) -> Result<(), SyncError> {
     info!("History recovery sync task started");
 
@@ -628,7 +675,22 @@ async fn recover_history<C: Chain>(
             })
         }) {
             let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
-            steps::scan_blocks(chain_view, db_data, params, &scan_range, &decryptor).await?;
+            if steps::scan_blocks(
+                chain_view,
+                db_data,
+                params,
+                &scan_range,
+                &decryptor,
+                shutdown_height,
+            )
+            .await?
+            .is_break()
+            {
+                // Reached the consensus-divergence height. History recovery operates below
+                // the boundary in practice, so this is belt-and-suspenders; stop scanning
+                // this range and let the next loop re-evaluate.
+                break;
+            }
 
             // If scanning these blocks caused a suggested range to be added that has a
             // higher priority than the current range, invalidate the current ranges.

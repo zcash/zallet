@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::ops::ControlFlow;
 
 use futures::TryStreamExt as _;
 use jsonrpsee::tracing::info;
@@ -15,6 +16,7 @@ use zcash_client_backend::{
 };
 use zcash_client_sqlite::AccountUuid;
 use zcash_primitives::block::Block;
+use zcash_protocol::consensus::BlockHeight;
 use zip32::Scope;
 
 use crate::{
@@ -87,7 +89,26 @@ pub(super) async fn scan_blocks<V: ChainView>(
     params: &Network,
     scan_range: &ScanRange,
     decryptor: &decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
-) -> Result<(), SyncError> {
+    shutdown_height: Option<BlockHeight>,
+) -> Result<ControlFlow<BlockHeight>, SyncError> {
+    // Clamp the range to stop before any known consensus-divergence height: scanning at or
+    // beyond it would interpret the chain under rules this build does not follow. Anything we
+    // trim means we reached the boundary, which we report so the caller can shut down.
+    let block_range = scan_range.block_range();
+    let end = shutdown_height.map_or(block_range.end, |h| h.min(block_range.end));
+    let reached_boundary = end < block_range.end;
+    if end <= block_range.start {
+        // The whole range is at or beyond the divergence height; nothing left to scan.
+        return Ok(ControlFlow::Break(end));
+    }
+    let clamped;
+    let scan_range = if reached_boundary {
+        clamped = ScanRange::from_parts(block_range.start..end, scan_range.priority());
+        &clamped
+    } else {
+        scan_range
+    };
+
     // Ignore scan ranges beyond the end of the current chain tip (which indicates a race
     // with a chain reorg).
     if let Some(from_state) = chain_view
@@ -153,9 +174,16 @@ pub(super) async fn scan_blocks<V: ChainView>(
             scan_range.block_range().start - 1,
             chain_view.tip().await.map_err(SyncError::Chain)?.height,
         );
+        // The range starts beyond the chain view's tip (a reorg race), so we scanned nothing
+        // and have not reached the divergence boundary; let the caller retry.
+        return Ok(ControlFlow::Continue(()));
     }
 
-    Ok(())
+    Ok(if reached_boundary {
+        ControlFlow::Break(end)
+    } else {
+        ControlFlow::Continue(())
+    })
 }
 
 /// Scans a block in the main chain.
@@ -165,8 +193,16 @@ pub(super) async fn scan_block<V: ChainView>(
     params: &Network,
     block: Block,
     decryptor: &decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
-) -> Result<(), SyncError> {
+    shutdown_height: Option<BlockHeight>,
+) -> Result<ControlFlow<BlockHeight>, SyncError> {
     let height = block.claimed_height();
+
+    // Refuse to scan at or beyond a known consensus-divergence height: from here on the
+    // backing node follows rules this build cannot interpret, so scanning would corrupt the
+    // wallet's view. Signal the boundary so the caller can shut down gracefully.
+    if shutdown_height.is_some_and(|h| height >= h) {
+        return Ok(ControlFlow::Break(height));
+    }
 
     let from_state = chain_view
         .tree_state_as_of(height - 1)
@@ -214,5 +250,5 @@ pub(super) async fn scan_block<V: ChainView>(
 
     tokio::task::block_in_place(|| db_data.put_blocks(&from_state, vec![scanned]))?;
 
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }
