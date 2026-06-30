@@ -54,6 +54,16 @@ mod list_unspent;
 mod lock_wallet;
 #[cfg(zallet_build = "wallet")]
 mod openrpc;
+// PCZT methods. The stateless roles (combine, prove, extract) and their shared
+// helpers are available in every build; create and sign require wallet state.
+mod pczt_combine;
+mod pczt_common;
+#[cfg(zallet_build = "wallet")]
+mod pczt_create;
+mod pczt_extract;
+mod pczt_prove;
+#[cfg(zallet_build = "wallet")]
+mod pczt_sign;
 #[cfg(zallet_build = "wallet")]
 mod recover_accounts;
 mod stop;
@@ -276,6 +286,37 @@ pub(crate) trait Rpc {
     /// - `hexstring` (string, required): The hex-encoded script.
     #[method(name = "decodescript")]
     async fn decode_script(&self, hexstring: &str) -> decode_script::Response;
+
+    /// Combines multiple PCZTs (for the same transaction) into one.
+    ///
+    /// This applies the Combiner role, merging the per-party contributions
+    /// (proofs and signatures produced in parallel) into a single PCZT.
+    ///
+    /// # Arguments
+    /// - `pczts` (array, required) The base64-encoded PCZTs to combine.
+    #[method(name = "pczt_combine")]
+    async fn pczt_combine(&self, pczts: Vec<String>) -> pczt_combine::Response;
+
+    /// Adds the zero-knowledge proofs required by a PCZT.
+    ///
+    /// Creates the Sapling and/or Orchard proofs for the PCZT's shielded
+    /// components. This must be done before the transaction can be extracted.
+    ///
+    /// # Arguments
+    /// - `pczt` (string, required) The base64-encoded PCZT to add proofs to.
+    #[method(name = "pczt_prove")]
+    async fn pczt_prove(&self, pczt: &str) -> pczt_prove::Response;
+
+    /// Extracts the final, network-ready transaction from a completed PCZT.
+    ///
+    /// Finalizes the transparent spends and verifies all proofs and signatures
+    /// before returning the hex-encoded transaction. Fails if the PCZT is not
+    /// fully proven and signed.
+    ///
+    /// # Arguments
+    /// - `pczt` (string, required) The base64-encoded PCZT to extract from.
+    #[method(name = "pczt_extract")]
+    async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response;
 }
 
 /// The wallet-specific JSON-RPC interface, containing the methods only provided in the
@@ -739,6 +780,40 @@ pub(crate) trait WalletRpc {
         zaddr: &str,
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response;
+
+    /// Creates a PCZT from a transaction proposal.
+    ///
+    /// Selects inputs and computes change for the given recipients, producing a
+    /// complete (but unproven and unsigned) PCZT. This is the PCZT-based
+    /// replacement for `createrawtransaction` and `fundrawtransaction`.
+    ///
+    /// # Arguments
+    /// - `from_address` (string, required) The address to send funds from.
+    /// - `amounts` (array, required) An array of recipient amounts with fields:
+    ///   - `address` (string, required) Recipient address.
+    ///   - `amount` (numeric, required) Amount in ZEC.
+    ///   - `memo` (string, optional) Optional memo for shielded recipients.
+    /// - `minconf` (numeric, optional) Minimum confirmations for inputs.
+    /// - `privacy_policy` (string, optional) Privacy policy for the transaction.
+    #[method(name = "pczt_create")]
+    async fn pczt_create(
+        &self,
+        from_address: String,
+        amounts: Vec<pczt_create::AmountParam>,
+        minconf: Option<u32>,
+        privacy_policy: Option<String>,
+    ) -> pczt_create::Response;
+
+    /// Signs a PCZT with the wallet's keys.
+    ///
+    /// Signs every input the wallet holds keys for. Inputs belonging to other
+    /// keys are left unsigned and reported, unless `strict` is set.
+    ///
+    /// # Arguments
+    /// - `pczt` (string, required) The base64-encoded PCZT to sign.
+    /// - `strict` (bool, optional) If true, fail if any inputs cannot be signed.
+    #[method(name = "pczt_sign")]
+    async fn pczt_sign(&self, pczt: &str, strict: Option<bool>) -> pczt_sign::Response;
 }
 
 pub(crate) struct RpcImpl<C: Chain> {
@@ -941,6 +1016,18 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
 
     async fn decode_script(&self, hexstring: &str) -> decode_script::Response {
         decode_script::call(self.wallet().await?.params(), hexstring)
+    }
+
+    async fn pczt_combine(&self, pczts: Vec<String>) -> pczt_combine::Response {
+        pczt_combine::call(pczts)
+    }
+
+    async fn pczt_prove(&self, pczt: &str) -> pczt_prove::Response {
+        pczt_prove::call(pczt).await
+    }
+
+    async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response {
+        pczt_extract::call(pczt).await
     }
 }
 
@@ -1159,5 +1246,26 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response {
         z_export_viewing_key::call(self.wallet().await?.as_ref(), &self.keystore, zaddr, ivk).await
+    }
+
+    async fn pczt_create(
+        &self,
+        from_address: String,
+        amounts: Vec<pczt_create::AmountParam>,
+        minconf: Option<u32>,
+        privacy_policy: Option<String>,
+    ) -> pczt_create::Response {
+        pczt_create::call(
+            self.wallet().await?,
+            from_address,
+            amounts,
+            minconf,
+            privacy_policy,
+        )
+        .await
+    }
+
+    async fn pczt_sign(&self, pczt: &str, strict: Option<bool>) -> pczt_sign::Response {
+        pczt_sign::call(self.wallet().await?, self.keystore.clone(), pczt, strict).await
     }
 }
