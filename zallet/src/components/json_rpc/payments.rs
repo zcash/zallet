@@ -13,7 +13,7 @@ use zcash_client_backend::{
 };
 use zcash_client_sqlite::wallet::Account;
 use zcash_keys::address::Address;
-use zcash_protocol::{PoolType, ShieldedProtocol, TxId, memo::MemoBytes, value::Zatoshis};
+use zcash_protocol::{PoolType, ShieldedPool, TxId, memo::MemoBytes, value::Zatoshis};
 
 use crate::{
     components::{chain::Chain, database::DbConnection},
@@ -300,13 +300,15 @@ pub(super) fn enforce_privacy_policy<FeeRuleT, NoteRef>(
             PoolType::SAPLING => step.shielded_inputs().iter().any(|s_in| {
                 s_in.notes()
                     .iter()
-                    .any(|note| matches!(note.note().protocol(), ShieldedProtocol::Sapling))
+                    .any(|note| matches!(note.note().protocol(), ShieldedPool::Sapling))
             }),
             PoolType::ORCHARD => step.shielded_inputs().iter().any(|s_in| {
                 s_in.notes()
                     .iter()
-                    .any(|note| matches!(note.note().protocol(), ShieldedProtocol::Orchard))
+                    .any(|note| matches!(note.note().protocol(), ShieldedPool::Orchard))
             }),
+            // The wallet does not yet spend Ironwood notes, so no step has Ironwood inputs.
+            PoolType::Shielded(ShieldedPool::Ironwood) => false,
         };
         let output_in_pool =
             |pool_type: PoolType| step.payment_pools().values().any(|pool| *pool == pool_type);

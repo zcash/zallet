@@ -46,7 +46,7 @@ use std::ops::Range;
 use tokio::{sync::Notify, time};
 #[cfg(not(feature = "spend-index"))]
 use zcash_client_backend::data_api::{
-    InputSource, TransactionsInvolvingAddress, TransparentOutputFilter,
+    CoinbaseFilter, InputSource, TransactionsInvolvingAddress,
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
 use zcash_client_backend::{
@@ -665,7 +665,7 @@ async fn service_address_request<V: ChainView>(
         &address,
         TargetHeight::from(view_tip + 1),
         ConfirmationsPolicy::MIN,
-        TransparentOutputFilter::All,
+        CoinbaseFilter::AllTransparentOutputs,
     )?;
     let any_spent = our_outputs.iter().any(|output| {
         let outpoint = output.outpoint();

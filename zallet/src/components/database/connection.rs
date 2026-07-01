@@ -10,10 +10,10 @@ use transparent::{address::TransparentAddress, bundle::OutPoint};
 use zcash_client_backend::{
     address::UnifiedAddress,
     data_api::{
-        AccountBirthday, AccountMeta, AddressInfo, Balance, DecryptedTransaction, InputSource,
-        NoteFilter, ORCHARD_SHARD_HEIGHT, ReceivedNotes, ReceivedTransactionOutput,
-        SAPLING_SHARD_HEIGHT, TargetValue, TransparentKeyOrigin, TransparentOutputFilter,
-        WalletCommitmentTrees, WalletRead, WalletWrite, Zip32Derivation,
+        AccountBirthday, AccountMeta, AddressInfo, Balance, CoinbaseFilter, DecryptedTransaction,
+        InputSource, NoteFilter, ORCHARD_SHARD_HEIGHT, ReceivedNotes, ReceivedTransactionOutput,
+        SAPLING_SHARD_HEIGHT, TargetValue, TransparentKeyOrigin, WalletCommitmentTrees, WalletRead,
+        WalletWrite, Zip32Derivation,
         chain::ChainState,
         error::{FindAccountForAddressError, RewindError},
         wallet::{ConfirmationsPolicy, TargetHeight},
@@ -23,7 +23,7 @@ use zcash_client_backend::{
 };
 use zcash_client_sqlite::{WalletDb, util::SystemClock};
 use zcash_primitives::{block::BlockHash, transaction::Transaction};
-use zcash_protocol::{ShieldedProtocol, consensus::BlockHeight};
+use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
 use zip32::DiversifierIndex;
 
 #[cfg(feature = "zcashd-import")]
@@ -456,7 +456,7 @@ impl InputSource for DbConnection {
     fn get_spendable_note(
         &self,
         txid: &zcash_protocol::TxId,
-        protocol: ShieldedProtocol,
+        protocol: ShieldedPool,
         index: u32,
         target_height: TargetHeight,
     ) -> Result<Option<ReceivedNote<Self::NoteRef, Note>>, Self::Error> {
@@ -467,7 +467,7 @@ impl InputSource for DbConnection {
         &self,
         account: Self::AccountId,
         target_value: TargetValue,
-        sources: &[ShieldedProtocol],
+        sources: &[ShieldedPool],
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         exclude: &[Self::NoteRef],
@@ -487,7 +487,7 @@ impl InputSource for DbConnection {
     fn select_unspent_notes(
         &self,
         account: Self::AccountId,
-        sources: &[ShieldedProtocol],
+        sources: &[ShieldedPool],
         target_height: TargetHeight,
         exclude: &[Self::NoteRef],
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
@@ -507,7 +507,7 @@ impl InputSource for DbConnection {
         address: &TransparentAddress,
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
-        output_filter: TransparentOutputFilter,
+        output_filter: CoinbaseFilter,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         self.with(|db_data| {
             db_data.get_spendable_transparent_outputs(

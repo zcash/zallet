@@ -35,9 +35,10 @@ impl Network {
                 // subsequent specified NU (if any).
                 #[cfg(zcash_unstable = "nu7")]
                 let nu7 = find_nu(consensus::BranchId::Nu7);
-                let nu6_2 = find_nu(consensus::BranchId::Nu6_2);
+                let nu6_3 = find_nu(consensus::BranchId::Nu6_3);
                 #[cfg(zcash_unstable = "nu7")]
-                let nu6_2 = nu6_2.or(nu7);
+                let nu6_3 = nu6_3.or(nu7);
+                let nu6_2 = find_nu(consensus::BranchId::Nu6_2).or(nu6_3);
                 let nu6_1 = find_nu(consensus::BranchId::Nu6_1).or(nu6_2);
                 let nu6 = find_nu(consensus::BranchId::Nu6).or(nu6_1);
                 let nu5 = find_nu(consensus::BranchId::Nu5).or(nu6);
@@ -57,6 +58,7 @@ impl Network {
                     nu6,
                     nu6_1,
                     nu6_2,
+                    nu6_3,
                     #[cfg(zcash_unstable = "nu7")]
                     nu7,
                 })

@@ -3,7 +3,7 @@ use jsonrpsee::core::RpcResult;
 use schemars::JsonSchema;
 use serde::Serialize;
 use zcash_client_backend::data_api::{InputSource, NoteFilter, WalletRead, wallet::TargetHeight};
-use zcash_protocol::{ShieldedProtocol, value::Zatoshis};
+use zcash_protocol::{ShieldedPool, value::Zatoshis};
 
 use crate::components::{
     database::DbConnection,
@@ -63,10 +63,10 @@ pub(crate) fn call(
             .get_account_metadata(account_id, &selector, target_height, &[])
             .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
-        if let Some(note_count) = account_metadata.note_count(ShieldedProtocol::Sapling) {
+        if let Some(note_count) = account_metadata.note_count(ShieldedPool::Sapling) {
             sapling += note_count as u32;
         }
-        if let Some(note_count) = account_metadata.note_count(ShieldedProtocol::Orchard) {
+        if let Some(note_count) = account_metadata.note_count(ShieldedPool::Orchard) {
             orchard += note_count as u32;
         }
     }

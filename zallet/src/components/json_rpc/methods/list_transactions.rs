@@ -7,7 +7,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_protocol::{
-    PoolType, ShieldedProtocol, TxId,
+    PoolType, ShieldedPool, TxId,
     memo::{Memo, MemoBytes},
     value::{ZatBalance, Zatoshis},
 };
@@ -57,10 +57,14 @@ impl WalletTxOutput {
             0 => Some(PoolType::Transparent),
             2 => Some(PoolType::SAPLING),
             3 => Some(PoolType::ORCHARD),
+            4 => Some(PoolType::Shielded(ShieldedPool::Ironwood)),
             _ => None,
         }
     }
 
+    /// Builds the output detail for a `v_tx_outputs` row, or `None` if the output
+    /// belongs to a pool that Zallet does not yet surface (Ironwood), so that the
+    /// output is elided from `listtransactions` rather than failing the whole call.
     #[allow(clippy::too_many_arguments)]
     fn new(
         pool_code: i64,
@@ -71,16 +75,20 @@ impl WalletTxOutput {
         value: i64,
         is_change: bool,
         memo: Option<Vec<u8>>,
-    ) -> Result<Self, SqliteClientError> {
-        Ok(Self {
-            pool: match Self::parse_pool_code(pool_code).ok_or(SqliteClientError::CorruptedData(
-                format!("Invalid pool code: {pool_code}"),
-            ))? {
-                PoolType::Transparent => POOL_TRANSPARENT,
-                PoolType::Shielded(ShieldedProtocol::Sapling) => POOL_SAPLING,
-                PoolType::Shielded(ShieldedProtocol::Orchard) => POOL_ORCHARD,
-            }
-            .to_string(),
+    ) -> Result<Option<Self>, SqliteClientError> {
+        let pool = match Self::parse_pool_code(pool_code).ok_or(
+            SqliteClientError::CorruptedData(format!("Invalid pool code: {pool_code}")),
+        )? {
+            PoolType::Transparent => POOL_TRANSPARENT,
+            PoolType::Shielded(ShieldedPool::Sapling) => POOL_SAPLING,
+            PoolType::Shielded(ShieldedPool::Orchard) => POOL_ORCHARD,
+            // Ironwood is not yet supported; elide such outputs from the results.
+            PoolType::Shielded(ShieldedPool::Ironwood) => return Ok(None),
+        }
+        .to_string();
+
+        Ok(Some(Self {
+            pool,
             output_index,
             from_account: from_account.map(|u| u.to_string()),
             to_account: to_account.map(|u| u.to_string()),
@@ -106,7 +114,7 @@ impl WalletTxOutput {
                 .map_err(|e| {
                     SqliteClientError::CorruptedData(format!("Invalid memo data: {e:?}"))
                 })?,
-        })
+        }))
     }
 }
 
@@ -300,7 +308,10 @@ fn query_transactions(
                             )
                         },
                     )?
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
 
                 WalletTx::from_parts(
                     row.get("account_uuid")?,
