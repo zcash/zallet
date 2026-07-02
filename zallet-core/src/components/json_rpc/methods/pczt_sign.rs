@@ -10,7 +10,10 @@ use transparent::keys::{NonHardenedChildIndex, TransparentKeyScope};
 use zcash_keys::keys::UnifiedSpendingKey;
 use zip32::{AccountId, fingerprint::SeedFingerprint};
 
-use super::pczt_common::{decode_pczt_base64, encode_pczt_base64};
+use super::pczt_common::{
+    PROP_ACCOUNT_INDEX, PROP_ADDRESS_INDEX, PROP_SCOPE, PROP_SEED_FINGERPRINT, decode_key_scope,
+    decode_pczt_base64, encode_pczt_base64,
+};
 use crate::components::{database::DbHandle, json_rpc::server::LegacyCode, keystore::KeyStore};
 
 pub(crate) type Response = RpcResult<ResultType>;
@@ -56,10 +59,10 @@ pub(crate) async fn call(
     let seed_fp_bytes = pczt
         .global()
         .proprietary()
-        .get("zallet.v1.seed_fingerprint")
+        .get(PROP_SEED_FINGERPRINT)
         .ok_or_else(|| {
             LegacyCode::InvalidParameter
-                .with_static("Missing signing hint: zallet.v1.seed_fingerprint")
+                .with_message(format!("Missing signing hint: {PROP_SEED_FINGERPRINT}"))
         })?;
 
     let seed_fp =
@@ -70,10 +73,10 @@ pub(crate) async fn call(
     let account_idx_bytes = pczt
         .global()
         .proprietary()
-        .get("zallet.v1.account_index")
+        .get(PROP_ACCOUNT_INDEX)
         .ok_or_else(|| {
             LegacyCode::InvalidParameter
-                .with_static("Missing signing hint: zallet.v1.account_index")
+                .with_message(format!("Missing signing hint: {PROP_ACCOUNT_INDEX}"))
         })?;
 
     let account_idx_u32 =
@@ -95,34 +98,27 @@ pub(crate) async fn call(
             .iter()
             .enumerate()
             .map(|(i, input)| {
-                let scope_bytes = input.proprietary().get("zallet.v1.scope")?;
-                let addr_idx_bytes = input.proprietary().get("zallet.v1.address_index")?;
+                let scope_bytes = input.proprietary().get(PROP_SCOPE)?;
+                let addr_idx_bytes = input.proprietary().get(PROP_ADDRESS_INDEX)?;
 
                 let scope_u32 = match scope_bytes.as_slice().try_into() {
                     Ok(bytes) => u32::from_le_bytes(bytes),
                     Err(_) => {
-                        tracing::warn!("Malformed zallet.v1.scope for transparent input {i}");
+                        tracing::warn!("Malformed {PROP_SCOPE} for transparent input {i}");
                         return None;
                     }
                 };
                 let addr_idx_u32 = match addr_idx_bytes.as_slice().try_into() {
                     Ok(bytes) => u32::from_le_bytes(bytes),
                     Err(_) => {
-                        tracing::warn!(
-                            "Malformed zallet.v1.address_index for transparent input {i}"
-                        );
+                        tracing::warn!("Malformed {PROP_ADDRESS_INDEX} for transparent input {i}");
                         return None;
                     }
                 };
 
-                let scope = match scope_u32 {
-                    0 => TransparentKeyScope::EXTERNAL,
-                    1 => TransparentKeyScope::INTERNAL,
-                    2 => TransparentKeyScope::EPHEMERAL,
-                    _ => {
-                        tracing::warn!("Invalid scope {scope_u32} for transparent input {i}");
-                        return None;
-                    }
+                let Some(scope) = decode_key_scope(scope_u32) else {
+                    tracing::warn!("Invalid scope {scope_u32} for transparent input {i}");
+                    return None;
                 };
 
                 let addr_idx = NonHardenedChildIndex::from_index(addr_idx_u32).or_else(|| {

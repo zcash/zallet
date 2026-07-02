@@ -8,7 +8,7 @@ use serde::Serialize;
 
 // Imports to work around deficiencies in the build script.
 #[cfg(zallet_build = "wallet")]
-use super::{super::asyncop::OperationId, pczt_create, recover_accounts};
+use super::{super::asyncop::OperationId, recover_accounts};
 
 // See `generate_rpc_help()` in `build.rs` for how this is generated.
 include!(concat!(env!("OUT_DIR"), "/rpc_openrpc.rs"));

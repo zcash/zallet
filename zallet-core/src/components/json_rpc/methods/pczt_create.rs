@@ -4,51 +4,39 @@
 //! `fundrawtransaction`: it selects inputs and computes change for a set of
 //! recipients, producing a complete (but unproven and unsigned) PCZT.
 
-use std::collections::HashSet;
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 
 use abscissa_core::Application;
-use base64ct::{Base64, Encoding};
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use pczt::roles::updater::Updater;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use transparent::keys::TransparentKeyScope;
-use zcash_address::{ZcashAddress, unified};
+use serde::Serialize;
 use zcash_client_backend::{
     data_api::{
         Account, WalletRead,
-        wallet::{
-            ConfirmationsPolicy, create_pczt_from_proposal, input_selection::GreedyInputSelector,
-            propose_transfer,
-        },
+        wallet::{ConfirmationsPolicy, create_pczt_from_proposal, input_selection::SpendPolicy},
     },
-    fees::{DustOutputPolicy, StandardFeeRule, standard::MultiOutputChangeStrategy},
     wallet::OvkPolicy,
-    zip321::{Payment, PaymentError, TransactionRequest},
 };
 use zcash_keys::address::Address;
-use zcash_protocol::{
-    PoolType, ShieldedProtocol,
-    consensus::{NetworkType, Parameters},
-    value::{MAX_MONEY, Zatoshis},
-};
 
+use super::pczt_common::{
+    PROP_ACCOUNT_INDEX, PROP_ADDRESS_INDEX, PROP_SCOPE, PROP_SEED_FINGERPRINT, encode_key_scope,
+    encode_pczt_base64,
+};
 use crate::{
     components::{
         database::DbHandle,
         json_rpc::{
             payments::{
-                IncompatiblePrivacyPolicy, PrivacyPolicy, enforce_privacy_policy,
-                get_account_for_address, parse_memo,
+                AmountParameter, PrivacyPolicy, build_request, get_account_for_address,
+                propose_and_check,
             },
             server::LegacyCode,
-            utils::zatoshis_from_value,
         },
     },
-    fl,
     prelude::*,
 };
 
@@ -70,18 +58,6 @@ pub(crate) struct CreateResult {
 
 pub(crate) type ResultType = CreateResult;
 
-/// A recipient amount for `pczt_create`.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct AmountParam {
-    /// Recipient address.
-    pub address: String,
-    /// Amount in ZEC.
-    pub amount: serde_json::Value,
-    /// Optional memo (shielded recipients only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memo: Option<String>,
-}
-
 pub(super) const PARAM_FROM_ADDRESS_DESC: &str = "The address to send funds from.";
 pub(super) const PARAM_AMOUNTS_DESC: &str = "An array of recipient amounts.";
 pub(super) const PARAM_AMOUNTS_REQUIRED: bool = true;
@@ -92,16 +68,10 @@ pub(super) const PARAM_PRIVACY_POLICY_DESC: &str = "Privacy policy for the trans
 pub(crate) async fn call(
     mut wallet: DbHandle,
     from_address: String,
-    amounts: Vec<AmountParam>,
+    amounts: Vec<AmountParameter>,
     minconf: Option<u32>,
     privacy_policy: Option<String>,
 ) -> Response {
-    if amounts.is_empty() {
-        return Err(
-            LegacyCode::InvalidParameter.with_static("Invalid parameter, amounts array is empty.")
-        );
-    }
-
     if amounts.len() > MAX_RECIPIENTS {
         return Err(LegacyCode::InvalidParameter.with_message(format!(
             "Too many recipients: {} exceeds maximum of {MAX_RECIPIENTS}",
@@ -109,43 +79,7 @@ pub(crate) async fn call(
         )));
     }
 
-    // Parse amounts into payments.
-    let mut recipient_addrs = HashSet::new();
-    let mut payments = vec![];
-
-    for amount in &amounts {
-        let addr: ZcashAddress = amount.address.parse().map_err(|_| {
-            LegacyCode::InvalidParameter.with_message(format!(
-                "Invalid parameter, unknown address format: {}",
-                amount.address,
-            ))
-        })?;
-
-        if !recipient_addrs.insert(addr.clone()) {
-            return Err(LegacyCode::InvalidParameter.with_message(format!(
-                "Invalid parameter, duplicated recipient address: {}",
-                amount.address,
-            )));
-        }
-
-        let memo = amount.memo.as_deref().map(parse_memo).transpose()?;
-        let value = zatoshis_from_value(&amount.amount)?;
-
-        let payment = Payment::new(addr, Some(value), memo, None, None, vec![]).map_err(|e| {
-            LegacyCode::InvalidParameter.with_static(match e {
-                PaymentError::TransparentMemo => "Cannot send memo to transparent recipient",
-                PaymentError::ZeroValuedTransparentOutput => {
-                    "Cannot send zero-valued output to transparent recipient"
-                }
-            })
-        })?;
-
-        payments.push(payment);
-    }
-
-    let request = TransactionRequest::new(payments).map_err(|e| {
-        LegacyCode::InvalidParameter.with_message(format!("Invalid payment request: {e}"))
-    })?;
+    let request = build_request(&amounts)?;
 
     // Resolve `from_address` to an account.
     let account = {
@@ -178,131 +112,17 @@ pub(crate) async fn call(
     };
 
     let params = *wallet.params();
-
-    // Check the privacy policy against the recipients (same as `z_send_many`).
-    let mut max_sapling_available = Zatoshis::const_from_u64(MAX_MONEY);
-    let mut max_orchard_available = Zatoshis::const_from_u64(MAX_MONEY);
-
-    for payment in request.payments().values() {
-        let value = payment
-            .amount()
-            .expect("We set this for every payment above");
-
-        match Address::try_from_zcash_address(&params, payment.recipient_address().clone()) {
-            Err(e) => return Err(LegacyCode::InvalidParameter.with_message(e.to_string())),
-            Ok(Address::Transparent(_) | Address::Tex(_)) => {
-                if !privacy_policy.allow_revealed_recipients() {
-                    return Err(IncompatiblePrivacyPolicy::TransparentRecipient.into());
-                }
-            }
-            Ok(Address::Sapling(_)) => {
-                match (
-                    privacy_policy.allow_revealed_amounts(),
-                    max_sapling_available - value,
-                ) {
-                    (false, None) => {
-                        return Err(IncompatiblePrivacyPolicy::RevealingSaplingAmount.into());
-                    }
-                    (false, Some(rest)) => max_sapling_available = rest,
-                    (true, _) => (),
-                }
-            }
-            Ok(Address::Unified(ua)) => {
-                match (
-                    privacy_policy.allow_revealed_amounts(),
-                    (
-                        ua.receiver_types().contains(&unified::Typecode::Orchard),
-                        max_orchard_available - value,
-                    ),
-                    (
-                        ua.receiver_types().contains(&unified::Typecode::Sapling),
-                        max_sapling_available - value,
-                    ),
-                ) {
-                    (true, (true, _), _) => (),
-                    (false, (true, Some(rest)), _) => max_orchard_available = rest,
-                    (true, _, (true, _)) => (),
-                    (false, _, (true, Some(rest))) => max_sapling_available = rest,
-                    _ => {
-                        if privacy_policy.allow_revealed_recipients() {
-                            // Nothing to do here.
-                        } else if privacy_policy.allow_revealed_amounts() {
-                            return Err(IncompatiblePrivacyPolicy::TransparentReceiver.into());
-                        } else {
-                            return Err(IncompatiblePrivacyPolicy::RevealingReceiverAmounts.into());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let change_strategy = MultiOutputChangeStrategy::new(
-        StandardFeeRule::Zip317,
-        None,
-        ShieldedProtocol::Orchard,
-        DustOutputPolicy::default(),
-        APP.config().note_management.split_policy(),
-    );
-
-    let input_selector = GreedyInputSelector::new();
-
-    let proposal = propose_transfer::<_, _, _, _, Infallible>(
+    let proposal = propose_and_check(
         wallet.as_mut(),
         &params,
         account.id(),
-        &input_selector,
-        &change_strategy,
         request,
+        privacy_policy,
         confirmations_policy,
-    )
-    .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
-
-    enforce_privacy_policy(&proposal, privacy_policy)?;
-
-    // Check Orchard action limits (same as `z_send_many`).
-    let orchard_actions_limit = APP.config().builder.limits.orchard_actions().into();
-    for step in proposal.steps() {
-        let orchard_spends = step
-            .shielded_inputs()
-            .iter()
-            .flat_map(|inputs| inputs.notes())
-            .filter(|note| note.note().protocol() == ShieldedProtocol::Orchard)
-            .count();
-
-        let orchard_outputs = step
-            .payment_pools()
-            .values()
-            .filter(|pool| pool == &&PoolType::ORCHARD)
-            .count()
-            + step
-                .balance()
-                .proposed_change()
-                .iter()
-                .filter(|change| change.output_pool() == PoolType::ORCHARD)
-                .count();
-
-        let orchard_actions = orchard_spends.max(orchard_outputs);
-
-        if orchard_actions > orchard_actions_limit {
-            let (count, kind) = if orchard_outputs <= orchard_actions_limit {
-                (orchard_spends, "inputs")
-            } else if orchard_spends <= orchard_actions_limit {
-                (orchard_outputs, "outputs")
-            } else {
-                (orchard_actions, "actions")
-            };
-
-            return Err(LegacyCode::Misc.with_message(fl!(
-                "err-excess-orchard-actions",
-                count = count,
-                kind = kind,
-                limit = orchard_actions_limit,
-                config = "-orchardactionlimit=N",
-                bound = format!("N >= %u"),
-            )));
-        }
-    }
+        // pczt_create only spends shielded funds; the default policy permits every shielded
+        // pool present in the build and no transparent spending.
+        &SpendPolicy::default(),
+    )?;
 
     // Derivation info used to populate the zallet signing hints below.
     let derivation = account.source().key_derivation().ok_or_else(|| {
@@ -319,6 +139,11 @@ pub(crate) async fn call(
         account.id(),
         OvkPolicy::Sender,
         &proposal,
+        // Do not override the builder-derived expiry height.
+        None,
+        // Our proposal uses the default (padded) Orchard change strategy, so the
+        // bundle type must be `DEFAULT` to match it.
+        orchard::builder::BundleType::DEFAULT,
     )
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to create PCZT: {e}")))?;
 
@@ -342,12 +167,6 @@ pub(crate) async fn call(
         );
     }
 
-    let network_id: u8 = match params.network_type() {
-        NetworkType::Main => 0,
-        NetworkType::Test => 1,
-        NetworkType::Regtest => 2,
-    };
-
     // Record signing hints as proprietary fields. The PCZT format does carry
     // native ZIP 32 / BIP 32 derivation metadata (populated above), but as of
     // pczt 0.8.0-rc.1 there is no way to read it back: `Zip32Derivation` is
@@ -355,62 +174,44 @@ pub(crate) async fn call(
     // Redactor, which clears it. An offline `pczt_sign` therefore cannot use
     // it. These `zallet.v1.*` fields are a stand-in for that native path until
     // the upstream accessors land.
-    let updater = Updater::new(pczt);
-    let mut pczt = updater
+    let pczt = Updater::new(pczt)
         .update_global_with(|mut global| {
             global.set_proprietary(
-                "zallet.v1.seed_fingerprint".to_string(),
+                PROP_SEED_FINGERPRINT.to_string(),
                 derivation.seed_fingerprint().to_bytes().to_vec(),
             );
             global.set_proprietary(
-                "zallet.v1.account_index".to_string(),
+                PROP_ACCOUNT_INDEX.to_string(),
                 u32::from(derivation.account_index()).to_le_bytes().to_vec(),
             );
-            global.set_proprietary("zallet.v1.network".to_string(), vec![network_id]);
         })
-        .finish();
-
-    if !input_metadata.is_empty() {
-        let updater = Updater::new(pczt);
-        pczt = updater
-            .update_transparent_with(|mut bundle| {
-                for (index, meta) in input_metadata.iter().enumerate() {
-                    if let Some(meta) = meta {
-                        // Only derived addresses carry a scope and index.
-                        if let (Some(scope), Some(address_index)) =
-                            (meta.scope(), meta.address_index())
-                        {
-                            bundle.update_input_with(index, |mut input| {
-                                // scope: 0 = external, 1 = internal, 2 = ephemeral/other.
-                                let scope_value = if scope == TransparentKeyScope::EXTERNAL {
-                                    0u32
-                                } else if scope == TransparentKeyScope::INTERNAL {
-                                    1u32
-                                } else {
-                                    2u32
-                                };
-                                input.set_proprietary(
-                                    "zallet.v1.scope".to_string(),
-                                    scope_value.to_le_bytes().to_vec(),
-                                );
-                                input.set_proprietary(
-                                    "zallet.v1.address_index".to_string(),
-                                    address_index.index().to_le_bytes().to_vec(),
-                                );
-                                Ok(())
-                            })?;
-                        }
+        // A no-op when there are no transparent inputs.
+        .update_transparent_with(|mut bundle| {
+            for (index, meta) in input_metadata.iter().enumerate() {
+                if let Some(meta) = meta {
+                    // Only derived addresses carry a scope and index.
+                    if let (Some(scope), Some(address_index)) = (meta.scope(), meta.address_index())
+                    {
+                        bundle.update_input_with(index, |mut input| {
+                            input.set_proprietary(
+                                PROP_SCOPE.to_string(),
+                                encode_key_scope(scope).to_le_bytes().to_vec(),
+                            );
+                            input.set_proprietary(
+                                PROP_ADDRESS_INDEX.to_string(),
+                                address_index.index().to_le_bytes().to_vec(),
+                            );
+                            Ok(())
+                        })?;
                     }
                 }
-                Ok(())
-            })
-            .map_err(|_| {
-                LegacyCode::Wallet.with_static("Failed to record transparent signing hints")
-            })?
-            .finish();
-    }
+            }
+            Ok(())
+        })
+        .map_err(|_| LegacyCode::Wallet.with_static("Failed to record transparent signing hints"))?
+        .finish();
 
     Ok(CreateResult {
-        pczt: Base64::encode_string(&pczt.serialize()),
+        pczt: encode_pczt_base64(pczt)?,
     })
 }
