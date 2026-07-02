@@ -919,18 +919,30 @@ mod tests {
         }
     }
 
-    /// A node-reported set covering every upgrade this build schedules on mainnet except
-    /// `omit`, each at the height this build expects — so the only possible incompatibility
-    /// is the omission.
+    /// The upgrade this build expects for `branch` on mainnet, reported active at the height
+    /// this build schedules it — or `None` if `branch` is not scheduled on mainnet.
+    fn reported_upgrade(branch: BranchId) -> Option<ReportedUpgrade> {
+        let height = u32::from(branch.height_bounds(&PARAMS)?.0);
+        Some(upgrade(u32::from(branch), height, UpgradeStatus::Active))
+    }
+
+    /// Every upgrade this build schedules on mainnet, each reported at the height it expects —
+    /// a fully compatible node-reported set.
+    fn all_known() -> Vec<ReportedUpgrade> {
+        crate::network::NETWORK_UPGRADES
+            .iter()
+            .copied()
+            .filter_map(reported_upgrade)
+            .collect()
+    }
+
+    /// [`all_known`] minus `omit`, so the only possible incompatibility is that omission.
     fn all_known_except(omit: BranchId) -> Vec<ReportedUpgrade> {
         crate::network::NETWORK_UPGRADES
             .iter()
             .copied()
             .filter(|&branch| branch != omit)
-            .filter_map(|branch| {
-                let height = u32::from(branch.height_bounds(&PARAMS)?.0);
-                Some(upgrade(u32::from(branch), height, UpgradeStatus::Active))
-            })
+            .filter_map(reported_upgrade)
             .collect()
     }
 
@@ -970,14 +982,6 @@ mod tests {
 
     #[test]
     fn fully_reported_upgrades_are_compatible() {
-        let reported: Vec<_> = crate::network::NETWORK_UPGRADES
-            .iter()
-            .copied()
-            .filter_map(|branch| {
-                let height = u32::from(branch.height_bounds(&PARAMS)?.0);
-                Some(upgrade(u32::from(branch), height, UpgradeStatus::Active))
-            })
-            .collect();
-        assert!(detect(&reported).is_empty());
+        assert!(detect(&all_known()).is_empty());
     }
 }
