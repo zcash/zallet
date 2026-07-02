@@ -4,6 +4,7 @@
 //! uses to read chain data. The backend implementations live in the `zaino` and `zebra`
 //! modules, selected by cargo feature.
 
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::ops::Range;
 
@@ -212,101 +213,78 @@ impl Incompatibility {
 }
 
 /// Identifies the ways in which the consensus rules of the backing full node and this build
-/// of Zallet are incompatible on `params`’s network. The comparison is symmetric:
+/// of Zallet are incompatible on `params`’s network.
 ///
-/// * For each upgrade the node reports, this build must recognize its consensus branch ID
-///   (so it can interpret the rules) and agree on the height at which it takes effect.
-/// * For each upgrade this build schedules, the node must also schedule it at the same
-///   height — otherwise the node follows rules this build does not, or vice versa.
-///
-/// An upgrade with no activation height on a side is treated as not scheduled there:
-/// [`UpgradeStatus::Disabled`] (or simply unreported) on the node, or a `None` from
-/// [`consensus::BranchId::height_bounds`] on our side. Such an upgrade never takes effect,
-/// so it is an incompatibility only when the two sides disagree about whether the upgrade
-/// is scheduled at all.
+/// Every consensus branch ID either side knows about is examined once: the union of the
+/// upgrades the node reports and the upgrades this build schedules ([`NETWORK_UPGRADES`]).
+/// For each, [`branch_incompatibility`] compares the node’s activation height against this
+/// build’s. An upgrade neither side schedules never takes effect, so it is not flagged;
+/// otherwise the sides diverge when they disagree about where — or whether — it activates.
 fn detect_incompatibilities<P: consensus::Parameters>(
     params: &P,
     upgrades: &[ReportedUpgrade],
 ) -> Vec<Incompatibility> {
-    let mut incompatibilities = node_reported_incompatibilities(params, upgrades);
-    incompatibilities.extend(unreported_scheduled_incompatibilities(params, upgrades));
-    incompatibilities
-}
+    // Index the node’s reported upgrades by consensus branch ID.
+    let reported: HashMap<u32, &ReportedUpgrade> =
+        upgrades.iter().map(|u| (u.branch_id, u)).collect();
 
-/// Pass 1: every upgrade the node reports must be one we recognize and agree with.
-fn node_reported_incompatibilities<P: consensus::Parameters>(
-    params: &P,
-    upgrades: &[ReportedUpgrade],
-) -> Vec<Incompatibility> {
-    upgrades
-        .iter()
-        .filter_map(|upgrade| {
-            let ReportedUpgrade {
-                branch_id,
-                name,
-                activation_height,
-                status,
-            } = upgrade;
-
-            // The height at which the full node switches to this upgrade’s consensus rules.
-            // A disabled upgrade never activates here.
-            let node_height = match status {
-                UpgradeStatus::Disabled => None,
-                UpgradeStatus::Active | UpgradeStatus::Pending => Some(*activation_height),
-            };
-
-            match consensus::BranchId::try_from(*branch_id) {
-                // We recognize this branch ID, so we know which consensus rules it selects.
-                // Verify that we also agree on where they take effect.
-                Ok(branch) => {
-                    let expected = branch
-                        .height_bounds(params)
-                        .map(|(activation, _)| u32::from(activation));
-                    (expected != node_height).then(|| Incompatibility::ActivationHeightMismatch {
-                        branch_id: *branch_id,
-                        name: name.clone(),
-                        expected,
-                        node: node_height,
-                    })
-                }
-                // We cannot interpret this branch ID at all. Flag it unless it is disabled,
-                // in which case it will never take effect here.
-                Err(_) => node_height.map(|activation_height| Incompatibility::UnknownUpgrade {
-                    branch_id: *branch_id,
-                    name: name.clone(),
-                    activation_height,
-                }),
-            }
+    // Examine every branch ID either side knows about. Collecting into a `BTreeSet` dedups
+    // the overlap (an upgrade both sides know) and gives a deterministic order.
+    let ours = NETWORK_UPGRADES.iter().map(|branch| u32::from(*branch));
+    reported
+        .keys()
+        .copied()
+        .chain(ours)
+        .collect::<BTreeSet<u32>>()
+        .into_iter()
+        .filter_map(|branch_id| {
+            branch_incompatibility(params, branch_id, reported.get(&branch_id).copied())
         })
         .collect()
 }
 
-/// Pass 2 (the mirror of [`node_reported_incompatibilities`]): every upgrade we schedule on
-/// this network must also be one the node reports. One the node omits entirely is an upgrade
-/// it does not follow, so past our activation height we would interpret the chain under rules
-/// the node never applies.
-fn unreported_scheduled_incompatibilities<P: consensus::Parameters>(
+/// Compares one consensus branch ID between the node — which reports it as `reported`, or not
+/// at all (`None`) — and this build, yielding an [`Incompatibility`] if their rules diverge.
+///
+/// An upgrade with no activation height on a side is treated as not scheduled there:
+/// [`UpgradeStatus::Disabled`] (or simply unreported) on the node, or a `None` from
+/// [`consensus::BranchId::height_bounds`] on our side.
+fn branch_incompatibility<P: consensus::Parameters>(
     params: &P,
-    upgrades: &[ReportedUpgrade],
-) -> Vec<Incompatibility> {
-    NETWORK_UPGRADES
-        .iter()
-        .filter_map(|branch| {
-            let branch_id = u32::from(*branch);
-            // If the node reported it, pass 1 already handled it (matched or mismatched).
-            if upgrades.iter().any(|u| u.branch_id == branch_id) {
-                return None;
-            }
-            // Only a divergence if this build actually schedules it on this network.
-            let expected = u32::from(branch.height_bounds(params)?.0);
-            Some(Incompatibility::ActivationHeightMismatch {
+    branch_id: u32,
+    reported: Option<&ReportedUpgrade>,
+) -> Option<Incompatibility> {
+    // The height at which the full node switches to this upgrade’s consensus rules, or `None`
+    // if it does not schedule the upgrade (disabled, or not reported at all).
+    let node = reported.and_then(|upgrade| match upgrade.status {
+        UpgradeStatus::Disabled => None,
+        UpgradeStatus::Active | UpgradeStatus::Pending => Some(upgrade.activation_height),
+    });
+
+    match consensus::BranchId::try_from(branch_id) {
+        // We recognize this branch ID, so we know which consensus rules it selects. Verify
+        // that we also agree on where they take effect.
+        Ok(branch) => {
+            let expected = branch
+                .height_bounds(params)
+                .map(|(activation, _)| u32::from(activation));
+            (expected != node).then(|| Incompatibility::ActivationHeightMismatch {
                 branch_id,
-                name: format!("{branch:?}"),
-                expected: Some(expected),
-                node: None,
+                // The node’s name for the upgrade if it reported one, else our own.
+                name: reported.map_or_else(|| format!("{branch:?}"), |u| u.name.clone()),
+                expected,
+                node,
             })
-        })
-        .collect()
+        }
+        // We cannot interpret this branch ID at all. Flag it unless the node leaves it
+        // disabled/unreported, in which case it never takes effect here. (An unrecognized
+        // branch is never one this build schedules, so the node always named it.)
+        Err(_) => node.map(|activation_height| Incompatibility::UnknownUpgrade {
+            branch_id,
+            name: reported.map_or_else(String::new, |u| u.name.clone()),
+            activation_height,
+        }),
+    }
 }
 
 /// What [`check_consensus_compatibility`] should do about the detected incompatibilities,
@@ -593,8 +571,8 @@ mod tests {
     use super::SpendStatus;
     use super::{
         BlockLocator, ChainBlock, ChainError, ChainTx, ChainView, Decision, Incompatibility,
-        NonEmpty, ReportedUpgrade, UpgradeStatus, classify, detect_incompatibilities,
-        node_reported_incompatibilities,
+        NonEmpty, ReportedUpgrade, UpgradeStatus, branch_incompatibility, classify,
+        detect_incompatibilities,
     };
     #[cfg(not(feature = "spend-index"))]
     use transparent::address::TransparentAddress;
@@ -781,10 +759,14 @@ mod tests {
         detect_incompatibilities(&PARAMS, upgrades)
     }
 
-    /// Only the node-reported pass, for tests that exercise it in isolation without the
-    /// mirror pass flagging every known upgrade the minimal input omits.
+    /// Compares only the node-reported upgrades, for tests that exercise that direction in
+    /// isolation — without [`detect_incompatibilities`] also flagging every upgrade this build
+    /// schedules that the minimal input omits.
     fn detect_node(upgrades: &[ReportedUpgrade]) -> Vec<Incompatibility> {
-        node_reported_incompatibilities(&PARAMS, upgrades)
+        upgrades
+            .iter()
+            .filter_map(|upgrade| branch_incompatibility(&PARAMS, upgrade.branch_id, Some(upgrade)))
+            .collect()
     }
 
     #[test]
