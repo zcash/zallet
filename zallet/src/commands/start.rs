@@ -6,7 +6,12 @@ use tokio::{pin, select};
 use crate::{
     cli::StartCmd,
     commands::AsyncRunnable,
-    components::{chain::ChainBackend, database::Database, json_rpc::JsonRpc, sync::WalletSync},
+    components::{
+        chain::{ChainBackend, check_consensus_compatibility},
+        database::Database,
+        json_rpc::JsonRpc,
+        sync::WalletSync,
+    },
     config::ZalletConfig,
     error::Error,
     fl,
@@ -50,6 +55,11 @@ impl AsyncRunnable for StartCmd {
         // Start monitoring the chain.
         let (chain, chain_indexer_task_handle) = ChainBackend::new(&config).await?;
 
+        // Refuse to start if the backing full node already follows consensus rules we
+        // cannot interpret. If the only incompatibilities are still in the future, this
+        // returns the height at which to shut down before reaching them.
+        let shutdown_height = check_consensus_compatibility(&chain).await?;
+
         // Launch RPC server.
         let rpc_task_handle = JsonRpc::spawn(
             &config,
@@ -66,7 +76,7 @@ impl AsyncRunnable for StartCmd {
             wallet_sync_recover_history_task_handle,
             wallet_sync_batch_decryptor_task_handle,
             wallet_sync_data_requests_task_handle,
-        ) = WalletSync::spawn(&config, db, chain).await?;
+        ) = WalletSync::spawn(&config, db, chain, shutdown_height).await?;
 
         info!("Spawned Zallet tasks");
 

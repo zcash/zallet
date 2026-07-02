@@ -157,6 +157,26 @@ err-init-identity-not-usable = Identity file at {$path} is not usable: {$error}
 err-init-rpc-auth-invalid = Invalid '{-cfg-rpc-auth}' configuration
 err-config-file-not-found = Configuration file at {$path} does not exist.
 err-config-file-invalid = Failed to parse configuration file at {$path}: {$error}
+err-init-incompatible-consensus =
+    The backing full node follows consensus rules that this {-zallet} build cannot
+    interpret correctly, so {-zallet} cannot maintain a correct view of the chain.
+    Either the full node follows a network upgrade that this build does not recognize,
+    or it activates a recognized upgrade at a height that differs from what this build
+    expects.
+    Incompatible network upgrades: {$upgrades}.
+    Upgrade {-zallet} to a release whose consensus rules match the full node.
+warn-init-pending-incompatible-consensus =
+    The backing full node is scheduled to activate consensus rules that this {-zallet}
+    build cannot interpret correctly. {-zallet} will operate normally until the chain
+    reaches height {$height}, then shut down to avoid presenting an incorrect view of the
+    chain.
+    Pending incompatible network upgrades: {$upgrades}.
+    Upgrade {-zallet} to a release whose consensus rules match the full node before then.
+warn-init-consensus-divergence-reached =
+    The chain has reached height {$height}, where the backing full node's consensus rules
+    diverge from what this {-zallet} build can interpret. Shutting down to avoid an
+    incorrect view of the chain. Upgrade {-zallet} to a release whose consensus rules match
+    the full node.
 
 ## Keystore errors
 

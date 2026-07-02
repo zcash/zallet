@@ -7371,6 +7371,7 @@ dependencies = [
  "jsonrpsee-http-client",
  "known-folders",
  "nix 0.29.0",
+ "nonempty",
  "once_cell",
  "orchard",
  "phf 0.12.1",

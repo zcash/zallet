@@ -4,13 +4,36 @@
 //! (`zebra-state`, rocksdb), which would re-introduce the version coupling this backend
 //! exists to remove.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jsonrpsee::core::{client::ClientT, params::ArrayParams};
 use jsonrpsee_http_client::{HeaderMap, HeaderValue, HttpClient, HttpClientBuilder};
+use serde::Deserialize;
 
+use crate::components::chain::UpgradeStatus;
 use crate::error::{Error, ErrorKind};
+
+/// The subset of `getblockchaininfo` we consume: the network-upgrade table, keyed by
+/// consensus branch ID (as an eight-digit hex string).
+#[derive(Deserialize)]
+pub(crate) struct BlockchainInfo {
+    pub(crate) upgrades: HashMap<String, NetworkUpgradeInfo>,
+}
+
+/// A single entry of the `getblockchaininfo` `upgrades` table.
+#[derive(Deserialize)]
+pub(crate) struct NetworkUpgradeInfo {
+    /// The node’s name for the upgrade, used for diagnostics only.
+    pub(crate) name: String,
+    /// The activation height the node reports for the upgrade.
+    #[serde(rename = "activationheight")]
+    pub(crate) activation_height: u32,
+    /// Whether the node treats the upgrade as active, pending, or disabled. Deserialized
+    /// straight into the backend-neutral [`UpgradeStatus`].
+    pub(crate) status: UpgradeStatus,
+}
 
 enum Auth {
     /// Static Basic auth credentials (pre-encoded, never change).
@@ -89,6 +112,14 @@ impl ValidatorRpcClient {
             .map_err(|e| ErrorKind::Generic.context(e))?;
         self.build_client()?
             .request("sendrawtransaction", params)
+            .await
+            .map_err(|e| ErrorKind::Generic.context(e).into())
+    }
+
+    /// `getblockchaininfo()` — returns the network upgrades the backing node follows.
+    pub(crate) async fn get_blockchain_info(&self) -> Result<BlockchainInfo, Error> {
+        self.build_client()?
+            .request("getblockchaininfo", ArrayParams::new())
             .await
             .map_err(|e| ErrorKind::Generic.context(e).into())
     }
