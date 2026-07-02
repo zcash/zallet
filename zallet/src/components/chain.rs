@@ -274,15 +274,17 @@ fn branch_incompatibility<P: consensus::Parameters>(
                 (Some(expected), Some(node)) => Some(expected.min(node)),
                 (Some(height), None) => Some(height),
                 (None, mheight) => mheight,
-            }.map(|divergence_height|
-               Incompatibility::ActivationHeightMismatch {
-                branch_id,
-                // The node’s name for the upgrade if it reported one, else our own.
-                name: reported.map_or_else(|| format!("{branch:?}"), |u| u.name.clone()),
-                expected,
-                node,
-                divergence_height,
-            })
+            }
+            .map(
+                |divergence_height| Incompatibility::ActivationHeightMismatch {
+                    branch_id,
+                    // The node’s name for the upgrade if it reported one, else our own.
+                    name: reported.map_or_else(|| format!("{branch:?}"), |u| u.name.clone()),
+                    expected,
+                    node,
+                    divergence_height,
+                },
+            )
         }
         // We cannot interpret this branch ID at all. Flag it unless the node leaves it
         // disabled/unreported, in which case it never takes effect here. (An unrecognized
