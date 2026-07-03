@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::ops::Range;
 
-use futures::stream::BoxStream;
+use futures::{future::BoxFuture, stream::BoxStream};
 use nonempty::NonEmpty;
 use serde::Deserialize;
 use tracing::{error, info, warn};
@@ -69,6 +69,45 @@ pub(crate) trait ChainFactory: Send + Sync + 'static {
         config: &ZalletConfig,
     ) -> impl Future<Output = Result<(Self::Chain, TaskHandle), Error>> + Send;
 }
+
+/// The dyn-safe boundary through which commands reach the registered chain backend.
+///
+/// The blanket impl over [`ChainFactory`] encloses the whole chain-dependent tail of
+/// each command, so the concrete [`Chain`] type never crosses this boundary — type
+/// erasure costs one virtual call per command invocation.
+pub(crate) trait ChainRuntime: Send + Sync {
+    /// Runs the chain-dependent body of `zallet start`.
+    fn run_start(&self) -> BoxFuture<'_, Result<(), Error>>;
+
+    /// Runs the chain-dependent body of `zallet migrate-zcashd-wallet`.
+    #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+    fn run_migrate_zcashd_wallet<'a>(
+        &'a self,
+        cmd: &'a crate::cli::MigrateZcashdWalletCmd,
+    ) -> BoxFuture<'a, Result<(), Error>>;
+}
+
+impl<F: ChainFactory> ChainRuntime for F {
+    fn run_start(&self) -> BoxFuture<'_, Result<(), Error>> {
+        Box::pin(crate::cli::StartCmd::run_with(self))
+    }
+
+    #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+    fn run_migrate_zcashd_wallet<'a>(
+        &'a self,
+        cmd: &'a crate::cli::MigrateZcashdWalletCmd,
+    ) -> BoxFuture<'a, Result<(), Error>> {
+        Box::pin(cmd.run_with(self))
+    }
+}
+
+/// The chain backend factory selected at compile time by the `zaino` / `zebra-state`
+/// feature. Registered with the application at boot; everything else reaches the
+/// backend through [`ChainRuntime`].
+#[cfg(feature = "zaino")]
+pub(crate) const DEFAULT_CHAIN_RUNTIME: &(dyn ChainRuntime) = &ZainoBackend;
+#[cfg(feature = "zebra-state")]
+pub(crate) const DEFAULT_CHAIN_RUNTIME: &(dyn ChainRuntime) = &ZebraBackend;
 
 /// A handle to a source of Zcash chain data.
 ///

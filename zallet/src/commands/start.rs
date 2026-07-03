@@ -18,11 +18,6 @@ use crate::{
     prelude::*,
 };
 
-#[cfg(feature = "zaino")]
-use crate::components::chain::ZainoBackend;
-#[cfg(feature = "zebra-state")]
-use crate::components::chain::ZebraBackend;
-
 #[cfg(zallet_build = "wallet")]
 use crate::components::keystore::KeyStore;
 
@@ -169,11 +164,7 @@ impl StartCmd {
 
 impl AsyncRunnable for StartCmd {
     async fn run(&self) -> Result<(), Error> {
-        #[cfg(feature = "zebra-state")]
-        let factory = ZebraBackend;
-        #[cfg(feature = "zaino")]
-        let factory = ZainoBackend;
-        StartCmd::run_with(&factory).await
+        crate::application::chain_runtime().run_start().await
     }
 }
 

@@ -42,11 +42,6 @@ use crate::{
     prelude::*,
 };
 
-#[cfg(feature = "zaino")]
-use crate::components::chain::ZainoBackend;
-#[cfg(feature = "zebra-state")]
-use crate::components::chain::ZebraBackend;
-
 use super::{AsyncRunnable, migrate_zcash_conf};
 
 /// The ZIP 32 account identifier of the zcashd account used for maintaining legacy `getnewaddress`
@@ -101,11 +96,9 @@ impl MigrateZcashdWalletCmd {
 
 impl AsyncRunnable for MigrateZcashdWalletCmd {
     async fn run(&self) -> Result<(), Error> {
-        #[cfg(feature = "zebra-state")]
-        let factory = ZebraBackend;
-        #[cfg(feature = "zaino")]
-        let factory = ZainoBackend;
-        self.run_with(&factory).await
+        crate::application::chain_runtime()
+            .run_migrate_zcashd_wallet(self)
+            .await
     }
 }
 
