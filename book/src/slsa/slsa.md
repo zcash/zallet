@@ -70,11 +70,11 @@ The `flake.nix` exposes a `zallet` package for both `x86_64-linux` and `aarch64-
 
 ```bash
 # Install Nix (Determinate installer), then:
-nix build github:zcash/wallet#zallet      # builds for the host arch
+nix build github:zcash/zallet#zallet      # builds for the host arch
 ./result/bin/zallet --version
 
 # Verify reproducibility (rebuilds and compares):
-nix build github:zcash/wallet#zallet --rebuild
+nix build github:zcash/zallet#zallet --rebuild
 ```
 
 For **arm64**, this is the easiest reproducible path by far — on an arm64 machine it is just "install Nix + `nix build`", with no Docker, no containerd image store, and no pinned base images. (Producing an arm64 binary *from* an x86 host requires cross-compilation or emulation, which is no longer a two-command flow; the simple path assumes you are on the target architecture.)

@@ -167,4 +167,4 @@ Sprout, so there is nothing to migrate and no equivalent method is provided. If
 you still hold Sprout funds, migrate them out of the Sprout pool before
 transitioning your wallet to Zallet.
 
-[pczts]: https://github.com/zcash/wallet/issues/99
+[pczts]: https://github.com/zcash/zallet/issues/99

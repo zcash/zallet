@@ -80,7 +80,7 @@ impl fmt::Display for Error {
         writeln!(f, "[ {} ]", crate::fl!("err-ux-A"))?;
         write!(
             f,
-            "[ {}: https://github.com/zcash/wallet/issues {} ]",
+            "[ {}: https://github.com/zcash/zallet/issues {} ]",
             crate::fl!("err-ux-B"),
             crate::fl!("err-ux-C")
         )

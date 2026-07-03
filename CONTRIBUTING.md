@@ -41,7 +41,7 @@ behavior as documented in the code of conduct.
 > If you want to ask a question, please ensure that you have read the available
 > documentation. Documentation is published to the [Zallet Book](https://zcash.github.io/wallet).
 
-Before you ask a question, it is best to search for existing [Issues](https://github.com/zcash/wallet/issues)
+Before you ask a question, it is best to search for existing [Issues](https://github.com/zcash/zallet/issues)
 that might help you. In case you have found a suitable issue and still need
 clarification, you can write your question in this issue. It is also advisable
 to search the internet for answers first.
@@ -53,7 +53,7 @@ recommend the following:
   There are no bad questions, only insufficiently documented answers. If you're
   able to find an answer and it wasn't already in the docs, consider opening a
   pull request to add it to the documentation!
-- You can also open an [Issue](https://github.com/zcash/wallet/issues/new). If you do so:
+- You can also open an [Issue](https://github.com/zcash/zallet/issues/new). If you do so:
   - Provide as much context as you can about what you're running into.
   - Provide project and platform versions depending on what seems relevant.
 
@@ -96,7 +96,7 @@ possible.
   documented preconditions for an operation.
 - To see if other users have experienced (and potentially already solved) the
   same issue you are having, check if there is not already a bug report
-  existing for your bug or error in the [bug tracker](https://github.com/zcash/wallet/issues?q=label%3Abug).
+  existing for your bug or error in the [bug tracker](https://github.com/zcash/zallet/issues?q=label%3Abug).
 - Also make sure to search the internet to see if users outside of the GitHub
   community have discussed the issue. You can also ask about your problem in
   the [Zcash R&D Discord](https://discord.com/channels/809218587167293450/876655911790321684).
@@ -120,7 +120,7 @@ possible.
 We use GitHub issues to track bugs and errors. If you run into an issue with
 the project:
 
-- Open an [Issue](https://github.com/zcash/wallet/issues/new). (Since we can't be sure at this point whether
+- Open an [Issue](https://github.com/zcash/zallet/issues/new). (Since we can't be sure at this point whether
   the issue describes a bug or not, we ask you not to label the issue.)
 - Explain the behavior you would expect and the actual behavior.
 - Please provide as much context as possible and describe the **reproduction
@@ -159,7 +159,7 @@ community to understand your suggestion and find related suggestions.
 
 - Read the documentation of the latest version of the appropriate crate to find
   out if the functionality is already provided, potentially under a feature flag.
-- Perform a [search](https://github.com/zcash/wallet/issues) to see if the enhancement has already been
+- Perform a [search](https://github.com/zcash/zallet/issues) to see if the enhancement has already been
   suggested. If it has, add a comment to the existing issue instead of opening
   a new one.
 - Find out whether your idea fits with the scope and aims of the project. It's
@@ -176,7 +176,7 @@ community to understand your suggestion and find related suggestions.
 
 #### How Do I Submit a Good Enhancement Suggestion?
 
-Enhancement suggestions are tracked as [GitHub issues](https://github.com/zcash/wallet/issues).
+Enhancement suggestions are tracked as [GitHub issues](https://github.com/zcash/zallet/issues).
 
 - Use a **clear and descriptive title** for the issue to identify the
   suggestion. The relevant library crate, if known, should be indicated by prefixing

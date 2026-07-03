@@ -9,7 +9,7 @@ authors = [
 ]
 edition = "2024"
 rust-version = "1.88"
-repository = "https://github.com/zcash/wallet"
+repository = "https://github.com/zcash/zallet"
 license = "MIT OR Apache-2.0"
 categories = ["cryptography::cryptocurrencies"]
 

@@ -552,14 +552,14 @@ pub(crate) trait WalletRpc {
     ///
     /// Change generated from one or more transparent addresses flows to a new transparent
     /// address, while change generated from a legacy Sapling address returns to itself.
-    /// TODO: <https://github.com/zcash/wallet/issues/138>
+    /// TODO: <https://github.com/zcash/zallet/issues/138>
     ///
     /// When sending from a unified address, change is returned to the internal-only
     /// address for the associated unified account.
     ///
     /// When spending coinbase UTXOs, only shielded recipients are permitted and change is
     /// not allowed; the entire value of the coinbase UTXO(s) must be consumed.
-    /// TODO: <https://github.com/zcash/wallet/issues/137>
+    /// TODO: <https://github.com/zcash/zallet/issues/137>
     ///
     /// # Arguments
     ///

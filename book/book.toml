@@ -6,4 +6,4 @@ title = "The Zallet Book"
 
 [output.html]
 site-url = "/wallet/"
-git-repository-url = "https://github.com/zcash/wallet/tree/main/book"
+git-repository-url = "https://github.com/zcash/zallet/tree/main/book"

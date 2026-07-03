@@ -84,7 +84,7 @@ pub(crate) fn lock_datadir(datadir: &Path) -> Result<fmutex::Guard<'static>, Err
 pub(crate) fn resolve_datadir_path(datadir: &Path, path: &Path) -> PathBuf {
     // TODO: Do we canonicalize here? Where do we enforce any requirements on the
     //       config's relative paths?
-    //       https://github.com/zcash/wallet/issues/249
+    //       https://github.com/zcash/zallet/issues/249
     datadir.join(path)
 }
 
@@ -109,7 +109,7 @@ impl EntryPoint {
     fn datadir(&self) -> Result<PathBuf, FrameworkError> {
         // TODO: Decide whether to make either the default datadir, or every datadir,
         //       chain-specific.
-        //       https://github.com/zcash/wallet/issues/250
+        //       https://github.com/zcash/zallet/issues/250
         if let Some(datadir) = &self.datadir {
             Ok(datadir.clone())
         } else {

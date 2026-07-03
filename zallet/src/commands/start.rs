@@ -24,20 +24,20 @@ impl AsyncRunnable for StartCmd {
         // ALPHA: Warn when currently-unused config options are set.
         let warn_unused =
             |option: &str| warn!("{}", fl!("warn-config-unused", option = option.to_string()));
-        // TODO: https://github.com/zcash/wallet/issues/199
+        // TODO: https://github.com/zcash/zallet/issues/199
         if config.builder.spend_zeroconf_change.is_some() {
             warn_unused("builder.spend_zeroconf_change");
         }
-        // TODO: https://github.com/zcash/wallet/issues/200
+        // TODO: https://github.com/zcash/zallet/issues/200
         if config.builder.tx_expiry_delta.is_some() {
             warn_unused("builder.tx_expiry_delta");
         }
-        // TODO: https://github.com/zcash/wallet/issues/138
+        // TODO: https://github.com/zcash/zallet/issues/138
         #[cfg(zallet_build = "wallet")]
         if config.features.legacy_pool_seed_fingerprint.is_some() {
             warn_unused("features.legacy_pool_seed_fingerprint");
         }
-        // TODO: https://github.com/zcash/wallet/issues/201
+        // TODO: https://github.com/zcash/zallet/issues/201
         #[cfg(zallet_build = "wallet")]
         if config.keystore.require_backup.is_some() {
             warn_unused("keystore.require_backup");

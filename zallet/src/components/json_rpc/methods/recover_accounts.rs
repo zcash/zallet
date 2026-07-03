@@ -58,7 +58,7 @@ pub(crate) async fn call<C: Chain>(
 ) -> Response {
     ensure_wallet_is_unlocked(keystore).await?;
     // TODO: Ensure wallet is backed up.
-    //       https://github.com/zcash/wallet/issues/201
+    //       https://github.com/zcash/zallet/issues/201
 
     let chain_view = chain
         .snapshot()

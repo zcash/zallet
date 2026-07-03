@@ -172,7 +172,7 @@ impl KeyStore {
     pub(crate) fn new(config: &ZalletConfig, db: Database) -> Result<Self, Error> {
         // TODO: Maybe support storing the identity in `zallet.toml` instead of as a
         //       separate file on disk?
-        //       https://github.com/zcash/wallet/issues/253
+        //       https://github.com/zcash/zallet/issues/253
         let path = config.encryption_identity();
         if !path.exists() {
             return Err(ErrorKind::Init

@@ -20,7 +20,7 @@ Zallet is currently in alpha. What this means is:
 - We will be rapidly making changes as we release new alpha versions.
 
 We encourage everyone to test out Zallet during the alpha period and provide feedback,
-either by [opening issues on GitHub](https://github.com/zcash/wallet/issues/new) or
+either by [opening issues on GitHub](https://github.com/zcash/zallet/issues/new) or
 contacting us in the `#wallet-dev` channel of the
 [Zcash R&D Discord](https://discord.gg/xpzPR53xtU).
 

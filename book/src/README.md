@@ -22,7 +22,7 @@ We encourage everyone to test out Zallet during the alpha period and provide fee
 either by [opening issues on GitHub] or contacting us in the `#wallet-dev` channel of the
 [Zcash R&D Discord].
 
-[opening issues on GitHub]: https://github.com/zcash/wallet/issues/new
+[opening issues on GitHub]: https://github.com/zcash/zallet/issues/new
 [Zcash R&D Discord]: https://discord.gg/xpzPR53xtU
 
 ## Future phase: Beta release

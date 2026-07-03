@@ -291,7 +291,7 @@ pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C, txid_str: &s
 
     // TODO: Should we enforce ZIP 212 when viewing outputs of a transaction that is
     //       already in the wallet?
-    //       https://github.com/zcash/wallet/issues/254
+    //       https://github.com/zcash/zallet/issues/254
     let zip212_enforcement = sapling::note_encryption::Zip212Enforcement::GracePeriod;
 
     let mut spends = vec![];
@@ -916,7 +916,7 @@ impl WalletTxInfo {
                 Some(mined_height) => i64::from(chain_height + 1 - mined_height),
                 None => {
                     // TODO: Also check if the transaction is in the mempool.
-                    //       https://github.com/zcash/wallet/issues/237
+                    //       https://github.com/zcash/zallet/issues/237
                     -1
                 }
             }

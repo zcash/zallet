@@ -73,7 +73,7 @@ struct SyncWorkRemaining {
     /// Approximate sync progress, as a `numerator / denominator` fraction.
     ///
     /// This is currently derived from scanned block ranges. Once the wallet always tracks
-    /// the note commitment tree sizes (zcash/wallet#237), this will be refined to an exact
+    /// the note commitment tree sizes (zcash/zallet#237), this will be refined to an exact
     /// count of the unscanned note commitments.
     progress: Progress,
 }

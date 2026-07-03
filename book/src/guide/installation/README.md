@@ -58,7 +58,7 @@ To build or install with the `zaino` backend, pass `--no-default-features --feat
 cargo install --locked --no-default-features --features zaino,rpc-cli zallet
 
 # Install the latest development version with the zaino backend
-cargo install --locked --git https://github.com/zcash/wallet.git \
+cargo install --locked --git https://github.com/zcash/zallet.git \
   --no-default-features --features zaino,rpc-cli
 ```
 
@@ -71,7 +71,7 @@ cargo install --locked --git https://github.com/zcash/wallet.git \
 
 Executable binaries are available for download on the [GitHub Releases page].
 
-[GitHub Releases page]: https://github.com/zcash/wallet/releases
+[GitHub Releases page]: https://github.com/zcash/zallet/releases
 
 ## Build from source using Rust
 
@@ -112,5 +112,5 @@ If you want to run the latest unpublished changes, then you can instead install 
 directly from the main branch of its code repository:
 
 ```
-cargo install --locked --git https://github.com/zcash/wallet.git
+cargo install --locked --git https://github.com/zcash/zallet.git
 ```
