@@ -270,8 +270,6 @@ impl From<NetworkUpgradeStatus> for UpgradeStatus {
 }
 
 /// Factory for the `zaino` chain backend.
-// TODO(#540 phase 1, task 2): constructed by the command layer; allow removed then.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ZainoBackend;
 
