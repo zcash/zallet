@@ -87,6 +87,7 @@ impl Network {
                     nu6: local_network.nu6.map(|h| h.into()),
                     nu6_1: local_network.nu6_1.map(|h| h.into()),
                     nu6_2: local_network.nu6_2.map(|h| h.into()),
+                    nu6_3: local_network.nu6_3.map(|h| h.into()),
                     nu7: None,
                 })
             }

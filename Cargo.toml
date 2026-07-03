@@ -181,14 +181,14 @@ age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633
 zewif = { git = "https://github.com/zcash/zewif.git", rev = "798d7b3554ebada05bea63b67ee66f9c2558a21a" }
 zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "22f8219bb2cb741b72683cbee170b6667c7da7b0" }
 
-# TEMPORARY: pin the zaino crates to dannywillems/zaino `feat/nu63-compat`
-# (currently 872a7622ac00dd81369cc8b2779df14efd743b47), which updates zaino for
+# TEMPORARY: pin the zaino crates to zingolabs/zaino `feat/ironwood_nu6_3`
+# (currently e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c), which updates zaino for
 # the NU6.3 / ironwood librustzcash and zebra lines. This is a dedicated commit
 # to be fixed up as that branch advances; repoint at upstream zaino once the
 # NU6.3 work lands there.
-zaino-common = { git = "https://github.com/dannywillems/zaino.git", rev = "872a7622ac00dd81369cc8b2779df14efd743b47" }
-zaino-fetch = { git = "https://github.com/dannywillems/zaino.git", rev = "872a7622ac00dd81369cc8b2779df14efd743b47" }
-zaino-state = { git = "https://github.com/dannywillems/zaino.git", rev = "872a7622ac00dd81369cc8b2779df14efd743b47" }
+zaino-common = { git = "https://github.com/zingolabs/zaino.git", rev = "e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c" }
+zaino-fetch = { git = "https://github.com/zingolabs/zaino.git", rev = "e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c" }
+zaino-state = { git = "https://github.com/zingolabs/zaino.git", rev = "e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c" }
 
 [profile.release]
 debug = "line-tables-only"
