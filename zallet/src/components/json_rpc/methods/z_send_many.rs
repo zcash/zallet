@@ -79,7 +79,7 @@ pub(crate) async fn call<C: Chain>(
     impl Future<Output = RpcResult<SendResult>>,
 )> {
     // TODO: Check that Sapling is active, by inspecting height of `chain` snapshot.
-    //       https://github.com/zcash/wallet/issues/237
+    //       https://github.com/zcash/zallet/issues/237
 
     if fee.is_some() {
         return Err(LegacyCode::InvalidParameter
@@ -90,7 +90,7 @@ pub(crate) async fn call<C: Chain>(
 
     let account = match fromaddress.as_str() {
         // Select from the legacy transparent address pool.
-        // TODO: Support this if we're going to. https://github.com/zcash/wallet/issues/138
+        // TODO: Support this if we're going to. https://github.com/zcash/zallet/issues/138
         "ANY_TADDR" => Err(LegacyCode::WalletAccountsUnsupported
             .with_static("The legacy account is currently unsupported for spending from")),
         // Select the account corresponding to the given address.
@@ -115,7 +115,7 @@ pub(crate) async fn call<C: Chain>(
     }?;
 
     // Sanity check for transaction size
-    // TODO: https://github.com/zcash/wallet/issues/255
+    // TODO: https://github.com/zcash/zallet/issues/255
 
     let confirmations_policy = match minconf {
         Some(minconf) => NonZeroU32::new(minconf).map_or(
@@ -133,7 +133,7 @@ pub(crate) async fn call<C: Chain>(
     let params = *wallet.params();
 
     // TODO: Fetch the real maximums within the account so we can detect correctly.
-    //       https://github.com/zcash/wallet/issues/257
+    //       https://github.com/zcash/zallet/issues/257
     let mut max_sapling_available = Zatoshis::const_from_u64(MAX_MONEY);
     let mut max_orchard_available = Zatoshis::const_from_u64(MAX_MONEY);
 
@@ -284,7 +284,7 @@ pub(crate) async fn call<C: Chain>(
         .await
         .map_err(|e| match e.kind() {
             // TODO: Improve internal error types.
-            //       https://github.com/zcash/wallet/issues/256
+            //       https://github.com/zcash/zallet/issues/256
             crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
                 LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
             }

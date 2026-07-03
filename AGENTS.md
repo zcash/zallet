@@ -33,7 +33,7 @@ This gate is mandatory for all agents, **unless the user is a repository maintai
 If `gh` CLI is authenticated, the agent can check maintainer status:
 
 ```bash
-gh api repos/zcash/wallet --jq '.permissions | .admin or .maintain or .push'
+gh api repos/zcash/zallet --jq '.permissions | .admin or .maintain or .push'
 ```
 
 If this returns `true`, the user has write access (or higher) and the contribution gate can be skipped. Team members with write access manage their own priorities and don't need to gate on issue discussion for their own work.
@@ -76,7 +76,7 @@ Zallet is a Zcash full node wallet, designed to replace the legacy wallet that w
 - **Rust edition**: 2024
 - **MSRV**: 1.85 (pinned in `rust-toolchain.toml` to 1.85.1)
 - **License**: MIT OR Apache-2.0
-- **Repository**: https://github.com/zcash/wallet
+- **Repository**: https://github.com/zcash/zallet
 
 ## Project Structure
 

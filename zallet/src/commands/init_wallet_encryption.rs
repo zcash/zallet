@@ -19,7 +19,7 @@ impl AsyncRunnable for InitWalletEncryptionCmd {
 
         // TODO: The following logic does not support plugin recipients, which can only be
         //       derived from identities by the plugins themselves.
-        //       https://github.com/zcash/wallet/issues/252
+        //       https://github.com/zcash/zallet/issues/252
 
         // If we have encrypted identities, it means the operator configured Zallet with
         // an encrypted identity file; obtain the recipients from it.

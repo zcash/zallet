@@ -34,7 +34,7 @@ pub(crate) type DbHandle = deadpool::managed::Object<connection::WalletManager>;
 // Bumped to 0.1.0-alpha.4 because the embedded Zaino chain indexer made a
 // backwards-incompatible change to its database format (zingolabs/zaino#914),
 // pulled in by this release. Wallet databases last touched by 0.1.0-alpha.3 or
-// earlier must be recreated from scratch. See zcash/wallet#394.
+// earlier must be recreated from scratch. See zcash/zallet#394.
 const MIN_COMPATIBLE_ZALLET_VERSION: &str = "0.1.0-alpha.4";
 
 /// Returns the full list of migrations defined in Zallet, to be applied alongside the
@@ -100,7 +100,7 @@ impl Database {
                 // defer initialization until later, or expose enough of the
                 // keystore read logic to let us parse the keystore database here
                 // before the KeyStore component is initialized.
-                //       https://github.com/zcash/wallet/issues/18
+                //       https://github.com/zcash/zallet/issues/18
                 // TODO: Support multi-seed or seed-absent migrations.
                 //       https://github.com/zcash/librustzcash/issues/1284
                 Err(schemerz::MigratorError::Migration {

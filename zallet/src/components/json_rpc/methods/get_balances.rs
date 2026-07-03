@@ -187,7 +187,7 @@ pub(crate) fn call(wallet: &DbConnection, minconf: Option<u32>) -> Response {
     Ok(Balances {
         accounts,
         // TODO: Fetch legacy transparent balance once supported.
-        // https://github.com/zcash/wallet/issues/384
+        // https://github.com/zcash/zallet/issues/384
         legacy_transparent: None,
         legacy_transparent_watchonly: None,
     })

@@ -6,5 +6,5 @@
 # and passes the remaining tokens verbatim to `cargo build` (appending any
 # platform-specific features, such as `zcashd-import`, on its side).
 #
-# Tracking: zebra-state regtest support — zcash/wallet#495.
+# Tracking: zebra-state regtest support — zcash/zallet#495.
 --no-default-features --features zaino

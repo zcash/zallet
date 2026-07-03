@@ -60,7 +60,7 @@ pub(crate) struct GetWalletInfo {
 }
 
 pub(crate) async fn call(keystore: &KeyStore) -> Response {
-    // https://github.com/zcash/wallet/issues/55
+    // https://github.com/zcash/zallet/issues/55
     warn!("TODO: Implement getwalletinfo");
 
     let unlocked_until = if keystore.uses_encrypted_identities() {

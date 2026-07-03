@@ -107,7 +107,7 @@ fn calculate_p2sh_address(script_bytes: &[u8], params: &Network) -> String {
 //       See https://github.com/ZcashFoundation/zcash_script/pull/291
 // TODO: zcashd relied on initialization behaviour for the default value
 //       for null-data or non-standard outputs. Figure out what it is.
-//       https://github.com/zcash/wallet/issues/236
+//       https://github.com/zcash/zallet/issues/236
 fn detect_script_info(
     script_code: &Code,
     params: &Network,
