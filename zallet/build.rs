@@ -286,19 +286,18 @@ pub(super) static METHODS: ::phf::Map<&str, RpcMethod> = ::phf::phf_map! {
                     .iter()
                     .filter(|attr| attr.path().is_ident("doc"))
                 {
-                    if let syn::Meta::NameValue(doc_line) = &attr.meta {
-                        if let syn::Expr::Lit(docs) = &doc_line.value {
-                            if let syn::Lit::Str(s) = &docs.lit {
-                                // Trim the leading space from the doc comment line.
-                                let line = s.value();
-                                let trimmed_line = if line.is_empty() { &line } else { &line[1..] };
+                    if let syn::Meta::NameValue(doc_line) = &attr.meta
+                        && let syn::Expr::Lit(docs) = &doc_line.value
+                        && let syn::Lit::Str(s) = &docs.lit
+                    {
+                        // Trim the leading space from the doc comment line.
+                        let line = s.value();
+                        let trimmed_line = if line.is_empty() { &line } else { &line[1..] };
 
-                                let escaped = trimmed_line.escape_default().collect::<String>();
+                        let escaped = trimmed_line.escape_default().collect::<String>();
 
-                                contents.push_str(&escaped);
-                                contents.push_str("\\n");
-                            }
-                        }
+                        contents.push_str(&escaped);
+                        contents.push_str("\\n");
                     }
                 }
                 contents.push_str("\",\n");

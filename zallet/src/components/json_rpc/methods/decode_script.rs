@@ -226,11 +226,10 @@ mod tests {
         // Uses the same pubkey repeated 3 times (valid for testing)
         let script_hex = format!(
             "52\
-             21{pk}\
-             21{pk}\
-             21{pk}\
-             53ae",
-            pk = ZCASHD_PUBLIC_KEY
+             21{ZCASHD_PUBLIC_KEY}\
+             21{ZCASHD_PUBLIC_KEY}\
+             21{ZCASHD_PUBLIC_KEY}\
+             53ae"
         );
         let result = call(&mainnet(), &script_hex).unwrap().inner;
 

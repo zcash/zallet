@@ -12,7 +12,7 @@ use transparent::keys::TransparentKeyScope;
 use zcash_client_backend::{
     address::UnifiedAddress,
     data_api::{
-        Account, AccountPurpose, InputSource, TransparentOutputFilter, WalletRead,
+        Account, AccountPurpose, CoinbaseFilter, InputSource, WalletRead,
         wallet::{ConfirmationsPolicy, TargetHeight},
     },
     encoding::AddressCodec,
@@ -20,7 +20,7 @@ use zcash_client_backend::{
     wallet::NoteId,
 };
 use zcash_keys::address::Address;
-use zcash_protocol::ShieldedProtocol;
+use zcash_protocol::ShieldedPool;
 use zip32::Scope;
 
 use crate::components::{
@@ -196,7 +196,7 @@ pub(crate) fn call(
                         addr,
                         target_height,
                         confirmations_policy,
-                        TransparentOutputFilter::All,
+                        CoinbaseFilter::AllTransparentOutputs,
                     )
                     .map_err(|e| {
                         RpcError::owned(
@@ -246,7 +246,7 @@ pub(crate) fn call(
         let notes = wallet
             .select_unspent_notes(
                 account_id,
-                &[ShieldedProtocol::Sapling, ShieldedProtocol::Orchard],
+                &[ShieldedPool::Sapling, ShieldedPool::Orchard],
                 target_height,
                 &[],
             )
@@ -312,7 +312,7 @@ pub(crate) fn call(
             let is_internal = note.spending_key_scope() == Scope::Internal;
 
             let (memo, memo_str) =
-                get_memo(*note.txid(), ShieldedProtocol::Sapling, note.output_index())?;
+                get_memo(*note.txid(), ShieldedPool::Sapling, note.output_index())?;
 
             unspent_outputs.push(UnspentOutput {
                 txid: note.txid().to_string(),
@@ -360,7 +360,7 @@ pub(crate) fn call(
             let wallet_internal = note.spending_key_scope() == Scope::Internal;
 
             let (memo, memo_str) =
-                get_memo(*note.txid(), ShieldedProtocol::Orchard, note.output_index())?;
+                get_memo(*note.txid(), ShieldedPool::Orchard, note.output_index())?;
 
             unspent_outputs.push(UnspentOutput {
                 txid: note.txid().to_string(),

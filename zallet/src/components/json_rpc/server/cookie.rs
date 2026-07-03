@@ -24,14 +24,14 @@ pub(crate) struct CookieGuard {
 
 impl Drop for CookieGuard {
     fn drop(&mut self) {
-        if let Err(e) = fs::remove_file(&self.path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                warn!(
-                    "Failed to remove cookie file {}: {}",
-                    self.path.display(),
-                    e
-                );
-            }
+        if let Err(e) = fs::remove_file(&self.path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(
+                "Failed to remove cookie file {}: {}",
+                self.path.display(),
+                e
+            );
         }
     }
 }

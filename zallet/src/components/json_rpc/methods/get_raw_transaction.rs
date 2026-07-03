@@ -876,15 +876,12 @@ mod tests {
         ];
 
         for (sighash_byte, expected_suffix) in test_cases {
-            let sig_hex = format!("48{}{}", base_sig, sighash_byte);
+            let sig_hex = format!("48{base_sig}{sighash_byte}");
             let sig_bytes = hex::decode(&sig_hex).unwrap();
             let asm = Code(sig_bytes).to_asm(true);
             assert!(
                 asm.ends_with(expected_suffix),
-                "Sighash byte {} should produce suffix {}, got: {}",
-                sighash_byte,
-                expected_suffix,
-                asm
+                "Sighash byte {sighash_byte} should produce suffix {expected_suffix}, got: {asm}"
             );
         }
     }
@@ -907,17 +904,11 @@ mod tests {
         // From decodescript.py:82 - 2-of-3 multisig pattern should use '2' and '3'
         // Script: OP_2 <pubkey> <pubkey> <pubkey> OP_3 OP_CHECKMULTISIG
         let public_key = "03b0da749730dc9b4b1f4a14d6902877a92541f5368778853d9c4a0cb7802dcfb2";
-        let push_public_key = format!("21{}", public_key);
-        let script_hex = format!(
-            "52{}{}{}53ae",
-            push_public_key, push_public_key, push_public_key
-        );
+        let push_public_key = format!("21{public_key}");
+        let script_hex = format!("52{push_public_key}{push_public_key}{push_public_key}53ae");
         let script = hex::decode(&script_hex).unwrap();
         let asm = Code(script).to_asm(false);
-        let expected = format!(
-            "2 {} {} {} 3 OP_CHECKMULTISIG",
-            public_key, public_key, public_key
-        );
+        let expected = format!("2 {public_key} {public_key} {public_key} 3 OP_CHECKMULTISIG");
         assert_eq!(asm, expected);
     }
 }

@@ -679,7 +679,13 @@ end = "2027-03-17"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-08-12"
-end = "2026-03-04"
+end = "2027-07-03"
+
+[[trusted.pinentry]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2020-01-12"
+end = "2027-07-03"
 
 [[trusted.redjubjub]]
 criteria = "safe-to-deploy"
@@ -817,7 +823,7 @@ end = "2026-03-31"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-08-20"
-end = "2026-03-04"
+end = "2027-07-03"
 
 [[trusted.zcash_client_backend]]
 criteria = "safe-to-deploy"
@@ -865,7 +871,7 @@ end = "2026-09-26"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-01-15"
-end = "2026-03-04"
+end = "2027-07-03"
 
 [[trusted.zcash_primitives]]
 criteria = "safe-to-deploy"
@@ -877,7 +883,7 @@ end = "2026-09-26"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-08-20"
-end = "2026-03-04"
+end = "2027-07-03"
 
 [[trusted.zcash_proofs]]
 criteria = "safe-to-deploy"
@@ -901,7 +907,7 @@ end = "2026-09-26"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-01-27"
-end = "2026-03-04"
+end = "2027-07-03"
 
 [[trusted.zcash_script]]
 criteria = "safe-to-deploy"
@@ -937,7 +943,7 @@ end = "2026-09-26"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-12-17"
-end = "2026-03-04"
+end = "2027-07-03"
 
 [[trusted.zip32]]
 criteria = "safe-to-deploy"

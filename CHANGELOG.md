@@ -32,12 +32,12 @@ be considered breaking changes.
   - `z_shieldcoinbase`
 
 ### Changed
-
 - **This release is not compatible with wallets created by earlier alpha
   releases.** The embedded Zaino chain indexer made a backwards-incompatible
   change to its database format (zingolabs/zaino#914), which this release pulls
   in. Zallet now refuses to open wallet databases last used by `0.1.0-alpha.3`
   or earlier; start again with a fresh Zallet wallet or a new data directory.
+- MSRV updated to 1.88
 - Updated the Zaino chain indexer to a pre-release `rc-0.4.0` build
   (zingolabs/zaino#1238) that retains NU 6.2 support and adds optional
   ("ephemeral") finalised state. The embedded indexer now runs in ephemeral

@@ -116,9 +116,9 @@ mod tests {
         let params = Network::Consensus(consensus::Network::MainNetwork);
         for (input, expected) in TEST_VECTORS {
             let result = call(&params, input);
-            assert!(result.is_ok(), "Failed to convert {}", input);
+            assert!(result.is_ok(), "Failed to convert {input}");
             let ResultType(tex) = result.unwrap();
-            assert_eq!(&tex, *expected, "Mismatch for input {}", input);
+            assert_eq!(&tex, *expected, "Mismatch for input {input}");
         }
     }
 

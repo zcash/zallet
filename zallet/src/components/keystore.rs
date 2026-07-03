@@ -779,11 +779,11 @@ impl KeyStore {
                 Err(_) => continue,
             };
             let dfvk = DiversifiableFullViewingKey::from_bytes(&dfvk_array);
-            if let Some(dfvk) = dfvk {
-                if dfvk.decrypt_diversifier(address).is_some() {
-                    let extsk = decrypt_standalone_sapling_extsk(&identities, &encrypted_extsk)?;
-                    return Ok(Some(extsk));
-                }
+            if let Some(dfvk) = dfvk
+                && dfvk.decrypt_diversifier(address).is_some()
+            {
+                let extsk = decrypt_standalone_sapling_extsk(&identities, &encrypted_extsk)?;
+                return Ok(Some(extsk));
             }
         }
 

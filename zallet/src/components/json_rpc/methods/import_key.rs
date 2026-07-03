@@ -86,12 +86,11 @@ pub(crate) async fn call<C: Chain>(
 
     // `start_height` is only used as the rescan start when rescanning; for rescan="no"
     // it is ignored entirely, so there is no point validating it against the chain tip.
-    if rescan != "no" {
-        if let Some(tip) = chain_tip {
-            if start_height > tip {
-                return Err(LegacyCode::InvalidParameter.with_static("Block height out of range."));
-            }
-        }
+    if rescan != "no"
+        && let Some(tip) = chain_tip
+        && start_height > tip
+    {
+        return Err(LegacyCode::InvalidParameter.with_static("Block height out of range."));
     }
 
     let hrp = wallet.params().hrp_sapling_extended_spending_key();

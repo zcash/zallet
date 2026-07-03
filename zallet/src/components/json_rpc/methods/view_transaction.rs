@@ -16,7 +16,7 @@ use zcash_client_sqlite::{AccountUuid, error::SqliteClientError};
 use zcash_keys::encoding::AddressCodec;
 use zcash_note_encryption::{try_note_decryption, try_output_recovery_with_ovk};
 use zcash_protocol::{
-    ShieldedProtocol, TxId,
+    ShieldedPool, TxId,
     consensus::{BlockHeight, Parameters},
     memo::Memo,
     value::{BalanceError, Zatoshis},
@@ -342,12 +342,14 @@ pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C, txid_str: &s
     type OutputInfo = (TxId, u16, AccountUuid, Option<String>, Zatoshis);
     fn output_with_nullifier(
         wallet: &DbConnection,
-        pool: ShieldedProtocol,
+        pool: ShieldedPool,
         nf: [u8; 32],
     ) -> RpcResult<Option<OutputInfo>> {
         let (pool_prefix, output_prefix) = match pool {
-            ShieldedProtocol::Sapling => ("sapling", "output"),
-            ShieldedProtocol::Orchard => ("orchard", "action"),
+            ShieldedPool::Sapling => ("sapling", "output"),
+            ShieldedPool::Orchard => ("orchard", "action"),
+            // Ironwood is not yet supported; elide such spends rather than failing the call.
+            ShieldedPool::Ironwood => return Ok(None),
         };
 
         wallet
@@ -386,10 +388,16 @@ pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C, txid_str: &s
     fn sent_to_address(
         wallet: &DbConnection,
         txid: &TxId,
-        pool: ShieldedProtocol,
+        pool: ShieldedPool,
         idx: u16,
         fallback_addr: impl FnOnce() -> Option<String>,
     ) -> RpcResult<Option<String>> {
+        let output_pool = match pool {
+            ShieldedPool::Sapling => 2,
+            ShieldedPool::Orchard => 3,
+            // Ironwood is not yet supported; elide the sent-to address rather than failing.
+            ShieldedPool::Ironwood => return Ok(None),
+        };
         Ok(wallet
             .with_raw(|conn, _| {
                 conn.query_row(
@@ -401,10 +409,7 @@ pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C, txid_str: &s
                             AND   output_index = :output_index",
                     named_params! {
                         ":txid": txid.as_ref(),
-                        ":output_pool": match pool {
-                            ShieldedProtocol::Sapling => 2,
-                            ShieldedProtocol::Orchard => 3,
-                        },
+                        ":output_pool": output_pool,
                         ":output_index": idx,
                     },
                     |row| row.get("to_address"),
@@ -487,7 +492,7 @@ pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C, txid_str: &s
         // Sapling spends
         for (spend, idx) in bundle.shielded_spends().iter().zip(0..) {
             let spent_note =
-                output_with_nullifier(wallet, ShieldedProtocol::Sapling, spend.nullifier().0)?;
+                output_with_nullifier(wallet, ShieldedPool::Sapling, spend.nullifier().0)?;
 
             if let Some((txid_prev, output_prev, account_id, address, value)) = spent_note {
                 spends.push(Spend {
@@ -512,7 +517,7 @@ pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C, txid_str: &s
         for (action, idx) in bundle.actions().iter().zip(0..) {
             let spent_note = output_with_nullifier(
                 wallet,
-                ShieldedProtocol::Orchard,
+                ShieldedPool::Orchard,
                 action.nullifier().to_bytes(),
             )?;
 
@@ -661,16 +666,15 @@ pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C, txid_str: &s
                         .map(|(n, addr, memo)| (n, None, addr, memo))
                 })
             {
-                let address =
-                    sent_to_address(wallet, &txid, ShieldedProtocol::Sapling, idx, || {
-                        addr.map(|address| {
-                            ZcashAddress::from_sapling(
-                                wallet.params().network_type(),
-                                address.to_bytes(),
-                            )
-                            .encode()
-                        })
-                    })?;
+                let address = sent_to_address(wallet, &txid, ShieldedPool::Sapling, idx, || {
+                    addr.map(|address| {
+                        ZcashAddress::from_sapling(
+                            wallet.params().network_type(),
+                            address.to_bytes(),
+                        )
+                        .encode()
+                    })
+                })?;
                 // Don't need to check `funded_by_this_wallet` because we only reach this
                 // line if the output was decryptable by an IVK (so it doesn't matter) or
                 // an OVK (so it is by definition outgoing, even if we can't currently
@@ -771,19 +775,18 @@ pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C, txid_str: &s
                         .map(|(n, addr, memo)| (n, None, addr, memo))
                 })
             {
-                let address =
-                    sent_to_address(wallet, &txid, ShieldedProtocol::Orchard, idx, || {
-                        addr.map(|address| {
-                            ZcashAddress::from_unified(
-                                wallet.params().network_type(),
-                                unified::Address::try_from_items(vec![unified::Receiver::Orchard(
-                                    address.to_raw_address_bytes(),
-                                )])
-                                .expect("valid"),
-                            )
-                            .encode()
-                        })
-                    })?;
+                let address = sent_to_address(wallet, &txid, ShieldedPool::Orchard, idx, || {
+                    addr.map(|address| {
+                        ZcashAddress::from_unified(
+                            wallet.params().network_type(),
+                            unified::Address::try_from_items(vec![unified::Receiver::Orchard(
+                                address.to_raw_address_bytes(),
+                            )])
+                            .expect("valid"),
+                        )
+                        .encode()
+                    })
+                })?;
                 // Don't need to check `funded_by_this_wallet` because we only reach this
                 // line if the output was decryptable by an IVK (so it doesn't matter) or
                 // an OVK (so it is by definition outgoing, even if we can't currently

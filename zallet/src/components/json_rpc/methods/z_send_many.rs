@@ -13,7 +13,8 @@ use zcash_client_backend::{
         Account,
         wallet::{
             ConfirmationsPolicy, create_proposed_transactions,
-            input_selection::GreedyInputSelector, propose_transfer,
+            input_selection::{GreedyInputSelector, TransparentSpendPolicy},
+            propose_transfer,
         },
     },
     fees::{DustOutputPolicy, StandardFeeRule, standard::MultiOutputChangeStrategy},
@@ -23,7 +24,7 @@ use zcash_client_sqlite::ReceivedNoteId;
 use zcash_keys::{address::Address, keys::UnifiedSpendingKey};
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
-    PoolType, ShieldedProtocol,
+    PoolType, ShieldedPool,
     value::{MAX_MONEY, Zatoshis},
 };
 
@@ -200,7 +201,7 @@ pub(crate) async fn call<C: Chain>(
     let change_strategy = MultiOutputChangeStrategy::new(
         StandardFeeRule::Zip317,
         None,
-        ShieldedProtocol::Orchard,
+        ShieldedPool::Orchard,
         DustOutputPolicy::default(),
         APP.config().note_management.split_policy(),
     );
@@ -220,6 +221,9 @@ pub(crate) async fn call<C: Chain>(
         &change_strategy,
         request,
         confirmations_policy,
+        // Zallet does not yet spend transparent funds in a general transfer; `ANY_TADDR`
+        // spending is rejected above. This preserves the prior shielded-only behavior.
+        &TransparentSpendPolicy::ShieldedOnly,
     )
     // TODO: Map errors to `zcashd` shape.
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
@@ -232,7 +236,7 @@ pub(crate) async fn call<C: Chain>(
             .shielded_inputs()
             .iter()
             .flat_map(|inputs| inputs.notes())
-            .filter(|note| note.note().protocol() == ShieldedProtocol::Orchard)
+            .filter(|note| note.note().protocol() == ShieldedPool::Orchard)
             .count();
 
         let orchard_outputs = step

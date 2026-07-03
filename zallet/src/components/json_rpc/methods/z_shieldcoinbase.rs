@@ -13,7 +13,7 @@ use uuid::Uuid;
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
     data_api::{
-        Account as _, InputSource, TransparentOutputFilter, WalletRead,
+        Account as _, CoinbaseFilter, InputSource, WalletRead,
         wallet::{
             ConfirmationsPolicy, SpendingKeys, TargetHeight, create_proposed_transactions,
             input_selection::GreedyInputSelector, propose_shielding_coinbase,
@@ -204,7 +204,7 @@ pub(crate) async fn call<C: Chain>(
     // Create the shielding proposal. Uses Zatoshis::ZERO as the shielding
     // threshold to shield all available coinbase UTXOs (or all up to `limit`
     // when supplied). `propose_shielding_coinbase` hard-codes
-    // `TransparentOutputFilter::CoinbaseOnly`, attaches the supplied memo to
+    // `CoinbaseFilter::CoinbaseOnly`, attaches the supplied memo to
     // the resulting shielded payment, and produces no transparent or shielded
     // change (preserving the privacy invariant that a shielded change output
     // would let `toaddress` learn the sender's total selected-coinbase value).
@@ -483,7 +483,7 @@ fn enumerate_eligible(
                 addr,
                 target_height,
                 ConfirmationsPolicy::MIN,
-                TransparentOutputFilter::CoinbaseOnly,
+                CoinbaseFilter::CoinbaseOnly,
             )
             .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
         total_utxos = total_utxos.saturating_add(utxos.len() as u64);

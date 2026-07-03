@@ -378,12 +378,12 @@ impl MigrateZcashdWalletCmd {
             for wallet_tx in wallet.transactions().values() {
                 let block_hash = BlockHash(*wallet_tx.hash_block().as_ref());
                 // Skip transactions that were unmined when the zcashd wallet was last written.
-                if block_hash.0 != [0; 32] {
-                    if let Entry::Vacant(entry) = main_chain_block_heights.entry(block_hash) {
-                        // Ignore any blocks that are not in the main chain.
-                        if let Some(height) = chain_view.block_height(&block_hash).await? {
-                            entry.insert(height);
-                        }
+                if block_hash.0 != [0; 32]
+                    && let Entry::Vacant(entry) = main_chain_block_heights.entry(block_hash)
+                {
+                    // Ignore any blocks that are not in the main chain.
+                    if let Some(height) = chain_view.block_height(&block_hash).await? {
+                        entry.insert(height);
                     }
                 }
             }
@@ -655,7 +655,7 @@ impl MigrateZcashdWalletCmd {
 
             if !account_exists {
                 db_data.import_account_ufvk(
-                    &format!("zcashd legacy sapling {}", idx),
+                    &format!("zcashd legacy sapling {idx}"),
                     &ufvk,
                     &wallet_birthday,
                     AccountPurpose::Spending { derivation },
@@ -688,7 +688,7 @@ impl MigrateZcashdWalletCmd {
 
             if db_data.get_account_for_ufvk(&ufvk)?.is_none() {
                 db_data.import_account_ufvk(
-                    &format!("zcashd imported view-only sapling {}", idx),
+                    &format!("zcashd imported view-only sapling {idx}"),
                     &ufvk,
                     &wallet_birthday,
                     AccountPurpose::ViewOnly,
