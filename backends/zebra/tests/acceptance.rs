@@ -300,7 +300,7 @@ fn generate_encryption_identity_refuses_to_clobber() {
 fn generate_encryption_identity_writes_to_stdout() {
     let datadir = tempdir().unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zallet"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zallet-zebra"))
         .arg("--datadir")
         .arg(datadir.path())
         .arg("generate-encryption-identity")
@@ -368,7 +368,7 @@ fn generate_encryption_identity_passphrase_writes_armored_file() {
     let datadir = tempdir().unwrap();
     let identity_file = datadir.path().join("encryption-identity.txt");
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zallet"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zallet-zebra"))
         .arg("--datadir")
         .arg(datadir.path())
         .arg("generate-encryption-identity")

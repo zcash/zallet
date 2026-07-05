@@ -70,8 +70,8 @@ RUN set -eux; \
     export CARGO_BUILD_RUSTFLAGS="--remap-path-prefix=$PWD=/build --remap-path-prefix=$CARGO_HOME=/cargo"; \
     cargo build --release --locked \
       --manifest-path backends/zebra/Cargo.toml \
-      --bin zallet --features rpc-cli,zcashd-import; \
-    install -D -m0755 backends/zebra/target/release/zallet /out/zallet; \
+      --bin zallet-zebra-state --features rpc-cli,zcashd-import; \
+    install -D -m0755 backends/zebra/target/release/zallet-zebra-state /out/zallet; \
     # Collect the build.rs-generated share tree (completions, manpages,
     # debian-copyright), matching the StageX export layout where present.
     REL="backends/zebra/target/release"; \

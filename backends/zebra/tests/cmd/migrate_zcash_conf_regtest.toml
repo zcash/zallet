@@ -1,4 +1,4 @@
-bin.name = "zallet"
+bin.name = "zallet-zebra"
 args = "migrate-zcash-conf --zcashd-datadir ./ -o - --this-is-alpha-code-and-you-will-need-to-redo-the-migration-later"
 stdin = ""
 stdout = """

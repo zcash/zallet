@@ -130,7 +130,7 @@ impl ZebraChain {
     }
 }
 
-/// Factory for the `zebra-state` chain backend.
+/// Factory for the `zebra` chain backend.
 #[derive(Clone, Copy, Debug)]
 pub struct ZebraBackend;
 

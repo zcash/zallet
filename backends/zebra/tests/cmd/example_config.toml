@@ -1,4 +1,4 @@
-bin.name = "zallet"
+bin.name = "zallet-zebra"
 args = "example-config -o zallet.toml --this-is-alpha-code-and-you-will-need-to-recreate-the-example-later"
 stdin = ""
 stdout = """
