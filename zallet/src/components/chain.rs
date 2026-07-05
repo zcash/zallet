@@ -36,7 +36,7 @@ use crate::network::{NETWORK_UPGRADES, Network};
 use crate::{components::TaskHandle, config::ZalletConfig};
 
 mod error;
-pub(crate) use error::ChainError;
+pub use error::ChainError;
 
 // Shared read-only `ReadStateService` construction, used by the `zebra-state` backend and
 // by the optional read-state-service variant of the `zaino` backend.
@@ -46,19 +46,19 @@ mod read_state;
 #[cfg(feature = "zaino")]
 mod zaino;
 #[cfg(feature = "zaino")]
-pub(crate) use zaino::ZainoBackend;
+pub use zaino::ZainoBackend;
 
 #[cfg(feature = "zebra-state")]
 mod zebra;
 #[cfg(feature = "zebra-state")]
-pub(crate) use zebra::ZebraBackend;
+pub use zebra::ZebraBackend;
 
 /// A capability for constructing the process's chain backend.
 ///
 /// Implemented by a unit struct in each backend module. The selected factory is
 /// registered at boot and consumed through a dyn-safe runtime boundary;
 /// everything downstream of construction is statically dispatched over [`Chain`].
-pub(crate) trait ChainFactory: Send + Sync + 'static {
+pub trait ChainFactory: Send + Sync + 'static {
     /// The concrete chain backend this factory constructs.
     type Chain: Chain;
 
@@ -75,12 +75,17 @@ pub(crate) trait ChainFactory: Send + Sync + 'static {
 /// The blanket impl over [`ChainFactory`] encloses the whole chain-dependent tail of
 /// each command, so the concrete [`Chain`] type never crosses this boundary — type
 /// erasure costs one virtual call per command invocation.
-pub(crate) trait ChainRuntime: Send + Sync {
+pub trait ChainRuntime: Send + Sync {
     /// Runs the chain-dependent body of `zallet start`.
     fn run_start(&self) -> BoxFuture<'_, Result<(), Error>>;
 
     /// Runs the chain-dependent body of `zallet migrate-zcashd-wallet`.
+    ///
+    /// The command type is crate-private on purpose: this method exists for the
+    /// command layer inside this crate, and backend crates only ever *implement* it
+    /// (via the blanket impl), never call it.
     #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+    #[allow(private_interfaces)]
     fn run_migrate_zcashd_wallet<'a>(
         &'a self,
         cmd: &'a crate::cli::MigrateZcashdWalletCmd,
@@ -93,6 +98,7 @@ impl<F: ChainFactory> ChainRuntime for F {
     }
 
     #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+    #[allow(private_interfaces)]
     fn run_migrate_zcashd_wallet<'a>(
         &'a self,
         cmd: &'a crate::cli::MigrateZcashdWalletCmd,
@@ -101,18 +107,10 @@ impl<F: ChainFactory> ChainRuntime for F {
     }
 }
 
-/// The chain backend factory selected at compile time by the `zaino` / `zebra-state`
-/// feature. Registered with the application at boot; everything else reaches the
-/// backend through [`ChainRuntime`].
-#[cfg(feature = "zaino")]
-pub(crate) const DEFAULT_CHAIN_RUNTIME: &(dyn ChainRuntime) = &ZainoBackend;
-#[cfg(feature = "zebra-state")]
-pub(crate) const DEFAULT_CHAIN_RUNTIME: &(dyn ChainRuntime) = &ZebraBackend;
-
 /// A handle to a source of Zcash chain data.
 ///
 /// Cheap to clone; clones share the underlying source.
-pub(crate) trait Chain: Clone + Send + Sync + 'static {
+pub trait Chain: Clone + Send + Sync + 'static {
     /// A consistent, reorg-immune view of the chain captured by [`Chain::snapshot`].
     type View: ChainView;
 
@@ -446,7 +444,7 @@ pub(crate) async fn check_consensus_compatibility(
 /// A consistent, reorg-immune view of the chain as of a fixed tip.
 ///
 /// A sequence of reads through one `ChainView` is mutually consistent.
-pub(crate) trait ChainView: Clone + Send + Sync + 'static {
+pub trait ChainView: Clone + Send + Sync + 'static {
     /// Returns this view's chain tip.
     fn tip(&self) -> impl Future<Output = Result<ChainBlock, ChainError>> + Send;
 
@@ -548,15 +546,17 @@ pub(crate) trait ChainView: Clone + Send + Sync + 'static {
 
 /// A block's height and hash.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ChainBlock {
-    pub(crate) height: BlockHeight,
-    pub(crate) hash: BlockHash,
+pub struct ChainBlock {
+    /// The block's height.
+    pub height: BlockHeight,
+    /// The block's hash.
+    pub hash: BlockHash,
 }
 
 /// An ordered list of a caller's own block hashes, highest chain height first, used to
 /// locate where the caller's chain diverges from a backend's best chain (see
 /// [`ChainView::find_fork_point`]).
-pub(crate) struct BlockLocator(Vec<BlockHash>);
+pub struct BlockLocator(Vec<BlockHash>);
 
 impl BlockLocator {
     /// Builds a locator from the caller's known blocks, highest height first.
@@ -569,7 +569,7 @@ impl BlockLocator {
     /// and the only producer builds it from its own contiguous history — so a violation is
     /// always a programming error, caught here rather than surfacing as a silently wrong
     /// fork point.
-    pub(crate) fn from_blocks(blocks: impl IntoIterator<Item = ChainBlock>) -> Self {
+    pub fn from_blocks(blocks: impl IntoIterator<Item = ChainBlock>) -> Self {
         let mut hashes = Vec::new();
         let mut prev_height: Option<BlockHeight> = None;
         for block in blocks {
@@ -588,23 +588,28 @@ impl BlockLocator {
     }
 
     /// The locator's block hashes, highest chain height first.
-    pub(crate) fn hashes(&self) -> &[BlockHash] {
+    pub fn hashes(&self) -> &[BlockHash] {
         &self.0
     }
 }
 
 /// A transaction together with the chain metadata the wallet needs to ingest it.
-pub(crate) struct ChainTx {
-    pub(crate) inner: Transaction,
-    pub(crate) raw: Vec<u8>,
-    pub(crate) block_hash: Option<BlockHash>,
-    pub(crate) mined_height: Option<BlockHeight>,
-    pub(crate) block_time: Option<u32>,
+pub struct ChainTx {
+    /// The parsed transaction.
+    pub inner: Transaction,
+    /// The transaction's raw serialized bytes.
+    pub raw: Vec<u8>,
+    /// The hash of the block containing the transaction, if mined.
+    pub block_hash: Option<BlockHash>,
+    /// The height of the block containing the transaction, if mined.
+    pub mined_height: Option<BlockHeight>,
+    /// The timestamp of the block containing the transaction, if mined.
+    pub block_time: Option<u32>,
 }
 
 /// The spend status of a transparent output, as reported by [`ChainView::outpoint_spend_status`].
 #[cfg(feature = "spend-index")]
-pub(crate) enum SpendStatus {
+pub enum SpendStatus {
     /// The output is unspent on this view's chain.
     Unspent,
     /// The output was spent by the transaction with this txid.

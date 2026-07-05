@@ -151,14 +151,16 @@ impl Application for ZalletApp {
 
 /// Boots the Zallet application, parsing subcommand and options from command-line
 /// arguments, and terminating when complete.
-pub fn boot(requested_languages: Vec<LanguageIdentifier>) {
+pub fn boot(
+    chain_runtime: &'static dyn ChainRuntime,
+    requested_languages: Vec<LanguageIdentifier>,
+) {
     // We load languages here so that the app's CLI usage text can be localized.
     i18n::load_languages(&requested_languages);
 
-    // Register the compile-time-selected chain backend. Once the backends move to
-    // their own crates (zcash/zallet#540), each backend binary registers its own
-    // factory here instead.
-    let _ = CHAIN_RUNTIME.set(crate::components::chain::DEFAULT_CHAIN_RUNTIME);
+    // Register the caller's chain backend. Each backend binary supplies its own
+    // factory here (zcash/zallet#540).
+    let _ = CHAIN_RUNTIME.set(chain_runtime);
 
     // Now do the normal Abscissa boot.
     abscissa_core::boot(&APP);
@@ -172,7 +174,11 @@ mod tests {
     /// module owns.)
     #[test]
     fn chain_runtime_registration() {
-        let _ = super::CHAIN_RUNTIME.set(crate::components::chain::DEFAULT_CHAIN_RUNTIME);
+        #[cfg(feature = "zaino")]
+        let backend: &'static dyn super::ChainRuntime = &crate::components::chain::ZainoBackend;
+        #[cfg(feature = "zebra-state")]
+        let backend: &'static dyn super::ChainRuntime = &crate::components::chain::ZebraBackend;
+        let _ = super::CHAIN_RUNTIME.set(backend);
         // Must not panic:
         let _rt = super::chain_runtime();
     }

@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 
 use crate::error::Error;
 
-pub(crate) mod chain;
+pub mod chain;
 pub(crate) mod database;
 pub(crate) mod json_rpc;
 pub(crate) mod sync;
@@ -23,4 +23,4 @@ pub(crate) mod keystore;
 /// [`StartCmd::run`].
 ///
 /// [`StartCmd::run`]: crate::commands::AsyncRunnable::run
-pub(crate) type TaskHandle = JoinHandle<Result<(), Error>>;
+pub type TaskHandle = JoinHandle<Result<(), Error>>;

@@ -132,11 +132,16 @@ impl Runnable for RpcCliCmd {
     }
 }
 
+/// Errors that can occur while running the `zallet rpc` client.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RpcCliError {
+pub enum RpcCliError {
+    /// The wallet's JSON-RPC server could not be reached.
     FailedToConnect,
+    /// A request parameter was not valid JSON.
     InvalidParameter(String),
+    /// The JSON-RPC request failed.
     RequestFailed(String),
+    /// The wallet is not running a JSON-RPC server.
     WalletHasNoRpcServer,
 }
 

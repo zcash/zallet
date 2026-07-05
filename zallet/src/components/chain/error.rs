@@ -10,7 +10,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// Absence of a requested item is **not** an error; methods return `Ok(None)` for that.
 #[derive(Debug)]
 #[non_exhaustive]
-pub(crate) enum ChainError {
+pub enum ChainError {
     /// The chain source is temporarily unable to serve the request; retrying later may
     /// succeed (transient transport failure, the backend is still syncing, work queue full).
     ///
@@ -29,19 +29,19 @@ pub(crate) enum ChainError {
 
 impl ChainError {
     /// Wraps an arbitrary error as a [`ChainError::Backend`].
-    pub(crate) fn backend(source: impl Into<BoxError>) -> Self {
+    pub fn backend(source: impl Into<BoxError>) -> Self {
         ChainError::Backend(source.into())
     }
 
     /// Wraps an arbitrary error as a [`ChainError::Unavailable`].
     #[allow(dead_code)]
-    pub(crate) fn unavailable(source: impl Into<BoxError>) -> Self {
+    pub fn unavailable(source: impl Into<BoxError>) -> Self {
         ChainError::Unavailable(source.into())
     }
 
     /// Wraps an arbitrary error as a [`ChainError::InvalidData`].
     #[allow(dead_code)] // unused by whichever backend is not compiled
-    pub(crate) fn invalid_data(source: impl Into<BoxError>) -> Self {
+    pub fn invalid_data(source: impl Into<BoxError>) -> Self {
         ChainError::InvalidData(source.into())
     }
 }

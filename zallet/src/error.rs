@@ -1,3 +1,5 @@
+//! Error types for Zallet.
+
 use std::fmt;
 use std::ops::Deref;
 
@@ -6,7 +8,7 @@ use abscissa_core::error::{BoxError, Context};
 use crate::components::sync::SyncError;
 
 #[cfg(feature = "rpc-cli")]
-use crate::commands::rpc_cli::RpcCliError;
+pub use crate::commands::rpc_cli::RpcCliError;
 
 macro_rules! wfl {
     ($f:ident, $message_id:literal) => {
@@ -29,13 +31,19 @@ macro_rules! wlnfl {
     };
 }
 
+/// The kinds of errors Zallet reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ErrorKind {
+pub enum ErrorKind {
+    /// A general error not covered by the other kinds.
     Generic,
+    /// A failure while initializing Zallet or one of its components.
     Init,
+    /// A failure in the chain-data backend.
     Chain,
+    /// A failure in the `zallet rpc` client.
     #[cfg(feature = "rpc-cli")]
     RpcCli(RpcCliError),
+    /// A failure in the wallet sync process.
     Sync,
 }
 
@@ -56,14 +64,14 @@ impl std::error::Error for ErrorKind {}
 
 impl ErrorKind {
     /// Creates an error context from this error.
-    pub(crate) fn context(self, source: impl Into<BoxError>) -> Context<ErrorKind> {
+    pub fn context(self, source: impl Into<BoxError>) -> Context<ErrorKind> {
         Context::new(self, Some(source.into()))
     }
 }
 
 /// Error type
 #[derive(Debug)]
-pub(crate) struct Error(Box<Context<ErrorKind>>);
+pub struct Error(Box<Context<ErrorKind>>);
 
 impl Deref for Error {
     type Target = Context<ErrorKind>;

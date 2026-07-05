@@ -55,7 +55,7 @@ const MAX_REORG_DEPTH: u32 = 1000;
 
 /// A handle to chain data read from a local zebrad's `zebra-state`.
 #[derive(Clone)]
-pub(crate) struct ZebraChain {
+pub struct ZebraChain {
     read_state_service: ReadStateService,
     validator_rpc: ValidatorRpcClient,
     params: Network,
@@ -69,7 +69,7 @@ impl std::fmt::Debug for ZebraChain {
 }
 
 impl ZebraChain {
-    pub(crate) async fn new(config: &ZalletConfig) -> Result<(Self, TaskHandle), Error> {
+    pub async fn new(config: &ZalletConfig) -> Result<(Self, TaskHandle), Error> {
         let params = config.consensus.network();
 
         let rss = config.indexer.read_state_service.as_ref().ok_or_else(|| {
@@ -121,7 +121,7 @@ impl ZebraChain {
 
 /// Factory for the `zebra-state` chain backend.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ZebraBackend;
+pub struct ZebraBackend;
 
 impl ChainFactory for ZebraBackend {
     type Chain = ZebraChain;
@@ -217,7 +217,7 @@ impl ZebraChain {
 /// directly (stable on disk); non-finalized reads are pinned to the captured tip's chain
 /// by resolving each height to a hash (memoized in `cache`) and reading by that hash.
 #[derive(Clone)]
-pub(crate) struct ZebraChainView<R: ChainReader = ReadStateChainReader> {
+pub struct ZebraChainView<R: ChainReader = ReadStateChainReader> {
     reader: R,
     validator_rpc: ValidatorRpcClient,
     params: Network,

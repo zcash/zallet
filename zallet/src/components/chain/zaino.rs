@@ -86,7 +86,7 @@ fn to_zaino_height(height: BlockHeight) -> zaino_state::Height {
 const ZAINO_FINALISED_DB_VERSION: u32 = 1;
 
 #[derive(Clone)]
-pub(crate) struct ZainoChain {
+pub struct ZainoChain {
     subscriber: NodeBackedChainIndexSubscriber,
     /// Used for submitting transactions to the network (`ChainIndex` is a read-only view
     /// of the chain).
@@ -101,7 +101,7 @@ impl fmt::Debug for ZainoChain {
 }
 
 impl ZainoChain {
-    pub(crate) async fn new(config: &ZalletConfig) -> Result<(Self, TaskHandle), Error> {
+    pub async fn new(config: &ZalletConfig) -> Result<(Self, TaskHandle), Error> {
         let params = config.consensus.network();
 
         let resolved_validator_address = match config.indexer.validator_address.as_deref() {
@@ -271,7 +271,7 @@ impl From<NetworkUpgradeStatus> for UpgradeStatus {
 
 /// Factory for the `zaino` chain backend.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ZainoBackend;
+pub struct ZainoBackend;
 
 impl ChainFactory for ZainoBackend {
     type Chain = ZainoChain;
@@ -379,7 +379,7 @@ impl Chain for ZainoChain {
 /// as long as (any clone of) the instance is live, regardless of what new blocks or
 /// reorgs are observed by the underlying chain indexer.
 #[derive(Clone)]
-pub(crate) struct ZainoChainView {
+pub struct ZainoChainView {
     chain: NodeBackedChainIndexSubscriber,
     snapshot: ChainIndexSnapshot,
     params: Network,

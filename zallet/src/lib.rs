@@ -28,9 +28,9 @@ compile_error!("exactly one chain backend must be enabled: `zebra-state` (defaul
 pub mod application;
 mod cli;
 mod commands;
-mod components;
+pub mod components;
 pub mod config;
-mod error;
+pub mod error;
 mod i18n;
 pub mod network;
 mod prelude;

@@ -19,27 +19,27 @@ use super::convert;
 
 /// The header data the height→hash resolve walk needs.
 #[derive(Clone, Debug)]
-pub(crate) struct HeaderInfo {
+pub struct HeaderInfo {
     #[allow(dead_code)] // read only by `block_height` (zcashd-import feature)
     pub height: BlockHeight,
     pub previous_block_hash: BlockHash,
 }
 
 /// A mined transaction located on the best chain.
-pub(crate) struct MinedTxInfo {
+pub struct MinedTxInfo {
     pub raw: Vec<u8>,
     pub height: BlockHeight,
     pub block_time: u32,
 }
 
 /// A transaction located on a non-best chain.
-pub(crate) struct SideTxInfo {
+pub struct SideTxInfo {
     pub raw: Vec<u8>,
     pub block_hash: BlockHash,
 }
 
 /// Read operations over a chain backend, returning wallet-side types.
-pub(crate) trait ChainReader: Clone + Send + Sync + 'static {
+pub trait ChainReader: Clone + Send + Sync + 'static {
     fn tip(&self) -> impl Future<Output = Result<Option<ChainBlock>, ChainError>> + Send;
     fn best_chain_block_hash(
         &self,
@@ -104,8 +104,8 @@ pub(crate) trait ChainReader: Clone + Send + Sync + 'static {
 
 /// [`ChainReader`] backed by a `zebra-state` `ReadStateService`.
 #[derive(Clone)]
-pub(crate) struct ReadStateChainReader {
-    pub(crate) read_state: ReadStateService,
+pub struct ReadStateChainReader {
+    pub read_state: ReadStateService,
 }
 
 impl ReadStateChainReader {
