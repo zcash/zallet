@@ -150,7 +150,10 @@ jobs:
           --all-targets
           --features zcashd-import,rpc-cli,tokio-console
       - name: Verify working directory is clean (excluding lockfiles)
-        run: git diff --exit-code ':!Cargo.lock' ':!backends/zebra/Cargo.lock' ':!backends/zaino/Cargo.lock'
+        # The `--` is load-bearing: the deleted lockfiles are not regenerated on
+        # platforms that skip a backend build, and git fatals on a pathspec for
+        # a nonexistent path unless the paths are `--`-separated.
+        run: git diff --exit-code -- ':!Cargo.lock' ':!backends/zebra/Cargo.lock' ':!backends/zaino/Cargo.lock'
 
   trigger-integration:
     name: Trigger integration tests
