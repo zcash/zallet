@@ -19,8 +19,6 @@ pub(crate) mod keystore;
 /// A handle to a background task spawned by a component.
 ///
 /// Background tasks in Zallet are either one-shot (expected to terminate before Zallet),
-/// or ongoing (Zallet shuts down if the task finishes). The tasks are monitored by
-/// [`StartCmd::run`].
-///
-/// [`StartCmd::run`]: crate::commands::AsyncRunnable::run
+/// or ongoing (Zallet shuts down if the task finishes). The tasks are monitored by the
+/// `zallet start` command.
 pub type TaskHandle = JoinHandle<Result<(), Error>>;
