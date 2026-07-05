@@ -10,9 +10,19 @@ permissions:
   contents: read
 
 jobs:
+  # Each chain backend lives in its own cargo workspace with its own lockfile
+  # (zcash/zallet#540), so every resolution graph is audited separately.
+  # Audit facts are shared: each backend workspace's supply-chain/audits.toml
+  # is a checked-in symlink to the root's, as is its deny.toml. Policies and
+  # imports are graph-specific, so config.toml and imports.lock are real
+  # per-workspace files (cargo-vet errors on policy entries for crates that
+  # are not in the current graph, so a shared config cannot serve all three).
   cargo-vet:
-    name: Vet Rust dependencies
+    name: Vet Rust dependencies (${{ matrix.workspace }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        workspace: [".", "backends/zebra", "backends/zaino"]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -24,10 +34,14 @@ jobs:
           TOOLCHAIN: ${{steps.toolchain.outputs.name}}
       - run: cargo install cargo-vet --version ~0.10
       - run: cargo vet --locked
+        working-directory: ${{ matrix.workspace }}
 
   cargo-deny:
-    name: Check licenses
+    name: Check licenses (${{ matrix.workspace }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        workspace: [".", "backends/zebra", "backends/zaino"]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -35,6 +49,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@f2ba7abc2abebaf185c833c3961145a3c275caad # v2.0.13
         with:
           command: check licenses
+          manifest-path: ${{ matrix.workspace }}/Cargo.toml
 
   required-audits:
     name: Required audits have passed
