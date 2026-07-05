@@ -69,11 +69,12 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 RUN set -eux; \
     export CARGO_BUILD_RUSTFLAGS="--remap-path-prefix=$PWD=/build --remap-path-prefix=$CARGO_HOME=/cargo"; \
     cargo build --release --locked \
+      --manifest-path backends/zebra/Cargo.toml \
       --bin zallet --features rpc-cli,zcashd-import; \
-    install -D -m0755 target/release/zallet /out/zallet; \
+    install -D -m0755 backends/zebra/target/release/zallet /out/zallet; \
     # Collect the build.rs-generated share tree (completions, manpages,
     # debian-copyright), matching the StageX export layout where present.
-    REL="target/release"; \
+    REL="backends/zebra/target/release"; \
     mkdir -p /out/usr/local/share/zallet; \
     for d in completions manpages; do \
       [ -d "$REL/$d" ] && cp -a "$REL/$d" /out/usr/local/share/zallet/ || true; \

@@ -31,20 +31,24 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      # The `zaino` and `zebra-state` chain backends are mutually exclusive, so each is
-      # tested separately rather than via `--all-features`.
+      # Each chain backend lives in its own workspace with its own lockfile
+      # (zcash/zallet#540), so each is tested separately alongside the shared
+      # zallet-core workspace.
+      - name: Run tests (zallet-core)
+        run: >
+          cargo test
+          --workspace
+          --features zcashd-import,rpc-cli,tokio-console
       - name: Run tests (zaino backend)
         run: >
           cargo test
-          --workspace
-          --no-default-features
-          --features zaino,zcashd-import,rpc-cli,tokio-console
+          --manifest-path backends/zaino/Cargo.toml
+          --features zcashd-import,rpc-cli,tokio-console
       - name: Run tests (zebra-state backend)
         run: >
           cargo test
-          --workspace
-          --no-default-features
-          --features zebra-state,zcashd-import,rpc-cli,tokio-console
+          --manifest-path backends/zebra/Cargo.toml
+          --features zcashd-import,rpc-cli,tokio-console
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -89,14 +93,19 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      # Cross-platform / NU7 / merchant_terminal coverage tracks the default (`zaino`)
-      # backend; the `zebra-state` backend is Linux-only and covered by `test-msrv-required`.
-      - name: Run tests
+      # Cross-platform / NU7 / merchant_terminal coverage tracks zallet-core and the
+      # zaino backend; the `zebra-state` backend is Linux-only and covered by
+      # `test-msrv-required`.
+      - name: Run tests (zallet-core)
         run: >
           cargo test
           --workspace
-          --no-default-features
-          --features zaino,zcashd-import,rpc-cli,tokio-console
+          --features zcashd-import,rpc-cli,tokio-console
+      - name: Run tests (zaino backend)
+        run: >
+          cargo test
+          --manifest-path backends/zaino/Cargo.toml
+          --features zcashd-import,rpc-cli,tokio-console
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -116,25 +125,29 @@ jobs:
         shell: bash
         env:
           RUST_TOOLCHAIN: ${{steps.toolchain.outputs.name}}
-      - name: Remove lockfile to build with latest dependencies
-        run: rm Cargo.lock
-      - name: Build crates (zaino backend)
+      - name: Remove lockfiles to build with latest dependencies
+        run: rm Cargo.lock backends/zebra/Cargo.lock backends/zaino/Cargo.lock
+      - name: Build crates (zallet-core)
         run: >
           cargo build
           --workspace
           --all-targets
-          --no-default-features
-          --features zaino,zcashd-import,rpc-cli,tokio-console
+          --features zcashd-import,rpc-cli,tokio-console
+      - name: Build crates (zaino backend)
+        run: >
+          cargo build
+          --manifest-path backends/zaino/Cargo.toml
+          --all-targets
+          --features zcashd-import,rpc-cli,tokio-console
       - name: Build crates (zebra-state backend)
         if: runner.os == 'Linux'
         run: >
           cargo build
-          --workspace
+          --manifest-path backends/zebra/Cargo.toml
           --all-targets
-          --no-default-features
-          --features zebra-state,zcashd-import,rpc-cli,tokio-console
-      - name: Verify working directory is clean (excluding lockfile)
-        run: git diff --exit-code ':!Cargo.lock'
+          --features zcashd-import,rpc-cli,tokio-console
+      - name: Verify working directory is clean (excluding lockfiles)
+        run: git diff --exit-code ':!Cargo.lock' ':!backends/zebra/Cargo.lock' ':!backends/zaino/Cargo.lock'
 
   trigger-integration:
     name: Trigger integration tests
