@@ -316,6 +316,8 @@ pub struct ZainoBackend;
 impl ChainFactory for ZainoBackend {
     type Chain = ZainoChain;
 
+    const NAME: &'static str = "zaino";
+
     async fn build(&self, config: &ZalletConfig) -> Result<(ZainoChain, TaskHandle), Error> {
         ZainoChain::new(config).await
     }

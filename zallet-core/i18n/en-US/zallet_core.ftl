@@ -177,6 +177,7 @@ warn-init-consensus-divergence-reached =
     diverge from what this {-zallet} build can interpret. Shutting down to avoid an
     incorrect view of the chain. Upgrade {-zallet} to a release whose consensus rules match
     the full node.
+err-config-backend-mismatch = The config file selects the '{$configured}' chain backend, but this binary provides the '{$provided}' backend. Run the `zallet` launcher (or the matching backend binary) instead, or change the config file's `backend` key.
 
 ## Keystore errors
 

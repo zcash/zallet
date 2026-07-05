@@ -137,6 +137,8 @@ pub struct ZebraBackend;
 impl ChainFactory for ZebraBackend {
     type Chain = ZebraChain;
 
+    const NAME: &'static str = "zebra";
+
     async fn build(&self, config: &ZalletConfig) -> Result<(ZebraChain, TaskHandle), Error> {
         ZebraChain::new(config).await
     }
