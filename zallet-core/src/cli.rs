@@ -12,7 +12,7 @@ use crate::fl;
 
 #[derive(Debug, Parser)]
 #[cfg_attr(outside_buildscript, derive(Command))]
-#[command(author, about, version)]
+#[command(name = "zallet", author, about, version)]
 #[command(help_template = format!("\
 {{before-help}}{{about-with-newline}}
 {}{}:{} {{usage}}

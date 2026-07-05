@@ -1,5 +1,5 @@
 [package]
-name = "zallet"
+name = "zallet-core"
 version = "0.1.0-alpha.4"
 authors.workspace = true
 edition.workspace = true
@@ -215,7 +215,6 @@ once_cell.workspace = true
 proptest.workspace = true
 regex.workspace = true
 trycmd.workspace = true
-zebra-chain.workspace = true
 
 [features]
 default = ["zebra-state"]

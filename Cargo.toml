@@ -1,5 +1,5 @@
 [workspace]
-members = ["zallet"]
+members = ["zallet-core"]
 resolver = "2"
 
 [workspace.package]

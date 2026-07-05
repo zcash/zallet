@@ -6,11 +6,11 @@
 use i18n_embed::DesktopLanguageRequester;
 
 #[cfg(feature = "zaino")]
-use zallet::components::chain::ZainoBackend as Backend;
+use zallet_core::components::chain::ZainoBackend as Backend;
 #[cfg(feature = "zebra-state")]
-use zallet::components::chain::ZebraBackend as Backend;
+use zallet_core::components::chain::ZebraBackend as Backend;
 
 /// Boot Zallet
 fn main() {
-    zallet::application::boot(&Backend, DesktopLanguageRequester::requested_languages());
+    zallet_core::application::boot(&Backend, DesktopLanguageRequester::requested_languages());
 }

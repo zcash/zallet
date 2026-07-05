@@ -7932,7 +7932,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zallet"
+name = "zallet-core"
 version = "0.1.0-alpha.4"
 dependencies = [
  "abscissa_core",
