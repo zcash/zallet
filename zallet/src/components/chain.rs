@@ -107,7 +107,7 @@ pub(crate) trait Chain: Clone + Send + Sync + 'static {
 /// deserializes the node’s `getblockchaininfo` status string directly into it; the `zaino`
 /// backend converts its connector’s status enum via [`From`]. The `Deserialize` encoding is
 /// the lowercase status string the node reports (`"active"`, `"pending"`, `"disabled"`).
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum UpgradeStatus {
     /// The upgrade has activated on the node’s chain.
@@ -122,6 +122,7 @@ pub(crate) enum UpgradeStatus {
 ///
 /// Each [`Chain`] backend converts its own representation into this so that the
 /// consensus-compatibility check ([`check_consensus_compatibility`]) is backend-neutral.
+#[derive(Clone)]
 pub(crate) struct ReportedUpgrade {
     /// The consensus branch ID the node reports for this upgrade.
     branch_id: u32,
@@ -570,7 +571,10 @@ mod tests {
         StreamExt as _,
         stream::{self, BoxStream},
     };
-    use zcash_client_backend::data_api::{TransactionStatus, chain::ChainState};
+    use zcash_client_backend::data_api::{
+        TransactionStatus,
+        chain::{ChainState, CommitmentTreeRoot},
+    };
     use zcash_primitives::{
         block::{Block, BlockHash, BlockHeader},
         transaction::Transaction,
@@ -583,9 +587,9 @@ mod tests {
     #[cfg(feature = "spend-index")]
     use super::SpendStatus;
     use super::{
-        BlockLocator, ChainBlock, ChainError, ChainTx, ChainView, Decision, Incompatibility,
-        NonEmpty, ReportedUpgrade, UpgradeStatus, branch_incompatibility, classify,
-        detect_incompatibilities,
+        BlockLocator, Chain, ChainBlock, ChainError, ChainTx, ChainView, Decision, Error,
+        Incompatibility, NonEmpty, ReportedUpgrade, UpgradeStatus, branch_incompatibility,
+        check_consensus_compatibility, classify, detect_incompatibilities,
     };
     #[cfg(not(feature = "spend-index"))]
     use transparent::address::TransparentAddress;
@@ -985,5 +989,94 @@ mod tests {
     #[test]
     fn fully_reported_upgrades_are_compatible() {
         assert!(detect(&all_known()).is_empty());
+    }
+
+    /// A minimal [`Chain`] that serves a fixed upgrade set and tip on mainnet, for exercising
+    /// the end-to-end [`check_consensus_compatibility`] orchestration. Only `params`,
+    /// `reported_upgrades`, and `snapshot` carry meaning; the compatibility check never reaches
+    /// the other methods, so they are `unreachable!`.
+    #[derive(Clone)]
+    struct MockChain {
+        params: super::Network,
+        upgrades: Vec<ReportedUpgrade>,
+        tip: BlockHeight,
+    }
+
+    impl Chain for MockChain {
+        type View = MockChainView;
+
+        fn params(&self) -> &super::Network {
+            &self.params
+        }
+
+        async fn reported_upgrades(&self) -> Result<Vec<ReportedUpgrade>, Error> {
+            Ok(self.upgrades.clone())
+        }
+
+        async fn broadcast_transaction(&self, _tx: &Transaction) -> Result<(), ChainError> {
+            unreachable!("the compatibility check does not broadcast transactions")
+        }
+
+        async fn get_sapling_subtree_roots(
+            &self,
+        ) -> Result<Vec<CommitmentTreeRoot<sapling::Node>>, ChainError> {
+            unreachable!("the compatibility check does not read subtree roots")
+        }
+
+        async fn get_orchard_subtree_roots(
+            &self,
+        ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+            unreachable!("the compatibility check does not read subtree roots")
+        }
+
+        async fn snapshot(&self) -> Result<Self::View, ChainError> {
+            Ok(MockChainView {
+                tip: ChainBlock {
+                    height: self.tip,
+                    hash: BlockHash([0u8; 32]),
+                },
+            })
+        }
+    }
+
+    /// A [`MockChain`] on mainnet reporting `upgrades`, with its tip at `tip`.
+    fn mock_chain(upgrades: Vec<ReportedUpgrade>, tip: u32) -> MockChain {
+        MockChain {
+            params: super::Network::Consensus(Network::MainNetwork),
+            upgrades,
+            tip: BlockHeight::from_u32(tip),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_reports_compatible_when_all_upgrades_match() {
+        // Every scheduled mainnet upgrade reported at its expected height: no incompatibility,
+        // so the check reports full compatibility and sets no shutdown height.
+        let chain = mock_chain(all_known(), 3_000_000);
+        assert_eq!(check_consensus_compatibility(&chain).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn check_refuses_start_when_an_incompatibility_has_already_activated() {
+        // An unrecognized upgrade already active low on the chain has diverged by the tip, so
+        // the wallet must refuse to start.
+        let mut upgrades = all_known();
+        upgrades.push(upgrade(UNKNOWN_BRANCH_ID, 1, UpgradeStatus::Active));
+        let chain = mock_chain(upgrades, 3_000_000);
+        assert!(check_consensus_compatibility(&chain).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn check_defers_shutdown_when_the_only_incompatibility_is_pending() {
+        // An unrecognized upgrade scheduled above the tip: run now, but report the height at
+        // which the wallet must shut down before the node's rules diverge from ours.
+        let future = 9_000_000;
+        let mut upgrades = all_known();
+        upgrades.push(upgrade(UNKNOWN_BRANCH_ID, future, UpgradeStatus::Pending));
+        let chain = mock_chain(upgrades, 3_000_000);
+        assert_eq!(
+            check_consensus_compatibility(&chain).await.unwrap(),
+            Some(BlockHeight::from_u32(future)),
+        );
     }
 }
