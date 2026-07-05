@@ -30,7 +30,6 @@ use zebra_state::ReadStateService;
 
 #[cfg(feature = "spend-index")]
 use super::SpendStatus;
-use super::read_state::{AbortOnDrop, init_read_state_service};
 use super::{
     BlockLocator, Chain, ChainBlock, ChainError, ChainFactory, ChainTx, ChainView, ReportedUpgrade,
 };
@@ -42,6 +41,7 @@ use crate::{
 };
 #[cfg(feature = "spend-index")]
 use transparent::bundle::OutPoint;
+use zallet_zebra_read_state::{AbortOnDrop, init_read_state_service, network_to_zebra};
 
 mod convert;
 mod reader;
@@ -97,13 +97,24 @@ impl ZebraChain {
         )?;
 
         // Open zebrad's state read-only and start the non-finalized syncer.
-        let (read_state_service, sync_task) = init_read_state_service(config, &params, rss).await?;
+        let (read_state_service, sync_task) = {
+            use zcash_protocol::consensus::Parameters as _;
+            let zebra_network =
+                network_to_zebra(params.network_type()).map_err(|e| ErrorKind::Init.context(e))?;
+            init_read_state_service(
+                &zebra_network,
+                &rss.grpc_address,
+                config.resolve_datadir_path(&rss.zebra_state_path),
+            )
+            .await
+            .map_err(|e| ErrorKind::Init.context(e))?
+        };
 
         let chain = Self {
             read_state_service,
             validator_rpc,
             params,
-            _syncer: Arc::new(AbortOnDrop(sync_task)),
+            _syncer: Arc::new(AbortOnDrop::new(sync_task)),
         };
 
         // Lifecycle task. The syncer is owned by `_syncer` (aborted when the last
@@ -572,6 +583,26 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
 
 #[cfg(test)]
 mod tests {
+    use zallet_zebra_read_state::network_to_zebra;
+    use zebra_chain::parameters::Network as ZebraNetwork;
+
+    #[test]
+    fn network_to_zebra_maps_main_and_test() {
+        assert!(matches!(
+            network_to_zebra(NetworkType::Main),
+            Ok(ZebraNetwork::Mainnet)
+        ));
+        assert!(matches!(
+            network_to_zebra(NetworkType::Test),
+            Ok(ZebraNetwork::Testnet(_))
+        ));
+    }
+
+    #[test]
+    fn network_to_zebra_rejects_regtest() {
+        assert!(network_to_zebra(NetworkType::Regtest).is_err());
+    }
+
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use zcash_client_backend::data_api::chain::CommitmentTreeRoot;

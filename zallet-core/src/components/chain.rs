@@ -38,11 +38,6 @@ use crate::{components::TaskHandle, config::ZalletConfig};
 mod error;
 pub use error::ChainError;
 
-// Shared read-only `ReadStateService` construction, used by the `zebra-state` backend and
-// by the optional read-state-service variant of the `zaino` backend.
-#[cfg(any(feature = "zaino", feature = "zebra-state"))]
-mod read_state;
-
 #[cfg(feature = "zaino")]
 mod zaino;
 #[cfg(feature = "zaino")]

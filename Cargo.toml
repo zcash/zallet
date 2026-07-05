@@ -1,5 +1,6 @@
 [workspace]
 members = ["zallet-core"]
+exclude = ["backends", "crates"]
 resolver = "2"
 
 [workspace.package]

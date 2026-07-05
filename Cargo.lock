@@ -8009,6 +8009,7 @@ dependencies = [
  "zaino-common",
  "zaino-fetch",
  "zaino-state",
+ "zallet-zebra-read-state",
  "zcash_address 0.13.0-pre.0",
  "zcash_client_backend",
  "zcash_client_sqlite",
@@ -8026,6 +8027,18 @@ dependencies = [
  "zewif",
  "zewif-zcashd",
  "zip32",
+]
+
+[[package]]
+name = "zallet-zebra-read-state"
+version = "0.1.0-alpha.4"
+dependencies = [
+ "tokio",
+ "tracing",
+ "zcash_protocol 0.10.0-pre.0",
+ "zebra-chain",
+ "zebra-rpc",
+ "zebra-state",
 ]
 
 [[package]]

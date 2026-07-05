@@ -94,6 +94,13 @@ impl ZalletConfig {
         lock_datadir(self.datadir())
     }
 
+    /// Resolves the given path relative to the Zallet data directory.
+    ///
+    /// Absolute paths are returned unchanged.
+    pub fn resolve_datadir_path(&self, path: &Path) -> PathBuf {
+        resolve_datadir_path(self.datadir(), path)
+    }
+
     /// Returns the path to the encryption identity.
     #[cfg(zallet_build = "wallet")]
     pub(crate) fn encryption_identity(&self) -> PathBuf {

@@ -46,11 +46,11 @@ use crate::{
     network::Network,
 };
 
-use super::read_state::{AbortOnDrop, init_read_state_service};
 use super::{
     BlockLocator, Chain, ChainBlock, ChainError, ChainFactory, ChainTx, ChainView, ReportedUpgrade,
     UpgradeStatus,
 };
+use zallet_zebra_read_state::{AbortOnDrop, init_read_state_service, network_to_zebra};
 
 /// Classifies a block-fetch error, distinguishing transient reorg-window failures from
 /// genuine backend errors.
@@ -198,14 +198,24 @@ impl ZainoChain {
         let (source, sync_handle) = match &config.indexer.read_state_service {
             None => (ValidatorConnector::Fetch(fetcher.clone()), None),
             Some(rss) => {
-                let (read_state_service, sync_task) =
-                    init_read_state_service(config, &params, rss).await?;
+                let (read_state_service, sync_task) = {
+                    use zcash_protocol::consensus::Parameters as _;
+                    let zebra_network = network_to_zebra(params.network_type())
+                        .map_err(|e| ErrorKind::Init.context(e))?;
+                    init_read_state_service(
+                        &zebra_network,
+                        &rss.grpc_address,
+                        config.resolve_datadir_path(&rss.zebra_state_path),
+                    )
+                    .await
+                    .map_err(|e| ErrorKind::Init.context(e))?
+                };
                 let source = ValidatorConnector::State(State {
                     read_state_service,
                     mempool_fetcher: fetcher.clone(),
                     network: params.to_zaino(),
                 });
-                (source, Some(AbortOnDrop(sync_task)))
+                (source, Some(AbortOnDrop::new(sync_task)))
             }
         };
 

@@ -162,6 +162,7 @@ uuid.workspace = true
 which = { workspace = true, optional = true }
 xdg.workspace = true
 zaino-common = { workspace = true, optional = true }
+zallet-zebra-read-state = { path = "../crates/zebra-read-state", optional = true }
 zaino-fetch = { workspace = true, optional = true }
 zaino-state = { workspace = true, optional = true }
 zcash_address.workspace = true
@@ -227,6 +228,7 @@ default = ["zebra-state"]
 ## `ReadStateService` when `[indexer.read_state_service]` is configured, instead of
 ## fetching all chain data over JSON-RPC.
 zaino = [
+  "dep:zallet-zebra-read-state",
   "dep:zaino-common",
   "dep:zaino-fetch",
   "dep:zaino-state",
@@ -238,6 +240,7 @@ zaino = [
 ## zebra-state + Zebra-RPC chain-data backend (default). Mutually exclusive with `zaino`.
 ## Requires a co-located zebrad built with the `indexer` feature; no regtest support.
 zebra-state = [
+  "dep:zallet-zebra-read-state",
   "dep:zebra-chain",
   "dep:zebra-rpc",
   "dep:zebra-state",
