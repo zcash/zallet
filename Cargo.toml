@@ -1,5 +1,5 @@
 [workspace]
-members = ["zallet-core"]
+members = ["zallet-core", "zallet"]
 exclude = ["backends", "crates"]
 resolver = "2"
 

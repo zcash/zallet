@@ -6375,6 +6375,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zallet"
+version = "0.1.0-alpha.4"
+dependencies = [
+ "home",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "zallet-core"
 version = "0.1.0-alpha.4"
 dependencies = [
