@@ -126,6 +126,9 @@ jobs:
         env:
           RUST_TOOLCHAIN: ${{steps.toolchain.outputs.name}}
       - name: Remove lockfiles to build with latest dependencies
+        # Multi-path rm requires bash: the Windows default shell (pwsh) aliases
+        # `rm` to Remove-Item, which rejects multiple positional paths.
+        shell: bash
         run: rm Cargo.lock backends/zebra/Cargo.lock backends/zaino/Cargo.lock
       - name: Build crates (zallet-core)
         run: >
