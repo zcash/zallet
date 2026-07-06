@@ -291,3 +291,42 @@ impl fmt::Display for SecretSinkError {
 }
 
 impl std::error::Error for SecretSinkError {}
+
+#[cfg(test)]
+mod tests {
+    use zip32::fingerprint::SeedFingerprint;
+
+    use super::decode_seed_fingerprint;
+
+    #[test]
+    fn seed_fingerprint_roundtrip() {
+        let fp_bytes = [7u8; 32];
+        let encoded = zewif_zcashd::zcashd_wallet::encode_seed_fingerprint(&fp_bytes);
+        let decoded = decode_seed_fingerprint(&encoded).expect("valid encoding decodes");
+        assert_eq!(
+            decoded.to_bytes(),
+            SeedFingerprint::from_bytes(fp_bytes).to_bytes()
+        );
+    }
+
+    #[test]
+    fn seed_fingerprint_rejects_wrong_hrp() {
+        // A valid Bech32m string whose HRP is not "zip32seedfp".
+        let wrong_hrp = bech32::encode::<bech32::Bech32m>(
+            bech32::Hrp::parse("notseedfp").expect("valid HRP"),
+            &[7u8; 32],
+        )
+        .expect("32 bytes fit in Bech32m");
+        assert!(decode_seed_fingerprint(&zewif::SeedFingerprint::new(wrong_hrp)).is_none());
+    }
+
+    #[test]
+    fn seed_fingerprint_rejects_invalid_checksum() {
+        let encoded = zewif_zcashd::zcashd_wallet::encode_seed_fingerprint(&[7u8; 32]);
+        let mut corrupted = encoded.encoding().to_string();
+        // Flip the final checksum character.
+        let last = corrupted.pop().expect("nonempty");
+        corrupted.push(if last == 'q' { 'p' } else { 'q' });
+        assert!(decode_seed_fingerprint(&zewif::SeedFingerprint::new(corrupted)).is_none());
+    }
+}
