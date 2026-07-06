@@ -46,6 +46,7 @@ rust-embed.workspace = true
 
 # Parsing and serialization
 base64ct.workspace = true
+bech32 = { workspace = true, optional = true }
 hex.workspace = true
 semver.workspace = true
 serde.workspace = true
@@ -186,10 +187,12 @@ transparent-key-import = [
 zcashd-import = [
   "transparent-key-import",
   "dep:which",
+  "dep:bech32",
   "dep:zewif",
   "dep:zewif-zcashd",
   "zcash_client_backend/zcashd-compat",
   "zcash_client_sqlite/zcashd-compat",
+  "zcash_client_sqlite/zewif",
 ]
 
 [lints.rust]

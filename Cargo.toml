@@ -45,6 +45,7 @@ sha2 = "0.10"
 
 # Key storage
 age = { version = "0.11", features = ["armor", "cli-common", "plugin"] }
+bech32 = "0.11"
 bip0039 = "0.12"
 
 # Localization

@@ -263,6 +263,25 @@ err-migrate-wallet-invalid-account-id =
 err-migrate-wallet-all-unmined =
     All transactions in the wallet are unmined; cannot determine effective
     consensus branch ID for pre-v5 transactions.
+err-migrate-secret-non-english-mnemonic =
+    The wallet contains a mnemonic seed phrase using a wordlist other than
+    English; only English mnemonics can be imported.
+err-migrate-secret-fingerprint-encoding =
+    The wallet records an invalid seed fingerprint '{$fingerprint}'.
+err-migrate-secret-fingerprint-mismatch =
+    A stored seed does not match the fingerprint '{$fingerprint}' it was
+    recorded under; the wallet data may be corrupt.
+err-migrate-secret-transparent-key-decoding =
+    The wallet contains a transparent secret key that is not a valid WIF
+    encoding for this network.
+err-migrate-secret-transparent-key-mismatch =
+    A transparent secret key does not correspond to the public key it was
+    recorded under; the wallet data may be corrupt.
+err-migrate-secret-sapling-key-decoding =
+    An error occurred decoding a Sapling spending key: '{$err}'.
+err-migrate-secret-sapling-key-mismatch =
+    A Sapling spending key does not correspond to the viewing key it was
+    recorded under; the wallet data may be corrupt.
 
 err-ux-A = Did {-zallet} not do what you expected? Could the error be more useful?
 err-ux-B = Tell us

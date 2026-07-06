@@ -145,6 +145,11 @@ pub(super) mod db;
 mod error;
 pub(crate) use error::KeystoreError;
 
+#[cfg(feature = "zcashd-import")]
+// TODO: remove the dead-code allowance once the migrate command consumes the sink.
+#[allow(dead_code)]
+pub(crate) mod zewif;
+
 type RelockTask = (SystemTime, JoinHandle<()>);
 
 #[derive(Clone)]

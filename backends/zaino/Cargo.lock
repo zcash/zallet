@@ -6835,6 +6835,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64ct",
+ "bech32 0.11.1",
  "bip0039",
  "clap",
  "clap_complete",
@@ -7032,6 +7033,8 @@ name = "zcash_client_sqlite"
 version = "0.21.1"
 source = "git+https://github.com/zcash/librustzcash.git?rev=9fe5abf78a15940aa84fd895fed75162f21fcb53#9fe5abf78a15940aa84fd895fed75162f21fcb53"
 dependencies = [
+ "bech32 0.11.1",
+ "bip0039",
  "bip32",
  "bitflags 2.13.0",
  "bs58",
@@ -7069,6 +7072,7 @@ dependencies = [
  "zcash_protocol 0.10.0-pre.0",
  "zcash_script",
  "zcash_transparent 0.9.0-pre.0",
+ "zewif",
  "zip32",
 ]
 
