@@ -842,3 +842,164 @@ impl From<ChainError> for MigrateError {
         MigrateError::Wrapped(value.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use incrementalmerkletree::{Position, frontier::Frontier};
+    use orchard::tree::MerkleHashOrchard;
+    use zcash_protocol::consensus::{BlockHeight, NetworkType};
+
+    use super::{
+        MigrateError, MigrateZcashdWalletCmd, ZCASHD_LEGACY_ACCOUNT_INDEX, enriched_document,
+        to_zewif_frontier,
+    };
+
+    fn node(byte: u8) -> MerkleHashOrchard {
+        let mut bytes = [0u8; 32];
+        bytes[0] = byte;
+        MerkleHashOrchard::from_bytes(&bytes).expect("valid field element")
+    }
+
+    #[test]
+    fn check_network_accepts_matching_networks() {
+        assert!(
+            MigrateZcashdWalletCmd::check_network(&zewif::Network::Mainnet, NetworkType::Main)
+                .is_ok()
+        );
+        assert!(
+            MigrateZcashdWalletCmd::check_network(&zewif::Network::Testnet, NetworkType::Test)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn check_network_rejects_mismatch_and_regtest() {
+        assert!(matches!(
+            MigrateZcashdWalletCmd::check_network(&zewif::Network::Testnet, NetworkType::Main),
+            Err(MigrateError::NetworkMismatch { .. })
+        ));
+        assert!(matches!(
+            MigrateZcashdWalletCmd::check_network(
+                &zewif::Network::Regtest(zewif::RegtestParams::default()),
+                NetworkType::Regtest,
+            ),
+            Err(MigrateError::NetworkNotSupported)
+        ));
+    }
+
+    #[test]
+    fn frontier_conversion_preserves_structure() {
+        let empty: Frontier<MerkleHashOrchard, 32> = Frontier::empty();
+        assert!(matches!(
+            to_zewif_frontier(&empty, |n| n.to_bytes()),
+            zewif::Frontier::Empty
+        ));
+
+        let frontier: Frontier<MerkleHashOrchard, 32> =
+            Frontier::from_parts(Position::from(1), node(2), vec![node(3)])
+                .expect("valid frontier");
+        match to_zewif_frontier(&frontier, |n| n.to_bytes()) {
+            zewif::Frontier::NonEmpty(data) => {
+                assert_eq!(data.position(), 1);
+                assert_eq!(data.leaf().as_bytes(), &node(2).to_bytes());
+                assert_eq!(data.ommers().len(), 1);
+                assert_eq!(data.ommers()[0].as_bytes(), &node(3).to_bytes());
+            }
+            zewif::Frontier::Empty => panic!("frontier should be non-empty"),
+        }
+    }
+
+    fn test_document() -> (zewif::Zewif, zewif::SeedFingerprint, zewif::SeedFingerprint) {
+        let legacy_fp = zewif_zcashd::zcashd_wallet::encode_seed_fingerprint(&[1u8; 32]);
+        let mnemonic_fp = zewif_zcashd::zcashd_wallet::encode_seed_fingerprint(&[2u8; 32]);
+
+        let mut document = zewif::Zewif::new(
+            zewif::BlockHeight::from_u32(2_000_000),
+            zewif::BlockHash::from_bytes([9u8; 32]),
+        );
+        let mut wallet = zewif::ZewifWallet::new(zewif::Network::Testnet);
+
+        let mut legacy = zewif::Account::new(zewif::AccountViewingKey::TransparentAddressSet);
+        legacy.set_name("Legacy");
+        legacy.set_key_source(zewif::KeySource::Derived(zewif::DerivedKeySource::new(
+            legacy_fp.clone(),
+            ZCASHD_LEGACY_ACCOUNT_INDEX,
+            None,
+        )));
+        wallet.add_account(legacy);
+        document.add_wallet(wallet);
+
+        let txid = zewif::TxId::from_bytes([4u8; 32]);
+        document.add_transaction(txid, zewif::Transaction::new(txid));
+
+        (document, legacy_fp, mnemonic_fp)
+    }
+
+    #[test]
+    fn enrichment_normalizes_legacy_derivation_and_strips_transactions() {
+        let (document, _legacy_fp, mnemonic_fp) = test_document();
+
+        let enriched = enriched_document(
+            &document,
+            None,
+            Some(&mnemonic_fp),
+            None,
+            None,
+            Some(BlockHeight::from_u32(1_900_000)),
+            false,
+        );
+
+        let account = &enriched.wallets()[0].accounts()[0];
+        match account.key_source() {
+            Some(zewif::KeySource::Derived(derived)) => {
+                assert_eq!(derived.seed_fingerprint(), &mnemonic_fp);
+                assert_eq!(derived.account_index(), ZCASHD_LEGACY_ACCOUNT_INDEX);
+            }
+            other => panic!("unexpected key source: {other:?}"),
+        }
+        // The no-scan estimate fills in the missing birthday.
+        assert_eq!(
+            account.birthday_height(),
+            Some(zewif::BlockHeight::from_u32(1_900_000))
+        );
+        assert!(enriched.transactions().is_empty());
+    }
+
+    #[test]
+    fn enrichment_applies_chain_state_and_retains_transactions() {
+        let (document, legacy_fp, _mnemonic_fp) = test_document();
+
+        let mut chain_state = zewif::ChainState::new(zewif::BlockHeight::from_u32(1_500_000));
+        chain_state.set_block_hash(zewif::BlockHash::from_bytes([8u8; 32]));
+
+        let enriched = enriched_document(
+            &document,
+            None,
+            None,
+            Some(&chain_state),
+            Some(BlockHeight::from_u32(2_000_000)),
+            None,
+            true,
+        );
+
+        let account = &enriched.wallets()[0].accounts()[0];
+        // Without a mnemonic fingerprint the legacy derivation is untouched.
+        match account.key_source() {
+            Some(zewif::KeySource::Derived(derived)) => {
+                assert_eq!(derived.seed_fingerprint(), &legacy_fp);
+            }
+            other => panic!("unexpected key source: {other:?}"),
+        }
+        assert_eq!(
+            account
+                .birthday_chain_state()
+                .map(|cs| u32::from(cs.height())),
+            Some(1_500_000)
+        );
+        assert_eq!(
+            account.recover_until_height(),
+            Some(zewif::BlockHeight::from_u32(2_000_000))
+        );
+        assert_eq!(enriched.transactions().len(), 1);
+    }
+}
