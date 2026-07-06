@@ -148,7 +148,7 @@ impl MigrateZcashdWalletCmd {
         .map_err(|e| MigrateError::Zewif {
             error_type: ZewifError::BdbDump,
             wallet_path: wallet_path.to_path_buf(),
-            error: e,
+            error: e.into(),
         })?;
 
         let zcashd_dump =
@@ -156,7 +156,7 @@ impl MigrateZcashdWalletCmd {
                 MigrateError::Zewif {
                     error_type: ZewifError::ZcashdDump,
                     wallet_path: wallet_path.clone(),
-                    error: e,
+                    error: e.into(),
                 }
             })?;
 
@@ -165,7 +165,7 @@ impl MigrateZcashdWalletCmd {
                 MigrateError::Zewif {
                     error_type: ZewifError::ZcashdDump,
                     wallet_path,
-                    error: e,
+                    error: e.into(),
                 }
             })?;
 
@@ -173,15 +173,15 @@ impl MigrateZcashdWalletCmd {
     }
 
     fn check_network(
-        zewif_network: zewif::Network,
+        zewif_network: &zewif::Network,
         network_type: NetworkType,
     ) -> Result<NetworkType, MigrateError> {
         match (zewif_network, network_type) {
-            (zewif::Network::Main, NetworkType::Main) => Ok(()),
-            (zewif::Network::Test, NetworkType::Test) => Ok(()),
-            (zewif::Network::Regtest, NetworkType::Regtest) => Ok(()),
+            (zewif::Network::Mainnet, NetworkType::Main) => Ok(()),
+            (zewif::Network::Testnet, NetworkType::Test) => Ok(()),
+            (zewif::Network::Regtest(_), NetworkType::Regtest) => Ok(()),
             (wallet_network, db_network) => Err(MigrateError::NetworkMismatch {
-                wallet_network,
+                wallet_network: wallet_network.clone(),
                 db_network,
             }),
         }?;
@@ -335,7 +335,12 @@ impl MigrateZcashdWalletCmd {
             },
         )?;
 
-        let mnemonic_seed_data = match Self::parse_mnemonic(wallet.bip39_mnemonic().mnemonic())? {
+        let mnemonic_seed_data = match wallet
+            .bip39_mnemonic()
+            .map(|bip39| Self::parse_mnemonic(bip39.mnemonic()))
+            .transpose()?
+            .flatten()
+        {
             Some(m) => Some((
                 SecretVec::new(m.to_seed("").to_vec()),
                 keystore.encrypt_and_store_mnemonic(m).await?,
@@ -510,9 +515,9 @@ impl MigrateZcashdWalletCmd {
 
         let legacy_seed_data = match wallet.legacy_hd_seed() {
             Some(d) => Some((
-                SecretVec::new(d.seed_data().to_vec()),
+                SecretVec::new(d.as_bytes().to_vec()),
                 keystore
-                    .encrypt_and_store_legacy_seed(&SecretVec::new(d.seed_data().to_vec()))
+                    .encrypt_and_store_legacy_seed(&SecretVec::new(d.as_bytes().to_vec()))
                     .await?,
             )),
             None => None,
@@ -576,8 +581,8 @@ impl MigrateZcashdWalletCmd {
                 .expect("mnemonic seed should be present");
 
             assert_eq!(
-                SeedFingerprint::from_bytes(*account.seed_fingerprint().as_bytes()),
-                *seed_fp
+                account.seed_fingerprint(),
+                &zewif_zcashd::zcashd_wallet::encode_seed_fingerprint(&seed_fp.to_bytes()),
             );
 
             let zip32_account_id = AccountId::try_from(account.zip32_account_id())
@@ -623,7 +628,7 @@ impl MigrateZcashdWalletCmd {
             let key_seed_fp = key
                 .metadata()
                 .seed_fp()
-                .map(|seed_fp_bytes| SeedFingerprint::from_bytes(*seed_fp_bytes.as_bytes()));
+                .map(|seed_fp_bytes| SeedFingerprint::from_bytes(*seed_fp_bytes));
 
             let derivation = key
                 .metadata()
@@ -1018,7 +1023,7 @@ pub(crate) enum MigrateError {
     Zewif {
         error_type: ZewifError,
         wallet_path: PathBuf,
-        error: anyhow::Error,
+        error: Box<dyn std::error::Error + Send + Sync>,
     },
     SeedNotAvailable,
     MnemonicInvalid(bip0039::Error),
@@ -1074,7 +1079,11 @@ impl From<MigrateError> for Error {
                 db_network,
             } => Error::from(ErrorKind::Generic.context(fl!(
                 "err-migrate-wallet-network-mismatch",
-                wallet_network = String::from(wallet_network),
+                wallet_network = match wallet_network {
+                    zewif::Network::Mainnet => "main".to_string(),
+                    zewif::Network::Testnet => "test".to_string(),
+                    zewif::Network::Regtest(_) => "regtest".to_string(),
+                },
                 zallet_network = match db_network {
                     NetworkType::Main => "main",
                     NetworkType::Test => "test",

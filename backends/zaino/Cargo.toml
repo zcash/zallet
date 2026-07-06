@@ -110,8 +110,8 @@ orchard = { git = "https://github.com/zcash/orchard", rev = "475ef0ff77d45aebff9
 
 age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633bb70c91eef91142fd4" }
 
-zewif = { git = "https://github.com/zcash/zewif.git", rev = "0a5a234490a339ca8dda13614146e4769a3cd963" }
-zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "c640713b91b79d153a7fee2888088931cd7e8326" }
+zewif = { git = "https://github.com/zcash/zewif.git", rev = "74f1a1694131386515e1733dfb9f414a6284555f" }
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "fce12991e11bb543f8a9b60a5af92cfb953f699c" }
 
 # TEMPORARY: pin the zaino crates to zingolabs/zaino `dev` (currently 8048bf8d),
 # which surfaces the Ironwood (NU6.3) note commitment treestate from
