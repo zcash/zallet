@@ -15,6 +15,26 @@ pub enum Network {
     RegTest(local_consensus::LocalNetwork),
 }
 
+/// The network upgrades this build of Zallet recognizes, in activation order. Sprout
+/// (branch ID 0) and ZFuture are excluded: they are not configurable network upgrades and a
+/// full node never reports them. This is the single source of truth for the set of upgrades;
+/// both regtest configuration (here) and the consensus-compatibility check
+/// ([`crate::components::chain`]) iterate it.
+pub(crate) const NETWORK_UPGRADES: &[consensus::BranchId] = &[
+    consensus::BranchId::Overwinter,
+    consensus::BranchId::Sapling,
+    consensus::BranchId::Blossom,
+    consensus::BranchId::Heartwood,
+    consensus::BranchId::Canopy,
+    consensus::BranchId::Nu5,
+    consensus::BranchId::Nu6,
+    consensus::BranchId::Nu6_1,
+    consensus::BranchId::Nu6_2,
+    consensus::BranchId::Nu6_3,
+    #[cfg(zcash_unstable = "nu7")]
+    consensus::BranchId::Nu7,
+];
+
 impl Network {
     pub(crate) fn from_type(
         network_type: consensus::NetworkType,
@@ -31,36 +51,38 @@ impl Network {
                         .map(|p| p.activation_height)
                 };
 
-                // If a NU is omitted, ensure that it activates at the same height as the
-                // subsequent specified NU (if any).
-                #[cfg(zcash_unstable = "nu7")]
-                let nu7 = find_nu(consensus::BranchId::Nu7);
-                let nu6_3 = find_nu(consensus::BranchId::Nu6_3);
-                #[cfg(zcash_unstable = "nu7")]
-                let nu6_3 = nu6_3.or(nu7);
-                let nu6_2 = find_nu(consensus::BranchId::Nu6_2).or(nu6_3);
-                let nu6_1 = find_nu(consensus::BranchId::Nu6_1).or(nu6_2);
-                let nu6 = find_nu(consensus::BranchId::Nu6).or(nu6_1);
-                let nu5 = find_nu(consensus::BranchId::Nu5).or(nu6);
-                let canopy = find_nu(consensus::BranchId::Canopy).or(nu5);
-                let heartwood = find_nu(consensus::BranchId::Heartwood).or(canopy);
-                let blossom = find_nu(consensus::BranchId::Blossom).or(heartwood);
-                let sapling = find_nu(consensus::BranchId::Sapling).or(blossom);
-                let overwinter = find_nu(consensus::BranchId::Overwinter).or(sapling);
+                // Resolve each upgrade's activation height. If a NU is omitted from
+                // `nuparams`, it activates at the same height as the next specified NU, so
+                // walk from the latest upgrade to the earliest, carrying that height back.
+                let mut next = None;
+                let heights: Vec<(consensus::BranchId, Option<BlockHeight>)> = NETWORK_UPGRADES
+                    .iter()
+                    .rev()
+                    .map(|&nu| {
+                        next = find_nu(nu).or(next);
+                        (nu, next)
+                    })
+                    .collect();
+                let height = |nu| {
+                    heights
+                        .iter()
+                        .find(|(branch, _)| *branch == nu)
+                        .and_then(|&(_, h)| h)
+                };
 
                 Self::RegTest(local_consensus::LocalNetwork {
-                    overwinter,
-                    sapling,
-                    blossom,
-                    heartwood,
-                    canopy,
-                    nu5,
-                    nu6,
-                    nu6_1,
-                    nu6_2,
-                    nu6_3,
+                    overwinter: height(consensus::BranchId::Overwinter),
+                    sapling: height(consensus::BranchId::Sapling),
+                    blossom: height(consensus::BranchId::Blossom),
+                    heartwood: height(consensus::BranchId::Heartwood),
+                    canopy: height(consensus::BranchId::Canopy),
+                    nu5: height(consensus::BranchId::Nu5),
+                    nu6: height(consensus::BranchId::Nu6),
+                    nu6_1: height(consensus::BranchId::Nu6_1),
+                    nu6_2: height(consensus::BranchId::Nu6_2),
+                    nu6_3: height(consensus::BranchId::Nu6_3),
                     #[cfg(zcash_unstable = "nu7")]
-                    nu7,
+                    nu7: height(consensus::BranchId::Nu7),
                 })
             }
         }
@@ -190,6 +212,25 @@ mod tests {
     fn to_zebra_rejects_regtest() {
         let regtest = Network::from_type(NetworkType::Regtest, &[]);
         assert!(regtest.to_zebra().is_err());
+    }
+
+    #[test]
+    fn regtest_omitted_upgrades_default_to_next_specified() {
+        // Specify only Nu6; earlier upgrades inherit its height, later ones stay unset.
+        let params = [RegTestNuParam {
+            consensus_branch_id: consensus::BranchId::Nu6,
+            activation_height: BlockHeight::from_u32(200),
+        }];
+        let Network::RegTest(local) = Network::from_type(NetworkType::Regtest, &params) else {
+            panic!("expected a regtest network");
+        };
+        let h200 = Some(BlockHeight::from_u32(200));
+        assert_eq!(local.overwinter, h200);
+        assert_eq!(local.sapling, h200);
+        assert_eq!(local.nu5, h200);
+        assert_eq!(local.nu6, h200);
+        assert_eq!(local.nu6_1, None);
+        assert_eq!(local.nu6_2, None);
     }
 }
 

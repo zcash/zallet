@@ -128,6 +128,7 @@ incrementalmerkletree = { workspace = true, features = ["legacy-api"] }
 jsonrpsee = { workspace = true, features = ["macros", "server"] }
 known-folders.workspace = true
 nix = { workspace = true, features = ["signal"] }
+nonempty.workspace = true
 orchard.workspace = true
 phf.workspace = true
 rand.workspace = true
@@ -214,6 +215,7 @@ once_cell.workspace = true
 proptest.workspace = true
 regex.workspace = true
 trycmd.workspace = true
+zebra-chain.workspace = true
 
 [features]
 default = ["zebra-state"]

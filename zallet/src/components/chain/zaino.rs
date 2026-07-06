@@ -37,6 +37,7 @@ use zcash_protocol::{
 };
 #[cfg(not(feature = "spend-index"))]
 use zebra_rpc::client::{GetAddressBalanceRequest, GetAddressTxIdsRequest};
+use zebra_rpc::methods::NetworkUpgradeStatus;
 
 use crate::{
     components::TaskHandle,
@@ -46,7 +47,9 @@ use crate::{
 };
 
 use super::read_state::{AbortOnDrop, init_read_state_service};
-use super::{BlockLocator, Chain, ChainBlock, ChainError, ChainTx, ChainView};
+use super::{
+    BlockLocator, Chain, ChainBlock, ChainError, ChainTx, ChainView, ReportedUpgrade, UpgradeStatus,
+};
 
 /// Classifies a block-fetch error, distinguishing transient reorg-window failures from
 /// genuine backend errors.
@@ -252,8 +255,47 @@ impl ZainoChain {
     }
 }
 
+/// The single place the Zaino connector’s status enum is mapped onto the backend-neutral
+/// [`UpgradeStatus`]. The `zebra` backend deserializes into `UpgradeStatus` directly, so this
+/// is the only status conversion in the tree.
+impl From<NetworkUpgradeStatus> for UpgradeStatus {
+    fn from(status: NetworkUpgradeStatus) -> Self {
+        match status {
+            NetworkUpgradeStatus::Active => UpgradeStatus::Active,
+            NetworkUpgradeStatus::Pending => UpgradeStatus::Pending,
+            NetworkUpgradeStatus::Disabled => UpgradeStatus::Disabled,
+        }
+    }
+}
+
 impl Chain for ZainoChain {
     type View = ZainoChainView;
+
+    fn params(&self) -> &Network {
+        &self.params
+    }
+
+    async fn reported_upgrades(&self) -> Result<Vec<ReportedUpgrade>, Error> {
+        let info = self
+            .fetcher
+            .get_blockchain_info()
+            .await
+            .map_err(|e| ErrorKind::Init.context(e))?;
+
+        Ok(info
+            .upgrades
+            .iter()
+            .map(|(branch, info)| {
+                let (name, activation_height, status) = (*info).into_parts();
+                ReportedUpgrade {
+                    branch_id: branch.inner(),
+                    name: name.to_string(),
+                    activation_height: activation_height.0,
+                    status: status.into(),
+                }
+            })
+            .collect())
+    }
 
     async fn broadcast_transaction(&self, tx: &Transaction) -> Result<(), ChainError> {
         let mut tx_bytes = vec![];
