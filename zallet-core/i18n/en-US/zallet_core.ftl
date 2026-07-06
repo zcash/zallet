@@ -282,6 +282,14 @@ err-migrate-secret-sapling-key-decoding =
 err-migrate-secret-sapling-key-mismatch =
     A Sapling spending key does not correspond to the viewing key it was
     recorded under; the wallet data may be corrupt.
+err-migrate-wallet-export =
+    An error occurred exporting the {-zcashd} wallet to a ZeWIF document: '{$err}'
+err-migrate-wallet-import =
+    An error occurred importing the ZeWIF document into the wallet database: '{$err}'
+err-migrate-wallet-secret-store =
+    An error occurred storing wallet secrets in the keystore: '{$err}'
+err-migrate-wallet-encrypted-secrets =
+    The ZeWIF document's secret material is encrypted; decrypt it before import.
 
 err-ux-A = Did {-zallet} not do what you expected? Could the error be more useful?
 err-ux-B = Tell us

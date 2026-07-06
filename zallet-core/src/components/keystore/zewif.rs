@@ -47,6 +47,18 @@ macro_rules! wfl {
 /// The Human-Readable Part of the canonical ZIP 32 seed fingerprint encoding.
 const SEED_FINGERPRINT_HRP: &str = "zip32seedfp";
 
+/// Decodes a seed fingerprint from its canonical `zip32seedfp` Bech32m
+/// encoding, returning `None` if the encoding is not a valid fingerprint.
+pub(crate) fn decode_seed_fingerprint(
+    fingerprint: &zewif::SeedFingerprint,
+) -> Option<SeedFingerprint> {
+    let checked = CheckedHrpstring::new::<Bech32m>(fingerprint.encoding()).ok()?;
+    (checked.hrp().as_str() == SEED_FINGERPRINT_HRP)
+        .then(|| checked.byte_iter().collect::<Vec<_>>())
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .map(SeedFingerprint::from_bytes)
+}
+
 /// A [`SecretSink`] that persists ZeWIF secret material in the Zallet
 /// keystore.
 pub(crate) struct KeyStoreSecretSink<'a, N> {
@@ -99,16 +111,10 @@ impl<'a, N: NetworkConstants> KeyStoreSecretSink<'a, N> {
         recorded: &zewif::SeedFingerprint,
         computed: &SeedFingerprint,
     ) -> Result<(), SecretSinkError> {
-        let checked = CheckedHrpstring::new::<Bech32m>(recorded.encoding()).map_err(|_| {
+        let decoded = decode_seed_fingerprint(recorded).ok_or_else(|| {
             SecretSinkError::SeedFingerprintEncoding(recorded.encoding().to_string())
         })?;
-        if checked.hrp().as_str() != SEED_FINGERPRINT_HRP {
-            return Err(SecretSinkError::SeedFingerprintEncoding(
-                recorded.encoding().to_string(),
-            ));
-        }
-        let bytes = checked.byte_iter().collect::<Vec<_>>();
-        if bytes == computed.to_bytes() {
+        if decoded.to_bytes() == computed.to_bytes() {
             Ok(())
         } else {
             Err(SecretSinkError::SeedFingerprintMismatch {

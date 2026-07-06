@@ -1,41 +1,30 @@
-use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
-    path::PathBuf,
-};
+use std::collections::{BTreeMap, HashMap, HashSet, hash_map::Entry};
+use std::path::PathBuf;
 
 use abscissa_core::Runnable;
 
-use bip0039::{English, Mnemonic};
 use secp256k1::PublicKey;
-use secrecy::{ExposeSecret, SecretVec};
-use shardtree::error::ShardTreeError;
+use secrecy::SecretVec;
 use transparent::address::TransparentAddress;
-use zcash_client_backend::{
-    data_api::{
-        Account as _, AccountBirthday, AccountPurpose, AccountSource, WalletRead, WalletWrite as _,
-        Zip32Derivation, chain::ChainState,
-    },
-    decrypt_transaction,
+use zcash_client_backend::data_api::{
+    Account as _, AccountSource, WalletRead, WalletWrite as _, chain::ChainState,
 };
 use zcash_client_sqlite::error::SqliteClientError;
-use zcash_keys::keys::{
-    DerivationError, UnifiedFullViewingKey,
-    zcashd::{PathParseError, ZcashdHdDerivation},
-};
-use zcash_primitives::{block::BlockHash, transaction::Transaction};
-use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkType, NetworkUpgrade, Parameters};
-use zcash_script::script::{Code, Redeem};
-use zewif_zcashd::{
-    BDBDump, ZcashdDump, ZcashdParser, ZcashdWallet, zcashd_wallet::transparent::WatchScriptKind,
-};
-use zip32::{AccountId, fingerprint::SeedFingerprint};
+use zcash_client_sqlite::zewif::{DiscardSecrets, SecretSink, ZewifImportError, ZewifImportReport};
+use zcash_primitives::block::BlockHash;
+use zcash_protocol::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
+use zewif_zcashd::{BDBDump, ZcashdDump, ZcashdParser, ZcashdWallet};
+use zip32::fingerprint::SeedFingerprint;
 
 use crate::{
     cli::MigrateZcashdWalletCmd,
     components::{
         chain::{Chain, ChainError, ChainFactory, ChainView},
         database::Database,
-        keystore::KeyStore,
+        keystore::{
+            KeyStore,
+            zewif::{KeyStoreSecretSink, SecretSinkError, decode_seed_fingerprint},
+        },
     },
     error::{Error, ErrorKind},
     fl,
@@ -44,15 +33,16 @@ use crate::{
 
 use super::{AsyncRunnable, migrate_zcash_conf};
 
-/// The ZIP 32 account identifier of the zcashd account used for maintaining legacy `getnewaddress`
-/// and `z_getnewaddress` semantics after the zcashd v4.7.0 upgrade to support using
-/// mnemonic-sourced HD derivation for all addresses in the wallet.
-pub const ZCASHD_LEGACY_ACCOUNT: AccountId = AccountId::const_from_u32(0x7FFFFFFF);
-/// A source string to identify an account as being derived from the randomly generated binary HD
-/// seed used for Sapling key generation prior to the zcashd v4.7.0 upgrade.
+/// The ZIP 32 account identifier of the zcashd account used for maintaining legacy
+/// `getnewaddress` and `z_getnewaddress` semantics after the zcashd v4.7.0 upgrade to
+/// support using mnemonic-sourced HD derivation for all addresses in the wallet.
+pub const ZCASHD_LEGACY_ACCOUNT_INDEX: u32 = 0x7FFFFFFF;
+/// The key-source string with which `zewif-zcashd` labels the synthesized legacy
+/// account, and with which the previous migration implementation labeled accounts
+/// containing imported key material.
 pub const ZCASHD_LEGACY_SOURCE: &str = "zcashd_legacy";
-/// A source string to identify an account as being derived from the mnemonic HD seed used for
-/// key derivation after the zcashd v4.7.0 upgrade.
+/// The key-source string with which `zewif-zcashd` labels accounts derived from the
+/// mnemonic HD seed used for key derivation after the zcashd v4.7.0 upgrade.
 pub const ZCASHD_MNEMONIC_SOURCE: &str = "zcashd_mnemonic";
 
 impl MigrateZcashdWalletCmd {
@@ -86,7 +76,6 @@ impl MigrateZcashdWalletCmd {
             wallet,
             self.buffer_wallet_transactions,
             self.allow_multiple_wallet_imports,
-            self.no_scan,
         )
         .await?;
 
@@ -175,24 +164,20 @@ impl MigrateZcashdWalletCmd {
     fn check_network(
         zewif_network: &zewif::Network,
         network_type: NetworkType,
-    ) -> Result<NetworkType, MigrateError> {
+    ) -> Result<(), MigrateError> {
         match (zewif_network, network_type) {
             (zewif::Network::Mainnet, NetworkType::Main) => Ok(()),
             (zewif::Network::Testnet, NetworkType::Test) => Ok(()),
-            (zewif::Network::Regtest(_), NetworkType::Regtest) => Ok(()),
+            // The ZeWIF importer cannot verify the equivalence of regtest activation
+            // schedules, so regtest migrations are not currently supported.
+            (zewif::Network::Regtest(_), NetworkType::Regtest) => {
+                Err(MigrateError::NetworkNotSupported)
+            }
             (wallet_network, db_network) => Err(MigrateError::NetworkMismatch {
                 wallet_network: wallet_network.clone(),
                 db_network,
             }),
-        }?;
-
-        Ok(network_type)
-    }
-
-    fn parse_mnemonic(mnemonic: &str) -> Result<Option<Mnemonic>, bip0039::Error> {
-        (!mnemonic.is_empty())
-            .then(|| Mnemonic::<English>::from_phrase(mnemonic))
-            .transpose()
+        }
     }
 
     async fn migrate_zcashd_wallet<C: Chain>(
@@ -202,168 +187,13 @@ impl MigrateZcashdWalletCmd {
         wallet: ZcashdWallet,
         buffer_wallet_transactions: bool,
         allow_multiple_wallet_imports: bool,
-        no_scan: bool,
     ) -> Result<(), MigrateError> {
         let mut db_data = db.handle().await?;
         let network_params = *db_data.params();
         Self::check_network(wallet.network(), network_params.network_type())?;
 
-        // Collect transparent material imported via `zcashd`'s `importpubkey` (P2PK
-        // entries in `watch_scripts()`) and `importaddress <redeemScript> "" true`
-        // (entries in `cscripts()`). Address-only entries (raw P2PKH / P2SH hashes with
-        // no associated pubkey or redeem script) cannot be represented in the Zallet
-        // wallet schema; count and warn-log them so users see what was dropped. P2SH
-        // entries with a matching `cscripts()` record are imported via that path below.
-        let mut skipped_p2pkh_address_only = 0usize;
-        let mut skipped_p2sh_address_only = 0usize;
-        let mut skipped_nonstandard = 0usize;
-        let mut skipped_malformed_pubkeys = 0usize;
-        let mut skipped_uncompressed_pubkeys = 0usize;
-        let watchonly_pubkeys = wallet
-            .watch_scripts()
-            .iter()
-            .filter_map(|w| match w.kind() {
-                // `import_standalone_transparent_pubkey` always derives the stored
-                // P2PKH from `PublicKey::serialize()` (the 33-byte compressed form),
-                // so an uncompressed (65-byte) pubkey would be tracked under a
-                // different address than `zcashd` had on-chain. Skip with a warn
-                // rather than silently migrating to the wrong address.
-                WatchScriptKind::P2PK(pubkey) if !pubkey.is_compressed() => {
-                    skipped_uncompressed_pubkeys += 1;
-                    None
-                }
-                WatchScriptKind::P2PK(pubkey) => match PublicKey::from_slice(pubkey.as_slice()) {
-                    Ok(pk) => Some(pk),
-                    Err(_) => {
-                        skipped_malformed_pubkeys += 1;
-                        None
-                    }
-                },
-                WatchScriptKind::P2PKH(_) => {
-                    skipped_p2pkh_address_only += 1;
-                    None
-                }
-                WatchScriptKind::P2SH(_) => {
-                    skipped_p2sh_address_only += 1;
-                    None
-                }
-                WatchScriptKind::Other(_) => {
-                    skipped_nonstandard += 1;
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        if skipped_uncompressed_pubkeys > 0 {
-            warn!(
-                "Skipped {} watch-only P2PK entries with uncompressed public keys; \
-                 the Zallet wallet schema only supports compressed-form pubkey \
-                 imports, so these would be tracked under a different address than \
-                 `zcashd` had on-chain.",
-                skipped_uncompressed_pubkeys,
-            );
-        }
-        if skipped_malformed_pubkeys > 0 {
-            warn!(
-                "Skipped {} watch-only P2PK entries with malformed public keys.",
-                skipped_malformed_pubkeys,
-            );
-        }
-        if skipped_p2pkh_address_only > 0 {
-            warn!(
-                "Skipped {} watch-only P2PKH address-only entries (from `zcashd`'s \
-                 `importaddress <p2pkhaddress>`); these cannot be migrated without the \
-                 corresponding pubkey.",
-                skipped_p2pkh_address_only,
-            );
-        }
-        if skipped_p2sh_address_only > 0 {
-            warn!(
-                "Skipped {} watch-only P2SH address-only entries (`watchs` records with \
-                 no matching `cscript`). P2SH entries with a matching redeem script are \
-                 imported via the `cscript` path.",
-                skipped_p2sh_address_only,
-            );
-        }
-        if skipped_nonstandard > 0 {
-            warn!(
-                "Skipped {} watch-only entries with non-standard script kinds.",
-                skipped_nonstandard,
-            );
-        }
-        let mut skipped_unparseable_scripts = 0usize;
-        let watchonly_scripts = wallet
-            .cscripts()
-            .values()
-            .filter_map(|s| match Redeem::parse(&Code(s.as_ref().to_vec())) {
-                Ok(redeem) => Some(redeem),
-                Err(e) => {
-                    skipped_unparseable_scripts += 1;
-                    warn!(
-                        "Failed to parse watch-only redeem script (hex: {}): {}",
-                        hex::encode(s.as_ref()),
-                        e,
-                    );
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        if skipped_unparseable_scripts > 0 {
-            warn!(
-                "Skipped {} watch-only redeem scripts that failed to parse in total.",
-                skipped_unparseable_scripts,
-            );
-        }
-
-        let existing_zcash_sourced_accounts = db_data.get_account_ids()?.into_iter().try_fold(
-            HashSet::new(),
-            |mut found, account_id| {
-                let account = db_data
-                    .get_account(account_id)?
-                    .expect("account exists for just-retrieved id");
-
-                match account.source() {
-                    AccountSource::Derived {
-                        derivation,
-                        key_source,
-                    } if key_source.as_ref() == Some(&ZCASHD_MNEMONIC_SOURCE.to_string()) => {
-                        found.insert(*derivation.seed_fingerprint());
-                    }
-                    _ => {}
-                }
-
-                Ok::<_, SqliteClientError>(found)
-            },
-        )?;
-
-        let mnemonic_seed_data = match wallet
-            .bip39_mnemonic()
-            .map(|bip39| Self::parse_mnemonic(bip39.mnemonic()))
-            .transpose()?
-            .flatten()
-        {
-            Some(m) => Some((
-                SecretVec::new(m.to_seed("").to_vec()),
-                keystore.encrypt_and_store_mnemonic(m).await?,
-            )),
-            None => None,
-        };
-
-        if !existing_zcash_sourced_accounts.is_empty() {
-            if allow_multiple_wallet_imports {
-                if let Some((seed, _)) = mnemonic_seed_data.as_ref() {
-                    let seed_fp =
-                        SeedFingerprint::from_seed(seed.expose_secret()).expect("valid length");
-                    if existing_zcash_sourced_accounts.contains(&seed_fp) {
-                        return Err(MigrateError::DuplicateImport(seed_fp));
-                    }
-                }
-            } else {
-                return Err(MigrateError::MultiImportDisabled);
-            }
-        }
-
-        // Obtain information about the current state of the chain, so that we can set the recovery
-        // height properly.
+        // Obtain information about the current state of the chain, so that we can set
+        // the recovery height properly.
         let (chain_view, chain_tip) = if let Some(chain) = &chain {
             let chain_view = chain.snapshot().await?;
             let tip = chain_view.tip().await?;
@@ -379,66 +209,157 @@ impl MigrateZcashdWalletCmd {
             .activation_height(NetworkUpgrade::Sapling)
             .expect("Sapling activation height is defined.");
 
-        // Collect an index from block hash to block height for all transactions known to the
-        // wallet that appear in the main chain. This only runs when we have a chain subscriber;
-        // without one, all transactions are stored as unmined and a later scan will assign
-        // accurate heights. Address exposure is handled separately via
-        // `mark_transparent_addresses_exposed` below.
+        // The export height records the chain tip at export time. Without a chain
+        // backend, approximate it with the wallet's maximum transaction expiry height
+        // (expiry heights are near the height at which a transaction was created).
+        let export_height = chain_tip
+            .or_else(|| {
+                wallet
+                    .transactions()
+                    .values()
+                    .map(|tx| u32::from(tx.transaction().expiry_height()))
+                    .filter(|&h| h > 0)
+                    .max()
+                    .map(BlockHeight::from_u32)
+            })
+            .unwrap_or(sapling_activation);
+
+        // Export the parsed wallet to a ZeWIF document. Everything below operates on
+        // the document alone.
+        info!("Exporting the zcashd wallet to a ZeWIF document");
+        let document = zewif_zcashd::migrate_to_zewif(
+            &wallet,
+            zewif::BlockHeight::from_u32(u32::from(export_height)),
+        )
+        .map_err(MigrateError::Export)?;
+        drop(wallet);
+
         info!(
-            "Wallet contains {} transactions",
-            wallet.transactions().len(),
+            "Wallet document contains {} transactions",
+            document.transactions().len(),
         );
-        let mut main_chain_block_heights = HashMap::new();
-        if let Some(chain_view) = chain_view.as_ref() {
-            for wallet_tx in wallet.transactions().values() {
-                let block_hash = BlockHash(*wallet_tx.hash_block().as_ref());
-                // Skip transactions that were unmined when the zcashd wallet was last written.
-                if block_hash.0 != [0; 32]
-                    && let Entry::Vacant(entry) = main_chain_block_heights.entry(block_hash)
+
+        // Normalize the secret store and the legacy account's derivation to zcashd's
+        // post-v4.7.0 semantics: zcashd derives legacy-account (0x7FFFFFFF) keys from
+        // the seed of its BIP 39 mnemonic, deriving that mnemonic from the pre-v4.7.0
+        // legacy seed where one exists. A pre-v4.7.0 wallet's document carries only the
+        // raw legacy seed, so reconstruct the mnemonic exactly as zcashd would have on
+        // upgrade, and re-point the legacy account's key source at it.
+        let secret_store = match document.secrets() {
+            Some(zewif::Secrets::Plain(store)) => Some(store.clone()),
+            Some(zewif::Secrets::Encrypted(_)) => return Err(MigrateError::EncryptedSecrets),
+            None => None,
+        };
+        let (secret_store, mnemonic_fp) = match secret_store {
+            Some(mut store) => {
+                let mnemonic_fp = store.seeds().iter().find_map(|entry| {
+                    matches!(entry.material(), zewif::SeedMaterial::Bip39Mnemonic(_))
+                        .then(|| entry.fingerprint().clone())
+                });
+                let legacy_seed = store
+                    .seeds()
+                    .iter()
+                    .find_map(|entry| match entry.material() {
+                        zewif::SeedMaterial::LegacySeed(seed) => Some(*seed.as_bytes()),
+                        _ => None,
+                    });
+                let mnemonic_fp = match (mnemonic_fp, legacy_seed) {
+                    (Some(fp), _) => Some(fp),
+                    (None, Some(seed_bytes)) => {
+                        let seed = SecretVec::new(seed_bytes.to_vec());
+                        let mnemonic = zcash_keys::keys::zcashd::derive_mnemonic(&seed).ok_or(
+                            ErrorKind::Generic.context(fl!("err-failed-seed-fingerprinting")),
+                        )?;
+                        let fp = SeedFingerprint::from_seed(&mnemonic.to_seed(""))
+                            .expect("BIP 39 seeds have a valid length");
+                        let fp =
+                            zewif_zcashd::zcashd_wallet::encode_seed_fingerprint(&fp.to_bytes());
+                        store.add_seed(zewif::SeedEntry::new(
+                            fp.clone(),
+                            zewif::SeedMaterial::Bip39Mnemonic(zewif::Bip39Mnemonic::new(
+                                mnemonic.phrase(),
+                                Some(zewif::MnemonicLanguage::English),
+                            )),
+                        ));
+                        Some(fp)
+                    }
+                    (None, None) => None,
+                };
+                (Some(store), mnemonic_fp)
+            }
+            None => (None, None),
+        };
+
+        // Check whether this wallet (identified by its mnemonic seed fingerprint) has
+        // already been imported, and whether additional wallet imports are permitted.
+        let existing_zcashd_sourced_accounts = db_data.get_account_ids()?.into_iter().try_fold(
+            HashSet::new(),
+            |mut found, account_id| {
+                let account = db_data
+                    .get_account(account_id)?
+                    .expect("account exists for just-retrieved id");
+
+                if let AccountSource::Derived {
+                    derivation,
+                    key_source,
+                } = account.source()
+                    && matches!(
+                        key_source.as_deref(),
+                        Some(ZCASHD_MNEMONIC_SOURCE) | Some(ZCASHD_LEGACY_SOURCE)
+                    )
                 {
-                    // Ignore any blocks that are not in the main chain.
-                    if let Some(height) = chain_view.block_height(&block_hash).await? {
-                        entry.insert(height);
+                    found.insert(*derivation.seed_fingerprint());
+                }
+
+                Ok::<_, SqliteClientError>(found)
+            },
+        )?;
+        if !existing_zcashd_sourced_accounts.is_empty() {
+            if allow_multiple_wallet_imports {
+                if let Some(fp) = mnemonic_fp.as_ref().and_then(decode_seed_fingerprint)
+                    && existing_zcashd_sourced_accounts.contains(&fp)
+                {
+                    return Err(MigrateError::DuplicateImport(fp));
+                }
+            } else {
+                return Err(MigrateError::MultiImportDisabled);
+            }
+        }
+
+        // Determine the wallet's birthday. With a chain backend, resolve the block
+        // hashes recorded on the document's transactions to main-chain heights, take
+        // the earliest as the birthday, and fetch the chain state (including the note
+        // commitment tree frontiers) as of the prior block; the importer then
+        // constructs precise account birthdays with no further chain access. In
+        // no-scan mode, estimate a conservative birthday from transaction expiry
+        // heights; the importer will schedule a rescan from there.
+        let (birthday_chain_state, recover_until) = if let Some(chain_view) = chain_view.as_ref() {
+            let mut block_heights = HashMap::new();
+            for tx in document.transactions().values() {
+                if let Some(position) = tx.block_position() {
+                    let block_hash = BlockHash(*position.block_hash().as_bytes());
+                    if let Entry::Vacant(entry) = block_heights.entry(block_hash) {
+                        // Ignore any blocks that are not in the main chain.
+                        if let Some(height) = chain_view.block_height(&block_hash).await? {
+                            entry.insert(height);
+                        }
                     }
                 }
             }
-        }
-        let mut tx_heights = HashMap::new();
-        for (txid, wallet_tx) in wallet.transactions().iter() {
-            let block_hash = BlockHash(*wallet_tx.hash_block().as_ref());
-            tx_heights.insert(
-                txid,
-                (
-                    main_chain_block_heights.get(&block_hash).cloned(),
-                    buffer_wallet_transactions.then_some(wallet_tx),
-                ),
+            info!(
+                "Wallet document references {} mined main-chain blocks",
+                block_heights.len(),
             );
-        }
-        info!(
-            "Wallet contains {} mined transactions",
-            tx_heights.values().filter(|(h, _)| h.is_some()).count(),
-        );
 
-        // Since zcashd scans in linear order, we can reliably choose the earliest wallet
-        // transaction's mined height as the birthday height, so long as it is in the "stable"
-        // range. We don't have a good source of individual per-account birthday information at
-        // this point; once we've imported all of the transaction data into the wallet then we'll
-        // be able to choose per-account birthdays without difficulty.
-        let wallet_birthday = if let Some(chain_view) = chain_view.as_ref() {
-            // Fall back to the chain tip height, and then Sapling activation as a last resort.
-            // If we have a birthday height, max() that with sapling activation; that will be
-            // the minimum possible wallet birthday that is relevant to future recovery
-            // scenarios.
-            let birthday_height = tx_heights
+            let birthday_height = block_heights
                 .values()
-                .flat_map(|(h, _)| h)
                 .min()
                 .copied()
                 .or(chain_tip)
                 .map_or(sapling_activation, |h| std::cmp::max(h, sapling_activation));
 
-            // Fetch the tree state corresponding to the last block prior to the wallet's
-            // birthday height.
+            // Fetch the tree state corresponding to the last block prior to the
+            // wallet's birthday height.
             let treestate_height = birthday_height.saturating_sub(1);
             let chain_state = chain_view.tree_state_as_of(treestate_height).await?.ok_or(
                 ErrorKind::Generic.context(fl!(
@@ -446,561 +367,350 @@ impl MigrateZcashdWalletCmd {
                     err = format!("missing tree state for height {treestate_height}")
                 )),
             )?;
+            info!("Setting the wallet birthday to height {}", birthday_height);
 
-            AccountBirthday::from_parts(chain_state, chain_tip)
+            (Some(to_zewif_chain_state(&chain_state)), chain_tip)
         } else {
-            // In no-scan mode, no chain is available, and we cannot determine actual transaction
-            // mined heights. Instead, we estimate the wallet's birthday, and then conservatively
-            // mark each address with a mined transaction as exposed at that birthday height.
-            //
-            // We approximate the wallet birthday from transaction expiry heights. Expiry heights
-            // are typically creation_height + 40 (the default TX_EXPIRY_DELTA in zcashd).
-            // Subtracting 1000 gives a conservative lower bound on the earliest mined height.
-            let birthday_height = wallet
-                .transactions()
-                .values()
-                .map(|tx| u32::from(tx.transaction().expiry_height()))
-                .filter(|&h| h > 0)
-                .min()
-                .map(|h| BlockHeight::from_u32(h.saturating_sub(1000)))
-                .map(|h| std::cmp::max(h, sapling_activation))
-                .unwrap_or(sapling_activation);
-
-            AccountBirthday::from_parts(
-                ChainState::empty(birthday_height, BlockHash([0; 32])),
-                None,
-            )
+            (None, None)
         };
-        info!(
-            "Setting the wallet birthday to height {}",
-            wallet_birthday.height(),
-        );
-
-        let mnemonic_seed_fp = mnemonic_seed_data.as_ref().map(|(_, fp)| *fp);
-        let legacy_transparent_account_uuid = if let Some((seed, _)) = mnemonic_seed_data.as_ref() {
-            // Create the legacy account if there are any legacy transparent keys or any
-            // imported watch-only transparent pubkeys / redeem scripts to store.
-            if !wallet.keys().is_empty()
-                || !watchonly_pubkeys.is_empty()
-                || !watchonly_scripts.is_empty()
-            {
-                let (account, _) = db_data.import_account_hd(
-                    &format!(
-                        "zcashd post-v4.7.0 legacy transparent account {}",
-                        u32::from(ZCASHD_LEGACY_ACCOUNT),
-                    ),
-                    seed,
-                    ZCASHD_LEGACY_ACCOUNT,
-                    &wallet_birthday,
-                    Some(ZCASHD_MNEMONIC_SOURCE),
-                )?;
-
-                println!(
-                    "{}",
-                    fl!(
-                        "migrate-wallet-legacy-seed-fp",
-                        seed_fp = mnemonic_seed_fp
-                            .expect("present for mnemonic seed")
-                            .to_string()
-                    )
-                );
-
-                Some(account.id())
-            } else {
-                None
-            }
+        let no_scan_birthday_estimate = if chain_view.is_none() {
+            // Expiry heights are typically creation_height + 40 (the default
+            // TX_EXPIRY_DELTA in zcashd). Subtracting 1000 gives a conservative lower
+            // bound on the earliest mined height.
+            Some(
+                document
+                    .transactions()
+                    .values()
+                    .filter_map(|tx| tx.expiry_height())
+                    .map(u32::from)
+                    .filter(|&h| h > 0)
+                    .min()
+                    .map(|h| BlockHeight::from_u32(h.saturating_sub(1000)))
+                    .map(|h| std::cmp::max(h, sapling_activation))
+                    .unwrap_or(sapling_activation),
+            )
         } else {
             None
         };
 
-        let legacy_seed_data = match wallet.legacy_hd_seed() {
-            Some(d) => Some((
-                SecretVec::new(d.as_bytes().to_vec()),
-                keystore
-                    .encrypt_and_store_legacy_seed(&SecretVec::new(d.as_bytes().to_vec()))
-                    .await?,
-            )),
-            None => None,
-        };
-        let legacy_transparent_account_uuid =
-            match (legacy_transparent_account_uuid, legacy_seed_data.as_ref()) {
-                (Some(uuid), _) => {
-                    // We already had a mnemonic seed and have created the mnemonic-based legacy
-                    // account, so we don't need to do anything.
-                    Some(uuid)
-                }
-                (None, Some((seed, _)))
-                    if !wallet.keys().is_empty()
-                        || !watchonly_pubkeys.is_empty()
-                        || !watchonly_scripts.is_empty() =>
-                {
-                    // In this case, we have the legacy seed, but no mnemonic seed was ever derived
-                    // from it, so this is a pre-v4.7.0 wallet. We construct the mnemonic in the same
-                    // fashion as zcashd, by using the legacy seed as entropy in the generation of the
-                    // mnemonic seed, and then import that seed and the associated legacy account so
-                    // that we have an account to act as the "bucket of funds" for the transparent keys
-                    // derived from system randomness.
-                    let mnemonic = zcash_keys::keys::zcashd::derive_mnemonic(seed)
-                        .ok_or(ErrorKind::Generic.context(fl!("err-failed-seed-fingerprinting")))?;
-
-                    let seed = SecretVec::new(mnemonic.to_seed("").to_vec());
-                    keystore.encrypt_and_store_mnemonic(mnemonic).await?;
-                    let (account, _) = db_data.import_account_hd(
-                        &format!(
-                            "zcashd post-v4.7.0 legacy transparent account {}",
-                            u32::from(ZCASHD_LEGACY_ACCOUNT),
-                        ),
-                        &seed,
-                        ZCASHD_LEGACY_ACCOUNT,
-                        &wallet_birthday,
-                        Some(ZCASHD_MNEMONIC_SOURCE),
-                    )?;
-
-                    Some(account.id())
-                }
-                _ => None,
-            };
-
-        let legacy_seed_fp = legacy_seed_data.map(|(_, fp)| fp);
-
-        // Add unified accounts. The only source of unified accounts in zcashd is derivation from
-        // the mnemonic seed.
-        if wallet.unified_accounts().account_metadata.is_empty() {
-            info!("Wallet contains no unified accounts (z_getnewaccount was never used)");
-        } else {
-            info!(
-                "Importing {} unified accounts (created with z_getnewaccount)",
-                wallet.unified_accounts().account_metadata.len()
-            );
-        }
-        for account in wallet.unified_accounts().account_metadata.values() {
-            // The only way that a unified account could be created in zcashd was
-            // to be derived from the mnemonic seed, so we can safely unwrap here.
-            let (seed, seed_fp) = mnemonic_seed_data
-                .as_ref()
-                .expect("mnemonic seed should be present");
-
-            assert_eq!(
-                account.seed_fingerprint(),
-                &zewif_zcashd::zcashd_wallet::encode_seed_fingerprint(&seed_fp.to_bytes()),
-            );
-
-            let zip32_account_id = AccountId::try_from(account.zip32_account_id())
-                .map_err(|_| MigrateError::AccountIdInvalid(account.zip32_account_id()))?;
-
-            if db_data
-                .get_derived_account(&Zip32Derivation::new(*seed_fp, zip32_account_id, None))?
-                .is_none()
-            {
-                db_data.import_account_hd(
-                    &format!(
-                        "zcashd imported unified account {}",
-                        account.zip32_account_id()
-                    ),
-                    seed,
-                    zip32_account_id,
-                    &wallet_birthday,
-                    Some(ZCASHD_MNEMONIC_SOURCE),
-                )?;
-            }
-        }
-
-        // Sapling keys may originate from:
-        // * The legacy HD seed, under a standard ZIP 32 key path
-        // * The mnemonic HD seed, under a standard ZIP 32 key path
-        // * The mnemonic HD seed, under the "legacy" account with an additional hardened path element
-        // * Zcashd Sapling spending key import
-        info!("Importing legacy Sapling keys"); // TODO: Expose how many there are in zewif-zcashd.
-        for (idx, key) in wallet.sapling_keys().keypairs().enumerate() {
-            if idx % 100 == 0 && idx > 0 {
-                info!("Processed {} legacy Sapling keys", idx);
-            }
-            // `zewif_zcashd` parses to an earlier version of the `sapling` types, so we
-            // must roundtrip through the byte representation into the version we need.
-            let extsk = sapling::zip32::ExtendedSpendingKey::from_bytes(&key.extsk().to_bytes())
-                .map_err(|_| ()) //work around missing Debug impl
-                .expect("Sapling extsk encoding is stable across sapling-crypto versions");
-            #[allow(deprecated)]
-            let extfvk = extsk.to_extended_full_viewing_key();
-            let ufvk =
-                UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk.clone())?;
-
-            let key_seed_fp = key
-                .metadata()
-                .seed_fp()
-                .map(|seed_fp_bytes| SeedFingerprint::from_bytes(*seed_fp_bytes));
-
-            let derivation = key
-                .metadata()
-                .hd_keypath()
-                .map(|keypath| ZcashdHdDerivation::parse_hd_path(&network_params, keypath))
-                .transpose()?
-                .zip(key_seed_fp)
-                .map(|(derivation, key_seed_fp)| match derivation {
-                    ZcashdHdDerivation::Zip32 { account_id } => {
-                        Zip32Derivation::new(key_seed_fp, account_id, None)
-                    }
-                    ZcashdHdDerivation::Post470LegacySapling { address_index } => {
-                        Zip32Derivation::new(
-                            key_seed_fp,
-                            ZCASHD_LEGACY_ACCOUNT,
-                            Some(address_index),
-                        )
-                    }
-                });
-
-            // If the key is not associated with either of the seeds, treat it as a standalone
-            // imported key
-            if key_seed_fp != mnemonic_seed_fp && key_seed_fp != legacy_seed_fp {
-                keystore
-                    .encrypt_and_store_standalone_sapling_key(&extsk)
-                    .await?;
-            }
-
-            let account_exists = match key_seed_fp.as_ref() {
-                Some(fp) => db_data
-                    .get_derived_account(&Zip32Derivation::new(
-                        *fp,
-                        ZCASHD_LEGACY_ACCOUNT,
-                        derivation.as_ref().and_then(|d| d.legacy_address_index()),
-                    ))?
-                    .is_some(),
-                None => db_data.get_account_for_ufvk(&ufvk)?.is_some(),
-            };
-
-            if !account_exists {
-                db_data.import_account_ufvk(
-                    &format!("zcashd legacy sapling {idx}"),
-                    &ufvk,
-                    &wallet_birthday,
-                    AccountPurpose::Spending { derivation },
-                    Some(ZCASHD_LEGACY_SOURCE),
-                )?;
-            }
-        }
-
-        // Import view-only Sapling keys added via `z_importviewingkey`. zcashd stores these as
-        // `sapextfvk` BDB records; each extended FVK becomes its own view-only account, matching
-        // how each spending-key entry becomes its own account above. If both `z_importkey` and
-        // `z_importviewingkey` were called for the same key, the spending-key path already created
-        // the account, so the `get_account_for_ufvk` check below skips the duplicate.
-        let viewing_keys = wallet.sapling_extended_full_viewing_keys();
-        info!("Importing {} view-only Sapling keys", viewing_keys.len());
-        for (idx, zewif_extfvk) in viewing_keys.values().enumerate() {
-            if idx % 100 == 0 && idx > 0 {
-                info!("Processed {} view-only Sapling keys", idx);
-            }
-            // `zewif-zcashd` parses Sapling types against an older `sapling-crypto`. The ZIP 32
-            // extended FVK encoding is 169 bytes and stable across versions, so round-trip through
-            // bytes to get the version this crate uses.
-            let mut bytes = [0u8; 169];
-            zewif_extfvk
-                .write(&mut bytes[..])
-                .expect("Sapling extended FVK fits in 169 bytes");
-            let extfvk = sapling::zip32::ExtendedFullViewingKey::read(&bytes[..])
-                .expect("Sapling extended FVK encoding is stable across sapling-crypto versions");
-            let ufvk = UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)?;
-
-            if db_data.get_account_for_ufvk(&ufvk)?.is_none() {
-                db_data.import_account_ufvk(
-                    &format!("zcashd imported view-only sapling {idx}"),
-                    &ufvk,
-                    &wallet_birthday,
-                    AccountPurpose::ViewOnly,
-                    Some(ZCASHD_LEGACY_SOURCE),
-                )?;
-            }
-        }
-
-        // TODO: Move this into zewif-zcashd once we're out of dependency version hell.
-        fn convert_key(
-            key: &zewif_zcashd::zcashd_wallet::transparent::KeyPair,
-        ) -> Result<zcash_keys::keys::transparent::Key, MigrateError> {
-            // Check the encoding of the pubkey
-            let _ = PublicKey::from_slice(key.pubkey().as_slice())?;
-            let compressed = key.pubkey().is_compressed();
-
-            let key = zcash_keys::keys::transparent::Key::der_decode(
-                &SecretVec::new(key.privkey().data().to_vec()),
-                compressed,
-            )
-            .map_err(|_| {
-                ErrorKind::Generic.context(fl!(
-                    "err-migrate-wallet-key-decoding",
-                    err = "failed DER decoding"
-                ))
-            })?;
-
-            Ok(key)
-        }
-
-        // Collect transparent addresses that need to be explicitly marked as exposed at the
-        // wallet birthday; `mark_transparent_addresses_exposed` consumes this set below.
-        // Otherwise `listaddresses` (which filters on `exposed_at_height IS NOT NULL`) would
-        // never surface them. Two sources feed this set:
-        //   * Every address imported standalone (privkey, pubkey, or P2SH redeem script) or
-        //     watch-only (from `importaddress` / `importpubkey`), accumulated below as each
-        //     import succeeds, since these have no on-chain derivation history that a chain
-        //     scan would discover.
-        //   * In no-scan mode, every address observed in the wallet's transaction set, since
-        //     the chain will not be scanned to detect exposure heights.
-        let mut to_expose: HashSet<TransparentAddress> = HashSet::new();
-
-        let encryptor = keystore.encryptor().await?;
-        let transparent_keypairs = wallet.keys().keypairs().collect::<Vec<_>>();
-        info!(
-            "Importing {} legacy standalone transparent keys",
-            transparent_keypairs.len(),
-        ); // TODO: Expose how many there are in zewif-zcashd.
-        let encrypted_transparent_keys = transparent_keypairs
-            .into_iter()
-            .map(|key| {
-                let key = convert_key(key)?;
-                encryptor.encrypt_standalone_transparent_key(&key)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        keystore
-            .store_encrypted_standalone_transparent_keys(&encrypted_transparent_keys)
-            .await?;
-        let standalone_pubkeys: Vec<PublicKey> = encrypted_transparent_keys
-            .iter()
-            .map(|key| *key.pubkey())
-            .collect();
-        to_expose.extend(
-            standalone_pubkeys
-                .iter()
-                .map(TransparentAddress::from_pubkey),
+        let document = enriched_document(
+            &document,
+            secret_store,
+            mnemonic_fp.as_ref(),
+            birthday_chain_state.as_ref(),
+            recover_until,
+            no_scan_birthday_estimate,
+            buffer_wallet_transactions,
         );
-        db_data.import_standalone_transparent_pubkeys(
-            legacy_transparent_account_uuid.ok_or(MigrateError::SeedNotAvailable)?,
-            standalone_pubkeys.into_iter(),
-        )?;
 
-        // Import transparent addresses that were added to the `zcashd` wallet via
-        // `importaddress` / `importpubkey` (i.e. watch-only imports). These are stored as
-        // `watchs` and `cscript` records in `wallet.dat`, and `zewif-zcashd` does not
-        // currently surface them through its parsed `ZcashdWallet` type.
-        if !watchonly_pubkeys.is_empty() || !watchonly_scripts.is_empty() {
-            let target_account =
-                legacy_transparent_account_uuid.ok_or(MigrateError::SeedNotAvailable)?;
-
+        // Persist all spending material in the keystore before any wallet-database
+        // write occurs. This runs outside the wallet database's write lock: the
+        // keystore shares that lock, so diverting secrets from within `import_wallet`
+        // (which holds the write lock for its whole run) would deadlock.
+        let mut sink = KeyStoreSecretSink::new(&keystore, network_params).await?;
+        if let Some(zewif::Secrets::Plain(store)) = document.secrets() {
             info!(
-                "Importing {} watch-only transparent pubkeys",
-                watchonly_pubkeys.len(),
+                "Storing {} seeds, {} transparent keys, and {} Sapling keys in the keystore",
+                store.seeds().len(),
+                store.transparent_keys().len(),
+                store.sapling_keys().len(),
             );
-            to_expose.extend(
-                watchonly_pubkeys
-                    .iter()
-                    .map(TransparentAddress::from_pubkey),
+            for entry in store.seeds() {
+                sink.store_seed(entry).map_err(MigrateError::SecretSink)?;
+            }
+            for entry in store.transparent_keys() {
+                sink.store_transparent_key(entry)
+                    .map_err(MigrateError::SecretSink)?;
+            }
+            for entry in store.sapling_keys() {
+                sink.store_sapling_key(entry)
+                    .map_err(MigrateError::SecretSink)?;
+            }
+            for entry in store.sprout_keys() {
+                sink.store_sprout_key(entry)
+                    .map_err(MigrateError::SecretSink)?;
+            }
+            for entry in store.unified_keys() {
+                sink.store_unified_key(entry)
+                    .map_err(MigrateError::SecretSink)?;
+            }
+            if sink.sprout_keys_ignored() > 0 {
+                warn!(
+                    "The wallet contains {} Sprout spending keys, which Zallet does not \
+                     support; move any Sprout funds using zcashd before migrating.",
+                    sink.sprout_keys_ignored(),
+                );
+            }
+            if sink.unified_keys_ignored() > 0 {
+                warn!(
+                    "The wallet contains {} extracted unified spending keys, which \
+                     Zallet does not support storing.",
+                    sink.unified_keys_ignored(),
+                );
+            }
+        }
+        if let Some(fp) = mnemonic_fp.as_ref() {
+            println!(
+                "{}",
+                fl!("migrate-wallet-legacy-seed-fp", seed_fp = fp.encoding())
             );
-            db_data.import_standalone_transparent_pubkeys(
-                target_account,
-                watchonly_pubkeys.into_iter(),
-            )?;
+        }
 
-            info!(
-                "Importing {} watch-only transparent redeem scripts",
-                watchonly_scripts.len(),
-            );
-            let mut skipped_unsupported_scripts = 0usize;
-            for script in watchonly_scripts {
-                let script_addr =
-                    TransparentAddress::from_script_pubkey(&zcash_script::descriptor::sh(&script));
-                // A P2SH descriptor should always produce a valid scriptPubKey from which
-                // `TransparentAddress` can be parsed; if not, our exposure-marking step
-                // below will silently miss this address, so log it.
-                if script_addr.is_none() {
-                    warn!(
-                        "P2SH descriptor unexpectedly produced no `TransparentAddress`; \
-                         the imported script will not be marked as exposed.",
+        // Import the document. All secret material was persisted above, so the
+        // importer's sink discards its (repeated) deliveries.
+        info!("Importing the ZeWIF document into the wallet database");
+        let report = db_data
+            .with_mut(|mut wdb| {
+                zcash_client_sqlite::zewif::import_wallet(&mut wdb, &document, &mut DiscardSecrets)
+            })
+            .map_err(MigrateError::Import)?;
+
+        log_import_report(&report);
+
+        // Register watch-only transparent pubkeys (from zcashd's `importpubkey`) with
+        // the accounts whose address lists carry them. The ZeWIF importer registers
+        // spendable transparent keys from the secret store and P2SH redeem scripts,
+        // but has no path for pubkey-only (watch) addresses.
+        let accounts_by_name: HashMap<&str, zcash_client_sqlite::AccountUuid> = report
+            .imported_accounts
+            .iter()
+            .map(|a| (a.name.as_str(), a.account_uuid))
+            .collect();
+        let exposure_height = birthday_chain_state
+            .as_ref()
+            .map(|cs| BlockHeight::from_u32(u32::from(cs.height()) + 1))
+            .or(no_scan_birthday_estimate)
+            .unwrap_or(sapling_activation);
+        let mut skipped_uncompressed_watch_pubkeys = 0usize;
+        for wallet in document.wallets() {
+            for account in wallet.accounts() {
+                let Some(account_uuid) = accounts_by_name.get(account.name()) else {
+                    continue;
+                };
+                let mut watch_pubkeys = Vec::new();
+                for address in account.addresses() {
+                    if let zewif::ProtocolAddress::Transparent(t) = address.address()
+                        && t.spend_authority().is_none()
+                        && let Some(pubkey) = t.pubkey()
+                    {
+                        // `import_standalone_transparent_pubkeys` derives the stored
+                        // P2PKH address from the compressed pubkey serialization, so an
+                        // uncompressed pubkey would be tracked under a different
+                        // address than zcashd had on-chain.
+                        match PublicKey::from_slice(pubkey.as_slice()) {
+                            Ok(pk) if pubkey.as_slice().len() == 33 => watch_pubkeys.push(pk),
+                            _ => skipped_uncompressed_watch_pubkeys += 1,
+                        }
+                    }
+                }
+                if !watch_pubkeys.is_empty() {
+                    info!(
+                        "Registering {} watch-only transparent pubkeys with account '{}'",
+                        watch_pubkeys.len(),
+                        account.name(),
                     );
-                    debug_assert!(false, "sh() descriptor should always yield an address");
-                }
-                // `import_standalone_transparent_script` currently only accepts multisig
-                // redeem scripts within the P2SH size limit; treat those rejections
-                // (`SqliteClientError::BadAccountData`) as warn-and-skip so a single
-                // unsupported script does not abort the migration. Any other error
-                // (corrupted data, DB failure, conflict, ...) is propagated.
-                match db_data.import_standalone_transparent_script(target_account, script) {
-                    Ok(()) => {
-                        if let Some(addr) = script_addr {
-                            to_expose.insert(addr);
-                        }
-                    }
-                    Err(SqliteClientError::BadAccountData(msg)) => {
-                        skipped_unsupported_scripts += 1;
-                        warn!("Skipping unsupported watch-only redeem script: {}", msg);
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            if skipped_unsupported_scripts > 0 {
-                warn!(
-                    "Skipped {} unsupported watch-only redeem scripts in total.",
-                    skipped_unsupported_scripts,
-                );
-            }
-        }
-
-        // In no-scan mode, also mark every address observed in the wallet's transaction set,
-        // since the chain will not be scanned to detect exposure heights.
-        if no_scan {
-            let mut buf = vec![];
-            for wallet_tx in wallet.transactions().values() {
-                buf.clear();
-                wallet_tx.transaction().write(&mut buf)?;
-                // We only read the transparent bundle here, so the branch id chosen here
-                // is irrelevant: for v5+ txs the embedded branch id overrides this value,
-                // and for earlier versions the branch id is only stored as metadata and
-                // does not affect parsing of the transparent bundle. Any value works.
-                //
-                // The buffer-path below uses `BranchId::for_height` instead because it
-                // re-parses the transaction for full decryption, where the branch id
-                // does affect the result for earlier-version txs.
-                let tx = Transaction::read(buf.as_slice(), BranchId::Sprout)?;
-                if let Some(bundle) = tx.transparent_bundle() {
-                    for vout in &bundle.vout {
-                        if let Some(addr) = vout
-                            .script_kind()
-                            .as_ref()
-                            .and_then(TransparentAddress::from_script_kind)
-                        {
-                            to_expose.insert(addr);
-                        }
-                    }
-                }
-            }
-        }
-
-        if !to_expose.is_empty() {
-            // The upstream API rolls back the whole batch if any address is not tracked,
-            // so filter to just the wallet's known receivers (external counterparties drop
-            // out here).
-            let mut known: HashSet<TransparentAddress> = HashSet::new();
-            for account_id in db_data.get_account_ids()? {
-                known.extend(
+                    let to_expose: Vec<(TransparentAddress, BlockHeight)> = watch_pubkeys
+                        .iter()
+                        .map(|pk| (TransparentAddress::from_pubkey(pk), exposure_height))
+                        .collect();
                     db_data
-                        .get_transparent_receivers(
-                            account_id, true, // include_change
-                            true, // include_standalone
-                        )?
-                        .into_keys(),
-                );
-            }
-
-            let birthday_height = wallet_birthday.height();
-            let to_mark: Vec<(TransparentAddress, BlockHeight)> = to_expose
-                .intersection(&known)
-                .map(|addr| (*addr, birthday_height))
-                .collect();
-            // Surface any address we queued for exposure marking but that does not
-            // appear in `known`. This should be empty in steady state; a non-zero
-            // count signals that an import-path above produced a different address
-            // than what was stored in the wallet (e.g. encoding mismatches), which
-            // would otherwise be invisible.
-            let dropped = to_expose.difference(&known).count();
-            if dropped > 0 {
-                warn!(
-                    "{} transparent addresses queued for exposure marking were not \
-                     tracked by any account and were skipped; an import path may \
-                     have stored them under a different address.",
-                    dropped,
-                );
-            }
-            if !to_mark.is_empty() {
-                db_data.mark_transparent_addresses_exposed(&to_mark)?;
-                info!(
-                    "Marked {} transparent addresses as exposed at birthday height {}",
-                    to_mark.len(),
-                    birthday_height,
-                );
+                        .import_standalone_transparent_pubkeys(
+                            *account_uuid,
+                            watch_pubkeys.into_iter(),
+                        )
+                        .map_err(MigrateError::Database)?;
+                    db_data
+                        .mark_transparent_addresses_exposed(&to_expose)
+                        .map_err(MigrateError::Database)?;
+                }
             }
         }
-
-        // Since we've retrieved the raw transaction data anyway, preemptively store it for faster
-        // access to balance & to set priorities in the scan queue.
-        if buffer_wallet_transactions {
-            info!("Importing transactions");
-
-            // Fetch the UnifiedFullViewingKeys we are tracking
-            let ufvks = db_data.get_unified_full_viewing_keys()?;
-
-            let chain_tip_height = db_data.chain_height()?;
-
-            // Assume that the zcashd wallet was shut down immediately after its last
-            // transaction was mined. This will be accurate except in the following case:
-            // - User mines a transaction in any older epoch.
-            // - A network upgrade activates.
-            // - User creates a transaction.
-            // - User shuts down the wallet before the transaction is mined.
-            let assumed_mempool_height = tx_heights
-                .values()
-                .flat_map(|(h, _)| h)
-                .max()
-                .map(|h| *h + 1);
-
-            let mut buf = vec![];
-            let decoded_txs = tx_heights
-                .values()
-                .flat_map(|(h, wallet_tx)| {
-                    wallet_tx.map(|wallet_tx| {
-                        let consensus_height = match h {
-                            Some(h) => *h,
-                            None => {
-                                let expiry_height =
-                                    u32::from(wallet_tx.transaction().expiry_height());
-                                if expiry_height == 0 {
-                                    // Transaction is unmined and unexpired, use fallback.
-                                    assumed_mempool_height.ok_or_else(|| {
-                                        ErrorKind::Generic
-                                            .context(fl!("err-migrate-wallet-all-unmined"))
-                                    })?
-                                } else {
-                                    // A transaction's expiry height is always in same epoch
-                                    // as its eventual mined height.
-                                    BlockHeight::from_u32(expiry_height)
-                                }
-                            }
-                        };
-                        let consensus_branch_id =
-                            BranchId::for_height(&network_params, consensus_height);
-                        // TODO: Use the same zcash_primitives version in zewif-zcashd
-                        let tx = {
-                            buf.clear();
-                            wallet_tx.transaction().write(&mut buf)?;
-                            Transaction::read(buf.as_slice(), consensus_branch_id)?
-                        };
-                        Ok((tx, *h))
-                    })
-                })
-                .collect::<Result<Vec<_>, MigrateError>>()?;
-
-            info!("Decrypting {} transactions", decoded_txs.len());
-            let decrypted_txs = decoded_txs
-                .iter()
-                .enumerate()
-                .map(|(i, (tx, mined_height))| {
-                    if i % 1000 == 0 && i > 0 {
-                        tracing::info!("Decrypted {i}/{} transactions", decoded_txs.len());
-                    }
-                    decrypt_transaction(
-                        &network_params,
-                        *mined_height,
-                        chain_tip_height,
-                        tx,
-                        &ufvks,
-                    )
-                })
-                .collect::<Vec<_>>();
-
-            info!("Storing {} decrypted transactions", decrypted_txs.len());
-            // TODO: Use chunking here if we add support for resuming migrations.
-            db_data.store_decrypted_txs(decrypted_txs)?;
-        } else {
-            info!("Not importing transactions (--buffer-wallet-transactions not set)");
+        if skipped_uncompressed_watch_pubkeys > 0 {
+            warn!(
+                "Skipped {} watch-only entries with uncompressed or malformed public \
+                 keys; Zallet only supports compressed-form pubkey imports.",
+                skipped_uncompressed_watch_pubkeys,
+            );
         }
 
         Ok(())
+    }
+}
+
+/// Converts a chain-backend `ChainState` into its ZeWIF representation, preserving
+/// the note commitment tree frontiers of every shielded pool.
+fn to_zewif_chain_state(chain_state: &ChainState) -> zewif::ChainState {
+    let mut out = zewif::ChainState::new(zewif::BlockHeight::from_u32(u32::from(
+        chain_state.block_height(),
+    )));
+    out.set_block_hash(zewif::BlockHash::from_bytes(chain_state.block_hash().0));
+    out.set_sapling_tree(to_zewif_frontier(
+        chain_state.final_sapling_tree(),
+        |node| node.to_bytes(),
+    ));
+    out.set_orchard_tree(to_zewif_frontier(
+        chain_state.final_orchard_tree(),
+        |node| node.to_bytes(),
+    ));
+    out.set_ironwood_tree(to_zewif_frontier(
+        chain_state.final_ironwood_tree(),
+        |node| node.to_bytes(),
+    ));
+    out
+}
+
+/// Converts an `incrementalmerkletree` frontier into its ZeWIF representation.
+fn to_zewif_frontier<H, const DEPTH: u8>(
+    frontier: &incrementalmerkletree::frontier::Frontier<H, DEPTH>,
+    node_bytes: impl Fn(&H) -> [u8; 32],
+) -> zewif::Frontier {
+    match frontier.value() {
+        None => zewif::Frontier::Empty,
+        Some(frontier) => zewif::Frontier::NonEmpty(zewif::FrontierData::from_parts(
+            u64::from(frontier.position()),
+            zewif::MerkleNode::new(node_bytes(frontier.leaf())),
+            frontier
+                .ommers()
+                .iter()
+                .map(|ommer| zewif::MerkleNode::new(node_bytes(ommer)))
+                .collect(),
+        )),
+    }
+}
+
+/// Rebuilds `document` with Zallet's enrichments applied.
+///
+/// The ZeWIF document model does not expose mutable access to the accounts of an
+/// assembled document, so enrichment reassembles it:
+///
+/// * the (possibly normalized) secret store replaces the original;
+/// * the legacy account's key source is re-pointed at the mnemonic seed, matching
+///   zcashd's post-v4.7.0 derivation semantics;
+/// * account birthdays are replaced with the chain-derived birthday state where one
+///   was computed, and defaulted to the no-scan estimate where the document records
+///   nothing; and
+/// * transactions are dropped unless `--buffer-wallet-transactions` was given.
+fn enriched_document(
+    document: &zewif::Zewif,
+    secret_store: Option<zewif::SecretStore>,
+    mnemonic_fp: Option<&zewif::SeedFingerprint>,
+    birthday_chain_state: Option<&zewif::ChainState>,
+    recover_until: Option<BlockHeight>,
+    no_scan_birthday_estimate: Option<BlockHeight>,
+    buffer_wallet_transactions: bool,
+) -> zewif::Zewif {
+    let mut out = zewif::Zewif::new(
+        document.export_height(),
+        document.export_height_block_hash(),
+    );
+
+    for wallet in document.wallets() {
+        let mut out_wallet = zewif::ZewifWallet::new(wallet.network().clone());
+        for account in wallet.accounts() {
+            let mut account = account.clone();
+
+            // Normalize the legacy account's derivation to the mnemonic seed.
+            if let (Some(mnemonic_fp), Some(zewif::KeySource::Derived(derived))) =
+                (mnemonic_fp, account.key_source())
+                && derived.account_index() == ZCASHD_LEGACY_ACCOUNT_INDEX
+                && derived.seed_fingerprint() != mnemonic_fp
+            {
+                let legacy_address_index = derived.legacy_address_index();
+                account.set_key_source(zewif::KeySource::Derived(zewif::DerivedKeySource::new(
+                    mnemonic_fp.clone(),
+                    ZCASHD_LEGACY_ACCOUNT_INDEX,
+                    legacy_address_index,
+                )));
+            }
+
+            if let Some(chain_state) = birthday_chain_state {
+                account.set_birthday_chain_state(chain_state.clone());
+                if let Some(height) = recover_until {
+                    account
+                        .set_recover_until_height(zewif::BlockHeight::from_u32(u32::from(height)));
+                }
+            } else if account.birthday_height().is_none()
+                && account.birthday_chain_state().is_none()
+                && let Some(estimate) = no_scan_birthday_estimate
+            {
+                account.set_birthday_height(zewif::BlockHeight::from_u32(u32::from(estimate)));
+            }
+
+            out_wallet.add_account(account);
+        }
+        for entry in wallet.address_book() {
+            out_wallet.add_address_book_entry(entry.clone());
+        }
+        *out_wallet.extensions_mut() = wallet.extensions().clone();
+        out.add_wallet(out_wallet);
+    }
+
+    if buffer_wallet_transactions {
+        out.set_transactions(document.transactions().clone());
+    } else {
+        out.set_transactions(BTreeMap::new());
+    }
+
+    if let Some(store) = secret_store {
+        out.set_secrets(zewif::Secrets::Plain(store));
+    }
+
+    *out.extensions_mut() = document.extensions().clone();
+    out
+}
+
+/// Logs the outcome of a ZeWIF document import.
+fn log_import_report(report: &ZewifImportReport) {
+    for account in &report.imported_accounts {
+        info!(
+            "Imported account '{}' as {:?} (birthday basis: {:?})",
+            account.name, account.account_uuid, account.birthday_basis,
+        );
+    }
+    for skipped in &report.skipped_accounts {
+        warn!(
+            "Account '{}' was not imported: {:?}",
+            skipped.name, skipped.reason,
+        );
+    }
+    info!(
+        "Registered {} standalone transparent keys and {} P2SH redeem scripts",
+        report.transparent_keys_registered, report.redeem_scripts_registered,
+    );
+    if !report.skipped_transparent_keys.is_empty() {
+        warn!(
+            "{} transparent spending keys could not be registered with any account",
+            report.skipped_transparent_keys.len(),
+        );
+    }
+    if report.redeem_scripts_not_representable > 0 {
+        warn!(
+            "Skipped {} watch-only redeem scripts that the wallet cannot represent",
+            report.redeem_scripts_not_representable,
+        );
+    }
+    info!(
+        "Marked {} transparent addresses as exposed",
+        report.addresses_marked_exposed,
+    );
+    if report.transactions_stored > 0 || report.transactions_without_wallet_relevance > 0 {
+        info!(
+            "Stored {} wallet transactions ({} were not relevant to any imported account)",
+            report.transactions_stored, report.transactions_without_wallet_relevance,
+        );
+    }
+    if report.transactions_without_raw_data > 0 {
+        warn!(
+            "{} transactions carried no raw data and were not stored",
+            report.transactions_without_raw_data,
+        );
+    }
+    if report.address_book_entries_not_imported > 0 {
+        warn!(
+            "The wallet's address book ({} entries) was not migrated; Zallet does not \
+             yet store address book entries.",
+            report.address_book_entries_not_imported,
+        );
     }
 }
 
@@ -1017,7 +727,6 @@ pub(crate) enum ZewifError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) enum MigrateError {
     Wrapped(Error),
     Zewif {
@@ -1025,20 +734,16 @@ pub(crate) enum MigrateError {
         wallet_path: PathBuf,
         error: Box<dyn std::error::Error + Send + Sync>,
     },
-    SeedNotAvailable,
-    MnemonicInvalid(bip0039::Error),
-    KeyError(secp256k1::Error),
+    Export(zewif_zcashd::migrate::MigrateError),
+    Import(ZewifImportError<std::convert::Infallible>),
+    SecretSink(SecretSinkError),
+    EncryptedSecrets,
     NetworkMismatch {
         wallet_network: zewif::Network,
         db_network: NetworkType,
     },
-    NetworkNotSupported(NetworkType),
+    NetworkNotSupported,
     Database(SqliteClientError),
-    Tree(ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>),
-    Io(std::io::Error),
-    KeyDerivation(DerivationError),
-    HdPath(PathParseError),
-    AccountIdInvalid(u32),
     MultiImportDisabled,
     DuplicateImport(SeedFingerprint),
 }
@@ -1063,17 +768,19 @@ impl From<MigrateError> for Error {
                     err = error.to_string()
                 )),
             }),
-            MigrateError::SeedNotAvailable => {
-                Error::from(ErrorKind::Generic.context(fl!("err-migrate-wallet-seed-absent")))
+            MigrateError::Export(e) => Error::from(
+                ErrorKind::Generic.context(fl!("err-migrate-wallet-export", err = e.to_string())),
+            ),
+            MigrateError::Import(e) => Error::from(
+                ErrorKind::Generic.context(fl!("err-migrate-wallet-import", err = e.to_string())),
+            ),
+            MigrateError::SecretSink(e) => Error::from(
+                ErrorKind::Generic
+                    .context(fl!("err-migrate-wallet-secret-store", err = e.to_string())),
+            ),
+            MigrateError::EncryptedSecrets => {
+                Error::from(ErrorKind::Generic.context(fl!("err-migrate-wallet-encrypted-secrets")))
             }
-            MigrateError::MnemonicInvalid(error) => Error::from(ErrorKind::Generic.context(fl!(
-                "err-migrate-wallet-invalid-mnemonic",
-                err = error.to_string()
-            ))),
-            MigrateError::KeyError(error) => Error::from(ErrorKind::Generic.context(fl!(
-                "err-migrate-wallet-key-decoding",
-                err = error.to_string()
-            ))),
             MigrateError::NetworkMismatch {
                 wallet_network,
                 db_network,
@@ -1090,7 +797,7 @@ impl From<MigrateError> for Error {
                     NetworkType::Regtest => "regtest",
                 }
             ))),
-            MigrateError::NetworkNotSupported(_) => {
+            MigrateError::NetworkNotSupported => {
                 Error::from(ErrorKind::Generic.context(fl!("err-migrate-wallet-regtest")))
             }
             MigrateError::Database(sqlite_client_error) => {
@@ -1099,25 +806,6 @@ impl From<MigrateError> for Error {
                     err = sqlite_client_error.to_string()
                 )))
             }
-            MigrateError::Tree(e) => Error::from(
-                ErrorKind::Generic
-                    .context(fl!("err-migrate-wallet-data-parse", err = e.to_string())),
-            ),
-            MigrateError::Io(e) => Error::from(
-                ErrorKind::Generic
-                    .context(fl!("err-migrate-wallet-data-parse", err = e.to_string())),
-            ),
-            MigrateError::KeyDerivation(e) => Error::from(
-                ErrorKind::Generic.context(fl!("err-migrate-wallet-key-data", err = e.to_string())),
-            ),
-            MigrateError::HdPath(err) => Error::from(ErrorKind::Generic.context(fl!(
-                "err-migrate-wallet-data-parse",
-                err = format!("{:?}", err)
-            ))),
-            MigrateError::AccountIdInvalid(id) => Error::from(ErrorKind::Generic.context(fl!(
-                "err-migrate-wallet-invalid-account-id",
-                account_id = id
-            ))),
             MigrateError::MultiImportDisabled => Error::from(
                 ErrorKind::Generic.context(fl!("err-migrate-wallet-multi-import-disabled")),
             ),
@@ -1131,21 +819,9 @@ impl From<MigrateError> for Error {
     }
 }
 
-impl From<ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>> for MigrateError {
-    fn from(e: ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>) -> Self {
-        Self::Tree(e)
-    }
-}
-
 impl From<SqliteClientError> for MigrateError {
     fn from(e: SqliteClientError) -> Self {
         Self::Database(e)
-    }
-}
-
-impl From<bip0039::Error> for MigrateError {
-    fn from(value: bip0039::Error) -> Self {
-        Self::MnemonicInvalid(value)
     }
 }
 
@@ -1164,29 +840,5 @@ impl From<abscissa_core::error::Context<ErrorKind>> for MigrateError {
 impl From<ChainError> for MigrateError {
     fn from(value: ChainError) -> Self {
         MigrateError::Wrapped(value.into())
-    }
-}
-
-impl From<std::io::Error> for MigrateError {
-    fn from(value: std::io::Error) -> Self {
-        MigrateError::Io(value)
-    }
-}
-
-impl From<DerivationError> for MigrateError {
-    fn from(value: DerivationError) -> Self {
-        MigrateError::KeyDerivation(value)
-    }
-}
-
-impl From<PathParseError> for MigrateError {
-    fn from(value: PathParseError) -> Self {
-        MigrateError::HdPath(value)
-    }
-}
-
-impl From<secp256k1::Error> for MigrateError {
-    fn from(value: secp256k1::Error) -> Self {
-        MigrateError::KeyError(value)
     }
 }

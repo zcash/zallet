@@ -146,8 +146,6 @@ mod error;
 pub(crate) use error::KeystoreError;
 
 #[cfg(feature = "zcashd-import")]
-// TODO: remove the dead-code allowance once the migrate command consumes the sink.
-#[allow(dead_code)]
 pub(crate) mod zewif;
 
 type RelockTask = (SystemTime, JoinHandle<()>);
@@ -920,13 +918,6 @@ impl Encryptor {
 pub(crate) struct EncryptedStandaloneTransparentKey {
     pubkey: secp256k1::PublicKey,
     encrypted_key_bytes: Vec<u8>,
-}
-
-#[cfg(feature = "transparent-key-import")]
-impl EncryptedStandaloneTransparentKey {
-    pub(crate) fn pubkey(&self) -> &secp256k1::PublicKey {
-        &self.pubkey
-    }
 }
 
 fn encrypt_string(
