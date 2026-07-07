@@ -65,13 +65,19 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(zcash_unstable, values("nu7"))',
 ] }
 
+[dev-dependencies]
+abscissa_core = { version = "0.9", features = ["testing"] }
+once_cell = "1.2"
+tempfile = "3"
+
 [patch.crates-io]
-# Keep this block in sync with the workspace-root Cargo.toml (a CI lockstep check
-# arrives with zcash/zallet#540 phase 4; both binaries share one wallet database, so
-# the librustzcash stack must resolve identically in every workspace).
+# Keep this block in sync with the workspace-root Cargo.toml (utils/check-lockstep.sh
+# enforces resolved-version identity in CI; all binaries share one wallet database, so
+# the librustzcash stack must resolve identically in every workspace). Deliberate
+# delta vs the root block: zcash_history is patched HERE but not at the root, because
+# only the backend graphs use it.
 equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
-pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }

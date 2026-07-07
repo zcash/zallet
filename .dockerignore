@@ -22,6 +22,7 @@
 !zallet-core
 !backends
 !crates
+!tools
 
 # Re-exclude build outputs inside the whitelisted workspace trees (the backend
 # workspaces keep their target/ directories inside backends/*, unlike the root

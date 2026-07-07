@@ -1,0 +1,17 @@
+[package]
+name = "gen-copyright"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+description = "Generates the Debian copyright file covering every binary Zallet ships"
+
+[dependencies]
+# Must stay in version lockstep with embed-licensing-core's cargo_metadata,
+# since we hand its `Package` values to `embed_licensing_core::Crate`.
+cargo_metadata.workspace = true
+embed-licensing-core.workspace = true
+spdx.workspace = true

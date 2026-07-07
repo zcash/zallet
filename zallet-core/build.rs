@@ -11,9 +11,6 @@ use flate2::{Compression, write::GzEncoder};
 use i18n_embed::unic_langid::LanguageIdentifier;
 use shadow_rs::ShadowBuilder;
 
-#[cfg(not(debug_assertions))]
-use std::collections::BTreeMap;
-
 const JSON_RPC_METHODS_RS: &str = "src/components/json_rpc/methods.rs";
 
 mod i18n {
@@ -68,10 +65,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // TODO: Improve the build script so this works with non-wallet Zallet builds.
     #[cfg(not(zallet_build = "merchant_terminal"))]
     generate_rpc_openrpc(&out_dir)?;
-
-    // Generate the Debian copyright file.
-    #[cfg(not(debug_assertions))]
-    generate_debian_copyright(&target_dir)?;
 
     // Generate the completions in English, because these aren't easily localizable.
     i18n::load_languages(&[]);
@@ -355,79 +348,6 @@ pub(super) static METHODS: ::phf::Map<&str, RpcMethod> = ::phf::phf_map! {
 
     let rpc_openrpc_path = out_dir.join("rpc_openrpc.rs");
     fs::write(&rpc_openrpc_path, contents)?;
-
-    Ok(())
-}
-
-/// This is slow, so we only run it in release builds.
-#[cfg(not(debug_assertions))]
-fn generate_debian_copyright(target_dir: &Path) -> Result<(), Box<dyn Error>> {
-    let mut contents = "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: zallet
-
-Files:
- *
-Copyright: 2024-2025, The Electric Coin Company
-License: MIT OR Apache-2.0"
-        .to_string();
-
-    let licensing = embed_licensing::collect(embed_licensing::CollectConfig::default())?;
-
-    let zallet_licenses = [spdx::license_id("MIT"), spdx::license_id("Apache-2.0")];
-    let mut non_spdx_licenses = BTreeMap::new();
-
-    for package in licensing.packages {
-        let name = package.name;
-        let (license_name, license_text) = match package.license {
-            embed_licensing::CrateLicense::SpdxExpression(expression) => {
-                // We can leave out any entries that are covered by the license files we
-                // already include for Zallet itself.
-                if expression.evaluate(|req| zallet_licenses.contains(&req.license.id())) {
-                    continue;
-                } else {
-                    (expression.to_string(), None)
-                }
-            }
-            embed_licensing::CrateLicense::Other(license_text) => {
-                (format!("{name}-license"), Some(license_text))
-            }
-        };
-
-        contents.push_str(&format!(
-            "
-
-Files:
- target/release/deps/{name}-*
- target/release/deps/lib{name}-*
-Copyright:"
-        ));
-        for author in package.authors {
-            contents.push_str("\n ");
-            contents.push_str(&author);
-        }
-        contents.push_str("\nLicense: ");
-        contents.push_str(&license_name);
-        if let Some(text) = license_text {
-            non_spdx_licenses.insert(license_name, text);
-        }
-    }
-    contents.push('\n');
-
-    for (license_name, license_text) in non_spdx_licenses {
-        contents.push_str("\nLicense: ");
-        contents.push_str(&license_name);
-        for line in license_text.lines() {
-            contents.push_str("\n ");
-            if line.is_empty() {
-                contents.push('.');
-            } else {
-                contents.push_str(line);
-            }
-        }
-    }
-
-    let copyright_path = target_dir.join("debian-copyright");
-    fs::write(&copyright_path, contents)?;
 
     Ok(())
 }

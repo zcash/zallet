@@ -14,14 +14,21 @@ the simplest options:
 
 ## Choosing a chain backend
 
-Zallet supports two **mutually exclusive** chain backends, selected at compile time:
+Zallet supports two chain backends. Each is a separate binary (built from its own cargo
+workspace, so the two can track different `zebra` releases), and the `zallet` command is
+a small launcher that runs whichever backend your config file names:
+
+```toml
+# zallet.toml — the default if the key is absent is "zebra-state"
+backend = "zaino"
+```
 
 | Backend | Default | Platform | Reaches the chain via | Requires | Regtest |
 |---------|:-------:|----------|-----------------------|----------|:-------:|
 | `zebra-state` | Yes | Linux only | co-located `zebrad`'s state database (`ReadStateService`) | `zebrad` built with the `indexer` feature + `[indexer.read_state_service]` config + shared state dir | No |
 | `zaino` | No | Linux, macOS, Windows | co-located `zebrad`'s JSON-RPC endpoint (optionally reads state directly when `[indexer.read_state_service]` is set) | co-located `zebrad` JSON-RPC endpoint | Yes |
 
-The **`zebra-state` backend** is the default. It reads finalized chain state directly from
+The **`zebra` backend** is the default. It reads finalized chain state directly from
 a co-located `zebrad`'s state database and is the recommended choice for production
 mainnet use on Linux. It **only works against a `zebrad` built with the non-default
 `indexer` feature**.
@@ -34,36 +41,42 @@ services/containers over JSON-RPC (for example, the stock `zfnd/zebra` images or
 
 ### Pre-compiled artifacts (Docker image / Debian package)
 
-The official Docker image and Debian package ship **both** backends as separate binaries,
-so you pick one by which binary you run:
+The official Docker image and Debian package ship the launcher and **both** backends:
 
-| Binary | Backend | Notes |
-|--------|---------|-------|
-| `zallet` | `zebra-state` (default) | the default command / image `ENTRYPOINT` |
-| `zallet-zebra-state` | `zebra-state` | symlink alias of `zallet` — same binary, explicit name |
-| `zallet-zaino` | `zaino` | additive second binary |
+| Binary | Role | Notes |
+|--------|------|-------|
+| `zallet` | launcher | the default command / image `ENTRYPOINT`; dispatches on the config's `backend` key |
+| `zallet-zebra` | `zebra` backend | directly runnable |
+| `zallet-zaino` | `zaino` backend | directly runnable |
 
 All three share the same CLI surface, config format, and subcommands; only the chain-data
-backend differs. The pre-compiled standalone binaries on the GitHub Releases page follow
-the same split: `zallet-<version>-linux-<arch>` (zebra-state) and
-`zallet-<version>-linux-<arch>-zaino` (zaino).
+backend differs, and you can bypass the launcher by running a backend binary directly (it
+will refuse to run against a config whose `backend` key names the other backend). The
+pre-compiled standalone binaries on the GitHub Releases page are:
+`zallet-<version>-linux-<arch>` (the self-sufficient zebra-state backend),
+`zallet-<version>-linux-<arch>-zaino` (the zaino backend), and
+`zallet-<version>-linux-<arch>-launcher` (the launcher; it needs a backend binary
+installed next to it or on the `PATH`, so most single-binary deployments want one of the
+backend binaries instead).
 
 ### Building from source with a chosen backend
 
-To build or install with the `zaino` backend, pass `--no-default-features --features zaino`
-(along with any other features you need):
+Each backend is its own package in its own cargo workspace, so you install the one you
+want by name (plus the launcher, if you want config-driven dispatch):
 
 ```
-# Install from crates.io with the zaino backend
-cargo install --locked --no-default-features --features zaino,rpc-cli zallet
+# The zebra-state backend (Linux only)
+cargo install --locked --git https://github.com/zcash/zallet.git zallet-zebra
 
-# Install the latest development version with the zaino backend
-cargo install --locked --git https://github.com/zcash/zallet.git \
-  --no-default-features --features zaino,rpc-cli
+# The zaino backend
+cargo install --locked --git https://github.com/zcash/zallet.git zallet-zaino
+
+# The launcher (optional; dispatches to whichever backend the config names)
+cargo install --locked --git https://github.com/zcash/zallet.git zallet
 ```
 
-> Note: the two backends are mutually exclusive. Adding `--features zaino` without
-> `--no-default-features` activates both at once and produces a compile error.
+Backend-independent features such as `rpc-cli` and `zcashd-import` are enabled per
+backend package with `--features` as usual.
 
 ## Pre-compiled binaries
 
@@ -79,7 +92,7 @@ Executable binaries are available for download on the [GitHub Releases page].
 
 To build Zallet from source, you will first need to install Rust and Cargo. Follow the
 instructions on the [Rust installation page]. Zallet currently requires at least Rust
-version 1.85.
+version 1.88.
 
 > WARNING: The following does not yet work because Zallet cannot be published to
 > [crates.io] while it has unpublished dependencies. This will be fixed during the alpha

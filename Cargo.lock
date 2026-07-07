@@ -1563,17 +1563,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embed-licensing"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10940ff2389474cf2468887b1e93afe16911db1db2a35f9d26bbdf8e95b3362f"
-dependencies = [
- "embed-licensing-core",
- "embed-licensing-macros",
- "spdx",
-]
-
-[[package]]
 name = "embed-licensing-core"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1582,22 +1571,8 @@ dependencies = [
  "cargo-platform",
  "cargo_metadata",
  "current_platform",
- "proc-macro2",
- "quote",
  "spdx",
- "syn 2.0.118",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "embed-licensing-macros"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d215383571a79d8af239986e959b016073b5f16e8586d274ba694e97db027dd0"
-dependencies = [
- "embed-licensing-core",
- "quote",
- "syn 2.0.118",
 ]
 
 [[package]]
@@ -1981,6 +1956,15 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "gen-copyright"
+version = "0.1.0"
+dependencies = [
+ "cargo_metadata",
+ "embed-licensing-core",
+ "spdx",
 ]
 
 [[package]]
@@ -6401,7 +6385,6 @@ dependencies = [
  "deadpool-sqlite",
  "deadpool-sync",
  "documented",
- "embed-licensing",
  "flate2",
  "fmutex",
  "futures",
@@ -6441,7 +6424,6 @@ dependencies = [
  "sha2 0.10.9",
  "shadow-rs",
  "shardtree",
- "spdx",
  "syn 2.0.118",
  "tempfile",
  "time",
@@ -7029,13 +7011,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[patch.unused]]
-name = "pczt"
-version = "0.7.0"
-source = "git+https://github.com/zcash/librustzcash.git?rev=cac64ba2b47545f23d356002e4a9f02aaaabc083#cac64ba2b47545f23d356002e4a9f02aaaabc083"
-
-[[patch.unused]]
-name = "zcash_history"
-version = "0.5.0-pre.0"
-source = "git+https://github.com/zcash/librustzcash.git?rev=cac64ba2b47545f23d356002e4a9f02aaaabc083#cac64ba2b47545f23d356002e4a9f02aaaabc083"

@@ -271,6 +271,17 @@ conflicts.
   clippy warnings need not be resolved, but new ones introduced by a PR will
   block merging. The first case described above for work-in-progress commits is
   excepted from these requirements.
+- The repository contains three cargo workspaces (the root workspace with
+  `zallet-core`, the launcher, and tools; and `backends/zebra` +
+  `backends/zaino`, one per chain backend), each with its own lockfile. Build
+  and lint commands apply per workspace: run them at the root and with
+  `--manifest-path backends/{zebra,zaino}/Cargo.toml`. The backend lockfiles
+  may deliberately diverge on the `zebra-*`/`zaino-*` dependency trees — that
+  is the point of the split — but crates that touch the shared wallet database
+  (the librustzcash `[patch.crates-io]` set, `zcash_client_sqlite`, `rusqlite`)
+  must resolve identically everywhere; `./utils/check-lockstep.sh` enforces
+  this in CI. Keep the `[patch.crates-io]` blocks of the three workspace
+  manifests in sync when updating pins.
 
 #### Pull Requests
 

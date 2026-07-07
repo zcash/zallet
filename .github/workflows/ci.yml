@@ -34,6 +34,11 @@ jobs:
       # Each chain backend lives in its own workspace with its own lockfile
       # (zcash/zallet#540), so each is tested separately alongside the shared
       # zallet-core workspace.
+      #
+      # The lockfiles may deliberately diverge on the zebra-*/zaino-* trees,
+      # but crates touching the shared wallet database must stay in lockstep.
+      - name: Check wallet-critical dependency lockstep
+        run: ./utils/check-lockstep.sh
       - name: Run tests (zallet-core)
         run: >
           cargo test

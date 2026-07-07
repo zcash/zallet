@@ -135,14 +135,12 @@ tonic.workspace = true
 clap = { workspace = true, features = ["string", "unstable-styles"] }
 clap_complete.workspace = true
 clap_mangen.workspace = true
-embed-licensing.workspace = true
 flate2.workspace = true
 i18n-embed.workspace = true
 i18n-embed-fl.workspace = true
 quote.workspace = true
 rust-embed.workspace = true
 shadow-rs = { workspace = true, default-features = true }
-spdx.workspace = true
 syn.workspace = true
 uuid.workspace = true
 

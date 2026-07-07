@@ -1,5 +1,5 @@
 [workspace]
-members = ["zallet-core", "zallet"]
+members = ["zallet-core", "zallet", "tools/gen-copyright"]
 exclude = ["backends", "crates"]
 resolver = "2"
 
@@ -55,7 +55,9 @@ rust-embed = "8"
 # Packaging
 clap_complete = "4"
 clap_mangen = "0.2"
+cargo_metadata = "0.18"
 embed-licensing = "0.3"
+embed-licensing-core = "0.3"
 flate2 = "1"
 spdx = "0.10"
 
@@ -111,7 +113,6 @@ zcash_protocol = "0.10.0-pre.0"
 
 # Zcash payment protocols
 orchard = "0.15.0-pre.1"
-pczt = { version = "0.7", features = ["prover", "signer"] }
 sapling = { package = "sapling-crypto", version = "0.7" }
 transparent = { package = "zcash_transparent", version = "0.9.0-pre.0" }
 zcash_encoding = "0.4"
@@ -160,13 +161,13 @@ tonic = "0.14"
 # This should point to a proper release on crates.io
 equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
-pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
-zcash_history = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+# NOTE: zcash_history is deliberately NOT patched here: the root graph does not
+# use it (only the backend workspaces do, and their patch blocks carry it).
 zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
