@@ -39,6 +39,14 @@ jobs:
       # but crates touching the shared wallet database must stay in lockstep.
       - name: Check wallet-critical dependency lockstep
         run: ./utils/check-lockstep.sh
+      # Exercise the sync helper end to end: with no argument it re-pins every
+      # workspace to the rev already in the root Cargo.toml and regenerates the
+      # lockfiles, so on an in-lockstep tree it must be a no-op. A non-empty diff
+      # means the committed lockfiles drifted from what the manifests resolve to.
+      - name: Verify librustzcash sync script is idempotent
+        run: |
+          ./utils/sync-librustzcash.sh
+          git diff --exit-code
       - name: Run tests (zallet-core)
         run: >
           cargo test

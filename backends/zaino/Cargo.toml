@@ -76,6 +76,9 @@ tempfile = "3"
 # the librustzcash stack must resolve identically in every workspace). Deliberate
 # delta vs the root block: zcash_history is patched HERE but not at the root, because
 # only the backend graphs use it.
+#
+# Update the librustzcash rev ONLY via utils/sync-librustzcash.sh (which syncs
+# all three manifests and lockfiles at once); do not edit these revs by hand.
 equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
