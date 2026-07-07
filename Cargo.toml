@@ -159,6 +159,11 @@ tonic = "0.14"
 [patch.crates-io]
 # Temporary pin to librustzcash/main.
 # This should point to a proper release on crates.io
+#
+# Update the librustzcash rev ONLY via utils/sync-librustzcash.sh: it keeps all
+# three workspace manifests (root, backends/zebra, backends/zaino) and their
+# lockfiles on one identical rev, which utils/check-lockstep.sh enforces in CI.
+# Do not edit these revs by hand.
 equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
 transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
