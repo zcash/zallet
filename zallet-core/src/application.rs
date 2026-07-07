@@ -141,6 +141,30 @@ impl Application for ZalletApp {
     }
 
     fn after_config(&mut self, config: Self::Cfg) -> Result<(), FrameworkError> {
+        // All backend binaries operate on the same wallet database, so refuse to run
+        // against a config file that names a different backend than this binary
+        // provides. The `zallet` launcher uses the same key to pick the binary to run,
+        // making a mismatch reachable only by invoking a backend binary directly. An
+        // absent key places no constraint: invoking a backend binary directly is
+        // already an explicit choice of backend, and which backend is the *default*
+        // is the launcher's (i.e. the deployment's) decision, not the library's.
+        // When no config file exists there is nothing to check at all, and commands
+        // that work without one (e.g. `example-config`) must keep working.
+        if config.loaded_from_file
+            && let Some(configured) = &config.backend
+        {
+            let provided = chain_runtime().backend_name();
+            if configured.as_str() != provided {
+                return Err(FrameworkErrorKind::ConfigError
+                    .context(fl!(
+                        "err-config-backend-mismatch",
+                        configured = configured.to_string(),
+                        provided = provided.to_string(),
+                    ))
+                    .into());
+            }
+        }
+
         // Configure components
         let mut components = self.state.components_mut();
         components.after_config(&config)?;
@@ -177,6 +201,11 @@ mod tests {
     struct NoopRuntime;
 
     impl ChainRuntime for NoopRuntime {
+        fn backend_name(&self) -> &'static str {
+            // Any name works: backend names are an open namespace.
+            "noop"
+        }
+
         fn run_start(&self) -> BoxFuture<'_, Result<(), Error>> {
             Box::pin(async { Ok(()) })
         }

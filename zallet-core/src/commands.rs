@@ -169,6 +169,10 @@ impl Configurable<ZalletConfig> for EntryPoint {
         tracing::info!(config = %config_path.display(), "Loading configuration");
 
         config.datadir = Some(datadir);
+        // `init` hands us the default config when `config_path()` returns `None`;
+        // record which case we are in so `after_config` can limit backend validation
+        // to configs that actually came from a file.
+        config.loaded_from_file = self.config_path().is_some();
 
         match &self.cmd {
             ZalletCmd::Start(cmd) => cmd.override_config(config),

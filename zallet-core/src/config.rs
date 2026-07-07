@@ -22,6 +22,57 @@ use {
     zip32::fingerprint::SeedFingerprint,
 };
 
+/// The name of a chain backend, as used in config files' top-level `backend` key.
+///
+/// Backend names are an open namespace: the wallet library places no constraint on
+/// which backends exist. A name is nonempty, lowercase alphanumeric plus hyphens; the
+/// `zallet` launcher maps a name to the `zallet-<name>` sibling binary, and each
+/// backend binary refuses to run against a config that names a backend other than the
+/// one it provides. The backends shipped in this repository are `zebra` and
+/// `zaino`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct BackendName(String);
+
+impl BackendName {
+    /// Returns the backend name as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for BackendName {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // The charset restriction keeps a name meaningful as the `zallet-<name>`
+        // binary suffix (and in particular free of path separators).
+        if !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            Ok(Self(s.into()))
+        } else {
+            Err(format!(
+                "invalid backend name '{s}': backend names are nonempty, lowercase alphanumeric plus hyphens"
+            ))
+        }
+    }
+}
+
+impl std::fmt::Display for BackendName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for BackendName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 /// Zallet Configuration
 ///
 /// Most fields are `Option<T>` to enable distinguishing between a user relying on a
@@ -39,6 +90,29 @@ pub struct ZalletConfig {
     /// is set to `None` until `EntryPoint::process_config` is called.
     #[serde(skip)]
     pub(crate) datadir: Option<PathBuf>,
+
+    /// Whether this configuration was read from a config file, as opposed to being the
+    /// implicit default configuration used when no config file exists.
+    ///
+    /// This cannot be set in a config file; it is `false` until
+    /// `EntryPoint::process_config` is called. Backend validation only applies to
+    /// configurations that were actually loaded from a file.
+    #[serde(skip)]
+    pub(crate) loaded_from_file: bool,
+
+    /// The chain backend this wallet installation uses.
+    ///
+    /// The `zallet` launcher reads this key to decide which backend binary to run:
+    /// the name `foo` dispatches to the `zallet-foo` binary found next to the
+    /// launcher (or on the PATH). Each backend binary refuses to run against a config
+    /// that names a backend other than the one it provides, since all backends
+    /// operate on the same wallet database. The backends shipped with Zallet are
+    /// `"zebra"` (the launcher's default when this key is unset) and
+    /// `"zaino"`.
+    ///
+    /// When this key is unset, a directly-invoked backend binary accepts the config:
+    /// choosing the binary is already an explicit choice of backend.
+    pub backend: Option<BackendName>,
 
     /// Settings that affect transactions created by Zallet.
     pub builder: BuilderSection,
@@ -732,6 +806,7 @@ impl ZalletConfig {
         // make changes to the config structure.
         let conf = ZalletConfig::default();
         let field_defaults = [
+            top_level("backend", "zebra"),
             builder(
                 "spend_zeroconf_change",
                 conf.builder.spend_zeroconf_change(),
@@ -786,6 +861,8 @@ impl ZalletConfig {
         .collect::<HashMap<_, _>>();
 
         // The glue that makes the above easy to maintain:
+        const TOP_LEVEL: &str = "";
+        const BACKEND: &str = "backend";
         const BUILDER: &str = "builder";
         const BUILDER_LIMITS: &str = "builder.limits";
         const CONSENSUS: &str = "consensus";
@@ -803,6 +880,12 @@ impl ZalletConfig {
         const RPC: &str = "rpc";
         const RPC_AUTH: &str = "rpc.auth";
         const SYNC: &str = "sync";
+        fn top_level<T: Serialize>(
+            f: &'static str,
+            d: T,
+        ) -> ((&'static str, &'static str), Option<toml::Value>) {
+            field(TOP_LEVEL, f, d)
+        }
         fn builder<T: Serialize>(
             f: &'static str,
             d: T,
@@ -1071,6 +1154,14 @@ impl ZalletConfig {
 
         for field_name in Self::FIELD_NAMES {
             match *field_name {
+                // `backend` is the sole top-level *file-configurable* key; it must be
+                // emitted before any `[section]` header to remain a top-level TOML key.
+                BACKEND => write_field::<Self>(
+                    &mut config,
+                    field_name,
+                    false,
+                    sec_def(TOP_LEVEL, field_name),
+                ),
                 BUILDER => write_section::<BuilderSection>(&mut config, field_name, &sec_def),
                 CONSENSUS => write_section::<ConsensusSection>(&mut config, field_name, &sec_def),
                 DATABASE => write_section::<DatabaseSection>(&mut config, field_name, &sec_def),
@@ -1097,6 +1188,45 @@ impl ZalletConfig {
 
 #[cfg(test)]
 mod tests {
+    use super::BackendName;
+
+    #[test]
+    fn backend_key_parses() {
+        /// Stands in for `ZalletConfig`, which cannot be deserialized piecemeal (all
+        /// sections are required fields).
+        #[derive(serde::Deserialize)]
+        struct TopLevel {
+            backend: Option<BackendName>,
+        }
+
+        let config: TopLevel = toml::from_str("").unwrap();
+        assert_eq!(config.backend, None);
+
+        let config: TopLevel = toml::from_str("backend = \"zebra\"").unwrap();
+        assert_eq!(
+            config.backend.as_ref().map(BackendName::as_str),
+            Some("zebra")
+        );
+
+        // Backend names are an open namespace: any well-formed name parses, and
+        // whether a backend by that name exists is discovered at dispatch time.
+        let config: TopLevel = toml::from_str("backend = \"bitcoind\"").unwrap();
+        assert_eq!(
+            config.backend.as_ref().map(BackendName::as_str),
+            Some("bitcoind")
+        );
+
+        // Malformed names (charset violations) are rejected at parse time; the
+        // charset keeps names safe to embed in the `zallet-<name>` binary name.
+        for bad in ["", "Zebra-State", "zebra state", "../evil", "zaino\n"] {
+            assert!(
+                toml::from_str::<TopLevel>(&format!("backend = {}", toml::Value::from(bad)))
+                    .is_err(),
+                "expected {bad:?} to be rejected",
+            );
+        }
+    }
+
     use super::ReadStateServiceSection;
 
     #[test]

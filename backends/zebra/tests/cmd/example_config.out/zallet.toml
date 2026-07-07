@@ -12,6 +12,20 @@
 # it set to the current default value means that Zallet will treat it as a
 # user-configured value going forward.
 
+# The chain backend this wallet installation uses.
+#
+# The `zallet` launcher reads this key to decide which backend binary to run:
+# the name `foo` dispatches to the `zallet-foo` binary found next to the
+# launcher (or on the PATH). Each backend binary refuses to run against a config
+# that names a backend other than the one it provides, since all backends
+# operate on the same wallet database. The backends shipped with Zallet are
+# `"zebra"` (the launcher's default when this key is unset) and
+# `"zaino"`.
+#
+# When this key is unset, a directly-invoked backend binary accepts the config:
+# choosing the binary is already an explicit choice of backend.
+#backend = "zebra"
+
 
 #
 # Settings that affect transactions created by Zallet.

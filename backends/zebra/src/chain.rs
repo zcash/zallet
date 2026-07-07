@@ -130,12 +130,14 @@ impl ZebraChain {
     }
 }
 
-/// Factory for the `zebra-state` chain backend.
+/// Factory for the `zebra` chain backend.
 #[derive(Clone, Copy, Debug)]
 pub struct ZebraBackend;
 
 impl ChainFactory for ZebraBackend {
     type Chain = ZebraChain;
+
+    const NAME: &'static str = "zebra";
 
     async fn build(&self, config: &ZalletConfig) -> Result<(ZebraChain, TaskHandle), Error> {
         ZebraChain::new(config).await

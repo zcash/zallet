@@ -47,6 +47,13 @@ pub trait ChainFactory: Send + Sync + 'static {
     /// The concrete chain backend this factory constructs.
     type Chain: Chain;
 
+    /// Which backend this factory provides, as named by the config file's top-level
+    /// `backend` key.
+    ///
+    /// Must be a valid backend name (nonempty, lowercase alphanumeric plus hyphens),
+    /// and by convention matches the `zallet-<NAME>` binary that ships the backend.
+    const NAME: &'static str;
+
     /// Connects to the chain-data source described by `config`, returning the
     /// backend handle and the task driving its indexer.
     fn build(
@@ -61,6 +68,10 @@ pub trait ChainFactory: Send + Sync + 'static {
 /// each command, so the concrete [`Chain`] type never crosses this boundary — type
 /// erasure costs one virtual call per command invocation.
 pub trait ChainRuntime: Send + Sync {
+    /// Which backend this runtime provides, as named by the config file's top-level
+    /// `backend` key.
+    fn backend_name(&self) -> &'static str;
+
     /// Runs the chain-dependent body of `zallet start`.
     fn run_start(&self) -> BoxFuture<'_, Result<(), Error>>;
 
@@ -78,6 +89,10 @@ pub trait ChainRuntime: Send + Sync {
 }
 
 impl<F: ChainFactory> ChainRuntime for F {
+    fn backend_name(&self) -> &'static str {
+        F::NAME
+    }
+
     fn run_start(&self) -> BoxFuture<'_, Result<(), Error>> {
         Box::pin(crate::cli::StartCmd::run_with(self))
     }

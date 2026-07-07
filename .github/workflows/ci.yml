@@ -49,6 +49,49 @@ jobs:
           cargo test
           --manifest-path backends/zebra/Cargo.toml
           --features zcashd-import,rpc-cli,tokio-console
+      # End-to-end check of the `zallet` launcher: config-driven dispatch to the
+      # backend binaries, and the backend binaries' own backend-key validation.
+      - name: Launcher dispatch smoke test
+        run: |
+          cargo build --bin zallet
+          cargo build --manifest-path backends/zebra/Cargo.toml --bin zallet-zebra
+          cargo build --manifest-path backends/zaino/Cargo.toml --bin zallet-zaino
+          bindir="$(mktemp -d)"
+          datadir="$(mktemp -d)"
+          cp target/debug/zallet "$bindir/"
+          cp backends/zebra/target/debug/zallet-zebra "$bindir/"
+
+          # No config file: the launcher dispatches to the default (zebra-state)
+          # backend, passing arguments through.
+          "$bindir/zallet" --datadir "$datadir" --version
+
+          # Generate a real config through the launcher (also exercises subcommand
+          # and flag passthrough), then point it at the zaino backend. The key must
+          # be prepended: top-level TOML keys precede the first [section] header.
+          "$bindir/zallet" --datadir "$datadir" example-config \
+            -o "$datadir/zallet.toml" \
+            --this-is-alpha-code-and-you-will-need-to-recreate-the-example-later
+          sed -i '1i backend = "zaino"' "$datadir/zallet.toml"
+
+          # backend = "zaino" maps to the zallet-zaino binary: with the binary
+          # absent, the launcher must fail and name what it looked for.
+          if out=$("$bindir/zallet" --datadir "$datadir" --version 2>&1); then
+            echo "expected dispatch to a missing zallet-zaino to fail"; exit 1
+          fi
+          echo "$out" | grep -q "zallet-zaino" || { echo "error did not name zallet-zaino: $out"; exit 1; }
+
+          # With the binary present, the same invocation succeeds.
+          cp backends/zaino/target/debug/zallet-zaino "$bindir/"
+          "$bindir/zallet" --datadir "$datadir" --version
+
+          # Belt-and-braces: a backend binary invoked directly against a config
+          # that names the other backend refuses to run.
+          if out=$("$bindir/zallet-zebra" --datadir "$datadir" example-config -o - \
+            --this-is-alpha-code-and-you-will-need-to-recreate-the-example-later 2>&1); then
+            echo "expected zallet-zebra to reject a backend=zaino config"; exit 1
+          fi
+          echo "$out" | grep -q "provides the 'zebra' backend" \
+            || { echo "unexpected mismatch error: $out"; exit 1; }
       - name: Verify working directory is clean
         run: git diff --exit-code
 
