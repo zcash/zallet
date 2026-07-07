@@ -84,7 +84,7 @@ backend package with `--features` as usual.
 
 Executable binaries are available for download on the [GitHub Releases page].
 
-[GitHub Releases page]: https://github.com/zcash/wallet/releases
+[GitHub Releases page]: https://github.com/zcash/zallet/releases
 
 ## Build from source using Rust
 
@@ -125,5 +125,5 @@ If you want to run the latest unpublished changes, then you can instead install 
 directly from the main branch of its code repository:
 
 ```
-cargo install --locked --git https://github.com/zcash/wallet.git
+cargo install --locked --git https://github.com/zcash/zallet.git
 ```
