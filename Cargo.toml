@@ -1,5 +1,6 @@
 [workspace]
-members = ["zallet"]
+members = ["zallet-core"]
+exclude = ["backends", "crates"]
 resolver = "2"
 
 [workspace.package]
@@ -126,16 +127,8 @@ zcash_script = "0.4.3"
 secp256k1 = { version = "0.29", features = ["recovery"] }
 
 # Zcash chain state
-zaino-common = "0.2"
-zaino-fetch = "0.2.1"
-zaino-state = "0.3.1"
-zebra-chain = "11"
-zebra-rpc = "11"
-zebra-state = "10"
 
 # Encodings
-base64 = "0.22"
-
 # Zcash wallet
 deadpool = "0.12"
 deadpool-sqlite = "0.12"
@@ -183,15 +176,6 @@ age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633
 
 zewif = { git = "https://github.com/zcash/zewif.git", rev = "0a5a234490a339ca8dda13614146e4769a3cd963" }
 zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "c640713b91b79d153a7fee2888088931cd7e8326" }
-
-# TEMPORARY: pin the zaino crates to zingolabs/zaino `feat/ironwood_nu6_3`
-# (currently e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c), which updates zaino for
-# the NU6.3 / ironwood librustzcash and zebra lines. This is a dedicated commit
-# to be fixed up as that branch advances; repoint at upstream zaino once the
-# NU6.3 work lands there.
-zaino-common = { git = "https://github.com/zingolabs/zaino.git", rev = "e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c" }
-zaino-fetch = { git = "https://github.com/zingolabs/zaino.git", rev = "e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c" }
-zaino-state = { git = "https://github.com/zingolabs/zaino.git", rev = "e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c" }
 
 [profile.release]
 debug = "line-tables-only"

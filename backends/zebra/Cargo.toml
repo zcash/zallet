@@ -1,0 +1,174 @@
+[package]
+name = "zallet"
+version = "0.1.0-alpha.4"
+authors = [
+    "Jack Grigg <jack@electriccoin.co>",
+    "Kris Nuttycombe <kris@electriccoin.co>",
+]
+edition = "2024"
+rust-version = "1.88"
+description = "A prototype wallet. Don't rely on this for privacy or with significant funds yet!"
+repository = "https://github.com/zcash/zallet"
+license = "MIT OR Apache-2.0"
+categories = ["cryptography::cryptocurrencies"]
+publish = false
+
+# This package is deliberately its own workspace root with its own lockfile, so its
+# zebra-* dependency versions can move independently of the zaino backend's
+# (librocksdb-sys's `links = "rocksdb"` forbids two zebra-state versions in one
+# resolution graph). See https://github.com/zcash/zallet/issues/540.
+[workspace]
+
+[package.metadata.deb]
+name = "zallet"
+extended-description = """\
+Zallet is a Zcash full node wallet, designed to replace the legacy wallet that \
+was included within zcashd."""
+section = "utils"
+assets = [
+    ["target/release/zallet", "usr/bin/", "755"],
+
+    # From the bash-completion FAQ (https://github.com/scop/bash-completion/blob/master/README.md#faq):
+    # > Q. I author/maintain package X and would like to maintain my own completion code
+    # >    for this package. Where should I put it to be sure that interactive bash shells
+    # >    will find it and source it?
+    # > A. Install it in one of the directories pointed to by bash-completion's `pkgconfig`
+    # >    file variables. [..] The recommended directory is `completionsdir`, which you
+    # >    can get with `pkg-config --variable=completionsdir bash-completion`.
+    #
+    # On Ubuntu 22.04 this resolves to `/usr/share/bash-completion/completions`.
+    ["target/release/completions/zallet.bash", "usr/share/bash-completion/completions/zallet", "644"],
+
+    # From https://github.com/elves/elvish/issues/1564#issuecomment-1166333636:
+    # > Completion files can be installed like other modules into a global module search
+    # > directory ([..]). There is no automatic discovery of completion files though; the
+    # > user would have to import them manually with `use`.
+    #
+    # From https://elv.sh/ref/command.html#module-search-directories:
+    # > When importing modules, Elvish searches the following directories:
+    # > [..]
+    # > 3. If the XDG_DATA_DIRS environment variable is defined and non-empty, it is
+    # >    treated as a colon-delimited list of paths (semicolon-delimited on Windows),
+    # >    which are all searched.
+    # >
+    # >    Otherwise, `/usr/local/share/elvish/lib` and `/usr/share/elvish/lib` are
+    # >    searched on non-Windows OSes.
+    ["target/release/completions/zallet.elv", "usr/share/elvish/lib/", "644"],
+
+    # From https://fishshell.com/docs/current/completions.html#where-to-put-completions:
+    # > By default, Fish searches the following for completions, using the first available
+    # > file that it finds:
+    # > [..]
+    # > - A directory for third-party software vendors to ship their own completions for
+    # >   their software, usually `/usr/share/fish/vendor_completions.d`;
+    # > [..]
+    # > If you are developing another program and would like to ship completions with your
+    # > program, install them to the “vendor” completions directory. As this path may vary
+    # > from system to system, the `pkgconfig` framework should be used to discover this
+    # > path with the output of `pkg-config --variable completionsdir fish`.
+    ["target/release/completions/zallet.fish", "usr/share/fish/vendor_completions.d/", "644"],
+
+    # The best reference I can find for the Zsh completions path is
+    # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=921236#17 from February 2019:
+    # > As a rule, completion functions (first line is "#compdef") should be
+    # > installed to /usr/share/zsh/vendor-completions and autoloadable
+    # > functions (first line is "#autoload") to /usr/share/zsh/vendor-functions;
+    # > both of these paths are Debian-specific.
+    ["target/release/completions/_zallet", "usr/share/zsh/vendor-completions/", "644"],
+
+    # From the default `/etc/manpath.config` created by the `man-db` package:
+    # > MANPATH_MAP     /usr/bin                /usr/share/man
+    ["target/release/manpages/**/zallet.1.gz", "usr/share/man/", "644"],
+
+    # We generate this ourselves to include licenses of dependencies that don't match (but
+    # are compatible with) Zallet.
+    ["target/release/debian-copyright", "usr/share/doc/zallet/copyright", "644"],
+
+    ["../../README.md", "usr/share/doc/zallet/README.md", "644"],
+]
+separate-debug-symbols = true
+
+[[test]]
+name = "cli_tests"
+required-features = ["zcashd-import"]
+
+[[test]]
+name = "zallet_acceptance"
+path = "tests/acceptance.rs"
+
+[dependencies]
+zallet-core = { path = "../../zallet-core" }
+zallet-zebra-read-state = { path = "../../crates/zebra-read-state" }
+
+base64 = "0.22"
+futures = "0.3"
+hex = "0.4"
+i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
+incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
+orchard = "0.15.0-pre.1"
+sapling = { package = "sapling-crypto", version = "0.7" }
+serde = { version = "1", features = ["serde_derive"] }
+jsonrpsee = { version = "0.24", features = ["async-client"] }
+jsonrpsee-http-client = { version = "0.24", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tower = { version = "0.4", features = ["timeout"] }
+transparent = { package = "zcash_transparent", version = "0.9.0-pre.0" }
+zcash_client_backend = "0.23"
+zcash_primitives = "0.29.0-pre.0"
+zcash_protocol = "0.10.0-pre.0"
+zebra-chain = "11"
+zebra-state = { version = "10", features = ["indexer"] }
+
+[dev-dependencies]
+abscissa_core = { version = "0.9", features = ["testing"] }
+age = { version = "0.11", features = ["armor", "cli-common", "plugin"] }
+once_cell = "1.2"
+regex = "1.4"
+tempfile = "3"
+trycmd = "0.15"
+
+[features]
+default = ["spend-index"]
+
+## Per-outpoint transparent spend detection via Zebra's spend index; always enabled
+## for this backend (the cfg exists so the sources track zallet-core's API shape).
+spend-index = ["zallet-core/spend-index"]
+
+## Allows `zallet` to import zcashd wallets.
+zcashd-import = ["zallet-core/zcashd-import"]
+
+## `zallet rpc` CLI support.
+rpc-cli = ["zallet-core/rpc-cli"]
+
+## `tokio-console` support.
+tokio-console = ["zallet-core/tokio-console"]
+
+[patch.crates-io]
+# Keep this block in sync with the workspace-root Cargo.toml (a CI lockstep check
+# arrives with zcash/zallet#540 phase 4; both binaries share one wallet database, so
+# the librustzcash stack must resolve identically in every workspace).
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_history = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+
+age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633bb70c91eef91142fd4" }
+
+zewif = { git = "https://github.com/zcash/zewif.git", rev = "0a5a234490a339ca8dda13614146e4769a3cd963" }
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "c640713b91b79d153a7fee2888088931cd7e8326" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(tokio_unstable)',
+    'cfg(zallet_build, values("merchant_terminal", "wallet"))',
+    'cfg(zcash_unstable, values("nu7"))',
+] }

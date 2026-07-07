@@ -18,15 +18,25 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      # The `zaino` and `zebra-state` chain backends are mutually exclusive, so each is
-      # linted separately rather than via `--all-features`.
+      # Each chain backend lives in its own workspace (zcash/zallet#540), so each is
+      # linted separately alongside the shared zallet-core workspace.
+      - name: Run clippy (zallet-core)
+        uses: auguwu/clippy-action@94a9ff2f6920180b89e5c03d121d0af04a9d3e03 # 1.4.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          check-args: >
+            --workspace
+            --features zcashd-import,rpc-cli,tokio-console
+            --all-targets
+          args: >
+            -D warnings
       - name: Run clippy (zaino backend)
         uses: auguwu/clippy-action@94a9ff2f6920180b89e5c03d121d0af04a9d3e03 # 1.4.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           check-args: >
-            --no-default-features
-            --features zaino,zcashd-import,rpc-cli,tokio-console
+            --manifest-path backends/zaino/Cargo.toml
+            --features zcashd-import,rpc-cli,tokio-console
             --all-targets
           args: >
             -D warnings
@@ -35,8 +45,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           check-args: >
-            --no-default-features
-            --features zebra-state,zcashd-import,rpc-cli,tokio-console
+            --manifest-path backends/zebra/Cargo.toml
+            --features zcashd-import,rpc-cli,tokio-console
             --all-targets
           args: >
             -D warnings
@@ -59,13 +69,23 @@ jobs:
         shell: sh
         env:
           TOOLCHAIN: ${{steps.toolchain.outputs.name}}
+      - name: Run Clippy (beta, zallet-core)
+        uses: auguwu/clippy-action@94a9ff2f6920180b89e5c03d121d0af04a9d3e03 # 1.4.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          check-args: >
+            --workspace
+            --features zcashd-import,rpc-cli,tokio-console
+            --all-targets
+          args: >
+            -W clippy::all
       - name: Run Clippy (beta, zaino backend)
         uses: auguwu/clippy-action@94a9ff2f6920180b89e5c03d121d0af04a9d3e03 # 1.4.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           check-args: >
-            --no-default-features
-            --features zaino,zcashd-import,rpc-cli,tokio-console
+            --manifest-path backends/zaino/Cargo.toml
+            --features zcashd-import,rpc-cli,tokio-console
             --all-targets
           args: >
             -W clippy::all
@@ -74,8 +94,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           check-args: >
-            --no-default-features
-            --features zebra-state,zcashd-import,rpc-cli,tokio-console
+            --manifest-path backends/zebra/Cargo.toml
+            --features zcashd-import,rpc-cli,tokio-console
             --all-targets
           args: >
             -W clippy::all
@@ -88,11 +108,23 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo fetch
+      - run: cargo fetch --manifest-path backends/zebra/Cargo.toml
+      - run: cargo fetch --manifest-path backends/zaino/Cargo.toml
       # Requires #![deny(rustdoc::broken_intra_doc_links)] in crates.
-      - name: Check intra-doc links
+      - name: Check intra-doc links (zallet-core)
         run: >
           cargo doc
           --all
+          --document-private-items
+      - name: Check intra-doc links (zebra-state backend)
+        run: >
+          cargo doc
+          --manifest-path backends/zebra/Cargo.toml
+          --document-private-items
+      - name: Check intra-doc links (zaino backend)
+        run: >
+          cargo doc
+          --manifest-path backends/zaino/Cargo.toml
           --document-private-items
 
   fmt:
@@ -104,6 +136,10 @@ jobs:
           persist-credentials: false
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Check formatting (zebra-state backend)
+        run: cargo fmt --manifest-path backends/zebra/Cargo.toml -- --check
+      - name: Check formatting (zaino backend)
+        run: cargo fmt --manifest-path backends/zaino/Cargo.toml -- --check
 
   hadolint:
     name: Hadolint (${{ matrix.dockerfile }})

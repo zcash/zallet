@@ -1,0 +1,98 @@
+[package]
+name = "zallet-zaino"
+version = "0.1.0-alpha.4"
+authors = [
+    "Jack Grigg <jack@electriccoin.co>",
+    "Kris Nuttycombe <kris@electriccoin.co>",
+]
+edition = "2024"
+rust-version = "1.88"
+description = "A prototype wallet, using the Zaino chain indexer. Don't rely on this for privacy or with significant funds yet!"
+repository = "https://github.com/zcash/zallet"
+license = "MIT OR Apache-2.0"
+categories = ["cryptography::cryptocurrencies"]
+publish = false
+
+# This package is deliberately its own workspace root with its own lockfile, so its
+# zebra-* dependency versions (via the zaino crates) can move independently of the
+# zebra-state backend's (librocksdb-sys's `links = "rocksdb"` forbids two zebra-state
+# versions in one resolution graph). See https://github.com/zcash/zallet/issues/540.
+[workspace]
+
+[dependencies]
+zallet-core = { path = "../../zallet-core" }
+zallet-zebra-read-state = { path = "../../crates/zebra-read-state" }
+
+futures = "0.3"
+hex = "0.4"
+i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
+incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
+orchard = "0.15.0-pre.1"
+sapling = { package = "sapling-crypto", version = "0.7" }
+jsonrpsee = "0.24"
+tokio = { version = "1", features = ["net", "rt-multi-thread"] }
+transparent = { package = "zcash_transparent", version = "0.9.0-pre.0" }
+zaino-common = "0.2"
+zaino-fetch = "0.2.1"
+zaino-state = "0.3.1"
+zcash_client_backend = "0.23"
+zcash_keys = { version = "0.15.0-pre.0", features = ["unstable"] }
+zcash_primitives = "0.29.0-pre.0"
+zcash_protocol = "0.10.0-pre.0"
+zebra-rpc = "11"
+
+[features]
+default = []
+
+## Per-outpoint transparent spend detection. Deliberately NOT enabled for this
+## backend (it uses address-based spend detection instead); the feature exists so
+## the sources track zallet-core's API shape.
+spend-index = ["zallet-core/spend-index"]
+
+## Allows `zallet-zaino` to import zcashd wallets.
+zcashd-import = ["zallet-core/zcashd-import"]
+
+## `zallet-zaino rpc` CLI support.
+rpc-cli = ["zallet-core/rpc-cli"]
+
+## `tokio-console` support.
+tokio-console = ["zallet-core/tokio-console"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(tokio_unstable)',
+    'cfg(zallet_build, values("merchant_terminal", "wallet"))',
+    'cfg(zcash_unstable, values("nu7"))',
+] }
+
+[patch.crates-io]
+# Keep this block in sync with the workspace-root Cargo.toml (a CI lockstep check
+# arrives with zcash/zallet#540 phase 4; both binaries share one wallet database, so
+# the librustzcash stack must resolve identically in every workspace).
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_history = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "cac64ba2b47545f23d356002e4a9f02aaaabc083" }
+
+age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633bb70c91eef91142fd4" }
+
+zewif = { git = "https://github.com/zcash/zewif.git", rev = "0a5a234490a339ca8dda13614146e4769a3cd963" }
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "c640713b91b79d153a7fee2888088931cd7e8326" }
+
+# TEMPORARY: pin the zaino crates to zingolabs/zaino `feat/ironwood_nu6_3`
+# (currently e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c), which updates zaino for
+# the NU6.3 / ironwood librustzcash and zebra lines. This is a dedicated commit
+# to be fixed up as that branch advances; repoint at upstream zaino once the
+# NU6.3 work lands there.
+zaino-common = { git = "https://github.com/zingolabs/zaino.git", rev = "e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c" }
+zaino-fetch = { git = "https://github.com/zingolabs/zaino.git", rev = "e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c" }
+zaino-state = { git = "https://github.com/zingolabs/zaino.git", rev = "e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c" }

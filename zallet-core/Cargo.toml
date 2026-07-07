@@ -1,0 +1,204 @@
+[package]
+name = "zallet-core"
+version = "0.1.0-alpha.4"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A prototype wallet. Don't rely on this for privacy or with significant funds yet!"
+repository.workspace = true
+license.workspace = true
+categories.workspace = true
+
+[dependencies]
+# Async
+async-trait.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "rt-multi-thread", "signal"] }
+
+# Data structures
+nonempty.workspace = true
+
+# Build script
+shadow-rs.workspace = true
+
+# Documentation
+documented.workspace = true
+phf.workspace = true
+
+# Filesystem
+fmutex.workspace = true
+home.workspace = true
+known-folders.workspace = true
+xdg.workspace = true
+
+# Hashing
+hmac.workspace = true
+sha2.workspace = true
+
+# Key storage
+age.workspace = true
+bip0039.workspace = true
+
+# Localization
+i18n-embed = { workspace = true, features = ["desktop-requester"] }
+i18n-embed-fl.workspace = true
+rust-embed.workspace = true
+
+# Parsing and serialization
+base64ct.workspace = true
+hex.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+zcash_address.workspace = true
+
+# Randomness
+rand.workspace = true
+
+# Secret management
+secrecy.workspace = true
+
+# CLI
+abscissa_core.workspace = true
+abscissa_tokio.workspace = true
+clap = { workspace = true, features = ["string", "unstable-styles"] }
+rpassword.workspace = true
+
+# RPC
+http-body-util.workspace = true
+hyper.workspace = true
+jsonrpsee = { workspace = true, features = ["macros", "server"] }
+jsonrpsee-http-client = { workspace = true, optional = true }
+nix = { workspace = true, features = ["signal"] }
+rust_decimal.workspace = true
+schemars.workspace = true
+tower = { workspace = true, features = ["timeout"] }
+
+# Testing
+tempfile.workspace = true
+
+# Tracing
+console-subscriber = { workspace = true, optional = true }
+tracing.workspace = true
+tracing-log.workspace = true
+tracing-subscriber.workspace = true
+
+# Zcash consensus
+zcash_protocol = { workspace = true, features = ["local-consensus"] }
+
+# Zcash payment protocols
+orchard.workspace = true
+sapling.workspace = true
+secp256k1.workspace = true
+transparent.workspace = true
+zcash_encoding.workspace = true
+zcash_keys = { workspace = true, features = ["zcashd-compat", "unstable"] }
+zcash_primitives.workspace = true
+zcash_proofs = { workspace = true, features = ["bundled-prover"] }
+zcash_script.workspace = true
+
+# Zcash wallet
+deadpool.workspace = true
+deadpool-sqlite.workspace = true
+deadpool-sync.workspace = true
+incrementalmerkletree = { workspace = true, features = ["legacy-api"] }
+rusqlite.workspace = true
+schemerz.workspace = true
+schemerz-rusqlite.workspace = true
+shardtree.workspace = true
+time.workspace = true
+uuid.workspace = true
+zcash_client_backend = { workspace = true, features = [
+    "lightwalletd-tonic-tls-webpki-roots",
+    "orchard",
+    "sync-decryptor",
+    "transparent-inputs",
+] }
+zcash_client_sqlite = { workspace = true, features = [
+    "orchard",
+    "transparent-inputs",
+] }
+zcash_note_encryption.workspace = true
+zip32.workspace = true
+
+# Zcashd wallet migration
+anyhow.workspace = true
+which = { workspace = true, optional = true }
+zewif = { workspace = true, optional = true }
+zewif-zcashd = { workspace = true, optional = true }
+
+# lightwalletd (temporary)
+tonic.workspace = true
+
+[build-dependencies]
+clap = { workspace = true, features = ["string", "unstable-styles"] }
+clap_complete.workspace = true
+clap_mangen.workspace = true
+embed-licensing.workspace = true
+flate2.workspace = true
+i18n-embed.workspace = true
+i18n-embed-fl.workspace = true
+quote.workspace = true
+rust-embed.workspace = true
+shadow-rs = { workspace = true, default-features = true }
+spdx.workspace = true
+syn.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+abscissa_core = { workspace = true, features = ["testing"] }
+once_cell.workspace = true
+proptest.workspace = true
+regex.workspace = true
+trycmd.workspace = true
+
+[features]
+default = []
+
+## Enables per-outpoint transparent spend detection: the wallet emits
+## `TransactionDataRequest::SpendsOfTransparentOutput` and the backend resolves spends via a
+## per-outpoint spend index. Enabled by the `zebra-state` backend package (which reaches
+## Zebra's spend index); the `zaino` backend leaves it off and uses address-based spend
+## detection instead.
+spend-index = ["zcash_client_sqlite/spend-index"]
+
+## `zallet rpc` CLI support
+rpc-cli = ["jsonrpsee/async-client", "dep:jsonrpsee-http-client"]
+
+## `tokio-console` support
+##
+## To activate this feature, run:
+## ```sh
+## RUSTFLAGS="--cfg=tokio_unstable" cargo build --features tokio-console
+## ```
+##
+## For more details, see:
+## https://github.com/tokio-rs/console/blob/main/console-subscriber/README.md#enabling-tokio-instrumentation
+tokio-console = ["dep:console-subscriber", "tokio/tracing"]
+
+## Allows `zallet` to provide transparent key import functionality, and to work
+## with a wallet imported via the `migrate-zcashd-wallet` command.
+transparent-key-import = [
+  "zcash_client_backend/transparent-key-import",
+  "zcash_client_sqlite/transparent-key-import",
+]
+
+## Allows `zallet` to import zcashd wallets.
+zcashd-import = [
+  "transparent-key-import",
+  "dep:which",
+  "dep:zewif",
+  "dep:zewif-zcashd",
+  "zcash_client_backend/zcashd-compat",
+  "zcash_client_sqlite/zcashd-compat",
+]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(outside_buildscript)',
+    'cfg(tokio_unstable)',
+    'cfg(zallet_build, values("merchant_terminal", "wallet"))',
+    'cfg(zallet_unimplemented)',
+    'cfg(zcash_unstable, values("nu7"))',
+] }
