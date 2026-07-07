@@ -22,7 +22,7 @@ pub(crate) type Response = RpcResult<ResultType>;
 /// The result of verifying a message signature.
 #[derive(Clone, Debug, Serialize, Documented, JsonSchema)]
 #[serde(transparent)]
-pub(crate) struct ResultType(bool);
+pub(crate) struct ResultType(pub(super) bool);
 
 pub(super) const PARAM_ZCASHADDRESS_DESC: &str =
     "The zcash transparent address to use for the signature.";
@@ -32,10 +32,10 @@ pub(super) const PARAM_MESSAGE_DESC: &str = "The message that was signed.";
 
 /// Creates the message hash for signature verification.
 ///
-/// This matches zcashd's `src/rpc/misc.cpp:493-495`.
+/// <https://github.com/zcash/zcash/blob/v6.11.0/src/rpc/misc.cpp#L493-L495>
 ///
 /// Each string is prefixed with CompactSize length, then the result is double SHA-256 hashed.
-fn message_hash(message: &str) -> [u8; 32] {
+pub(super) fn message_hash(message: &str) -> [u8; 32] {
     let mut writer = HashWriter::default();
 
     CompactSize::write(&mut writer, MESSAGE_MAGIC.len()).expect("write to HashWriter");
