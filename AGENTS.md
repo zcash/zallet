@@ -74,31 +74,44 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 Zallet is a Zcash full node wallet, designed to replace the legacy wallet that was included within zcashd.
 
 - **Rust edition**: 2024
-- **MSRV**: 1.85 (pinned in `rust-toolchain.toml` to 1.85.1)
+- **MSRV**: 1.88 (pinned in `rust-toolchain.toml`)
 - **License**: MIT OR Apache-2.0
 - **Repository**: https://github.com/zcash/zallet
 
 ## Project Structure
 
-Zallet is a Rust workspace with a single application crate:
+Zallet is split across **three independent Cargo workspaces**, each with its own
+`Cargo.lock`. A thin launcher binary (`zallet`) selects a backend at runtime and
+execs the matching per-backend binary (`zallet-zebra`, `zallet-zaino`).
 
 ```text
 .
-├── zallet/                  # The wallet application crate
-│   ├── src/
-│   │   ├── bin/             # Binary entry points
-│   │   ├── commands/        # CLI command implementations
-│   │   ├── components/      # Application components
-│   │   ├── application.rs   # Abscissa application setup
-│   │   ├── cli.rs           # CLI definition
-│   │   ├── config.rs        # Configuration types
-│   │   ├── network.rs       # Network handling
-│   │   └── ...
-│   └── tests/               # Integration tests
-├── utils/                   # Build and utility scripts
+├── Cargo.toml               # Root workspace (excludes backends/ and crates/)
+├── zallet/                  # `zallet` launcher binary: reads the config's
+│                            #   `backend` key (default "zebra") and execs the
+│                            #   matching `zallet-<backend>` binary on PATH
+├── zallet-core/             # Shared wallet library: CLI, config, components,
+│                            #   JSON-RPC methods, database, sync. Statically
+│                            #   linked into every backend binary
+├── tools/gen-copyright/     # Build tooling (root workspace member)
+├── backends/
+│   ├── zebra/               # Workspace for the `zallet-zebra` binary
+│   │                        #   (Zebra read-state backend); deps on zallet-core
+│   └── zaino/               # Workspace for the `zallet-zaino` binary
+│                            #   (Zaino indexer backend); deps on zallet-core
+├── crates/zebra-read-state/ # Shared crate used by the zebra backend
+├── utils/                   # Build + librustzcash lockstep scripts
 ├── book/                    # Documentation (mdBook)
 └── .github/workflows/       # CI configuration
 ```
+
+Because each backend binary statically links `zallet-core`, a change there
+affects both backends. All three binaries open the **same** wallet database, so
+the librustzcash stack (`zcash_client_backend`, `zcash_client_sqlite`, ...) MUST
+resolve to one identical git rev across all three lockfiles. This is enforced in
+CI by `utils/check-lockstep.sh`; move the pin ONLY with
+`utils/sync-librustzcash.sh <rev>`, which edits all three manifests and
+reconciles their lockfiles together (never hand-edit a single manifest's pin).
 
 Key external dependencies from the Zcash ecosystem:
 - `zcash_client_backend`, `zcash_client_sqlite` -- wallet backend logic and storage
@@ -108,31 +121,42 @@ Key external dependencies from the Zcash ecosystem:
 
 ## Build, Test, and Development Commands
 
-All three of the following must pass before any PR:
+The three workspaces have separate lockfiles, so every check runs once **per
+workspace**: the root, then each backend via `--manifest-path`. CI does exactly
+this; run all legs before any PR. Formatting uses the pinned toolchain from
+`rust-toolchain.toml` (plain `cargo fmt`, never `cargo +nightly fmt`).
 
 ```bash
-# Format check
+# Format check (root, then each backend)
 cargo fmt --all -- --check
+cargo fmt --manifest-path backends/zebra/Cargo.toml -- --check
+cargo fmt --manifest-path backends/zaino/Cargo.toml -- --check
 
-# Lint check (using the pinned MSRV toolchain)
+# Lint (root, then each backend)
 cargo clippy --all-targets -- -D warnings
+cargo clippy --manifest-path backends/zebra/Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path backends/zaino/Cargo.toml --all-targets -- -D warnings
 
-# Run all tests
-cargo test --workspace --all-features
+# Test (root, then each backend)
+cargo test
+cargo test --manifest-path backends/zebra/Cargo.toml
+cargo test --manifest-path backends/zaino/Cargo.toml
+
+# Verify the three lockfiles resolve librustzcash identically (also run in CI)
+utils/check-lockstep.sh
 ```
 
-Additional useful commands:
+Build the launcher and the backend binaries:
 
 ```bash
-# Full build check
-cargo build --workspace --all-features
-
-# Check intra-doc links
-cargo doc --all --document-private-items
-
-# Run a single test by name
-cargo test -- test_name
+cargo build --bin zallet
+cargo build --manifest-path backends/zebra/Cargo.toml --bin zallet-zebra
+cargo build --manifest-path backends/zaino/Cargo.toml --bin zallet-zaino
 ```
+
+`zallet` dispatches to the backend named by the config `backend` key (default
+`zebra`), so the launcher and the chosen `zallet-<backend>` binary must both be
+on `PATH` at run time.
 
 PRs MUST NOT introduce new warnings from `cargo +beta clippy --tests --all-features --all-targets`. Preexisting beta clippy warnings need not be resolved, but new ones introduced by a PR will block merging.
 
