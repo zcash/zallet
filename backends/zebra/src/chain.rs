@@ -766,4 +766,25 @@ mod tests {
         // Above the captured tip.
         assert_eq!(view.resolve(BlockHeight::from_u32(11)).await.unwrap(), None);
     }
+
+    #[tokio::test]
+    async fn tree_state_as_of_supplies_an_empty_ironwood_tree() {
+        // The mock reader returns no tree bytes, so for a finalized height every pool's
+        // final tree is empty. This pins the Ironwood frontier that `ChainState::new` now
+        // requires: Zebra exposes no Ironwood treestate, so the zebra chain view must supply
+        // an empty one, matching the empty Sapling and Orchard trees.
+        let calls = Arc::new(AtomicU32::new(0));
+        let view = test_view(10, 5, calls);
+
+        let state = view
+            .tree_state_as_of(BlockHeight::from_u32(3))
+            .await
+            .unwrap()
+            .expect("a finalized height with no tree bytes resolves to an empty chain state");
+
+        assert_eq!(state.block_height(), BlockHeight::from_u32(3));
+        assert_eq!(state.final_sapling_tree().tree_size(), 0);
+        assert_eq!(state.final_orchard_tree().tree_size(), 0);
+        assert_eq!(state.final_ironwood_tree().tree_size(), 0);
+    }
 }

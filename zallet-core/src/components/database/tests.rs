@@ -1,6 +1,8 @@
 use rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, named_params};
+use shardtree::error::ShardTreeError;
 use tempfile::tempdir;
+use zcash_client_backend::data_api::{NullifierQuery, WalletCommitmentTrees, WalletRead};
 use zcash_client_sqlite::{WalletDb, util::SystemClock, wallet::init::WalletMigrator};
 use zcash_protocol::consensus::{self, NetworkType, Parameters};
 
@@ -231,6 +233,56 @@ fn incompatible_alpha_is_reported_before_network_mismatch() {
         err.to_string().contains("fresh Zallet wallet"),
         "unexpected error: {err}",
     );
+}
+
+#[test]
+fn db_connection_forwards_ironwood_reads_and_tree_ops() {
+    // DbConnection wraps WalletDb and must forward the Ironwood WalletRead /
+    // WalletCommitmentTrees methods to it rather than fall back to the trait's no-op
+    // defaults. On a freshly migrated wallet with no notes:
+    //   * get_ironwood_nullifiers (required on the scan path) returns an empty set,
+    //   * put_ironwood_subtree_roots accepts an empty batch, and
+    //   * with_ironwood_tree_mut reaches WalletDb's real Ironwood tree (Some), proving it
+    //     is not the WalletCommitmentTrees default (which returns None).
+    crate::i18n::load_languages(&[]);
+
+    let datadir = tempdir().unwrap();
+    let config = test_config(datadir.path(), NetworkType::Test);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let db = database::Database::open(&config).await.unwrap();
+            let mut handle = db.handle().await.unwrap();
+
+            let nullifiers = handle.get_ironwood_nullifiers(NullifierQuery::All).unwrap();
+            assert!(
+                nullifiers.is_empty(),
+                "a fresh wallet has no Ironwood nullifiers, got {nullifiers:?}",
+            );
+
+            handle
+                .put_ironwood_subtree_roots(0, &[])
+                .expect("an empty Ironwood subtree-root batch should be accepted");
+
+            let reached_real_tree =
+                handle
+                    .with_ironwood_tree_mut(|_tree| {
+                        Ok::<
+                            (),
+                            ShardTreeError<
+                                <database::DbConnection as WalletCommitmentTrees>::Error,
+                            >,
+                        >(())
+                    })
+                    .expect("with_ironwood_tree_mut should succeed on a migrated wallet");
+            assert!(
+                reached_real_tree.is_some(),
+                "with_ironwood_tree_mut must reach WalletDb's Ironwood tree, not the no-op default",
+            );
+        });
 }
 
 fn test_config(datadir: &std::path::Path, network_type: NetworkType) -> ZalletConfig {
