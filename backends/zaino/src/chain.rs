@@ -494,11 +494,22 @@ impl ChainView for ZainoChainView {
             }
             .to_frontier();
 
+            // Zaino's treestate lookup exposes no separate Ironwood note commitment tree,
+            // and Ironwood (NU6.3) is not active on any chain Zallet syncs today, so its
+            // final tree is always empty here. When an Ironwood treestate is surfaced, read
+            // it like the Orchard tree above; Ironwood shares the Orchard tree's shape.
+            let final_ironwood_tree = CommitmentTree::<
+                orchard::tree::MerkleHashOrchard,
+                { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+            >::empty()
+            .to_frontier();
+
             Some(ChainState::new(
                 height,
                 BlockHash(hash.0),
                 final_sapling_tree,
                 final_orchard_tree,
+                final_ironwood_tree,
             ))
         } else {
             None
