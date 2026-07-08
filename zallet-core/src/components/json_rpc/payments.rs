@@ -378,6 +378,92 @@ pub(super) fn enforce_privacy_policy<FeeRuleT, NoteRef>(
     Ok(())
 }
 
+/// Returns the privacy policy required to execute the given proposal.
+///
+/// This is the inverse of [`enforce_privacy_policy`]: rather than checking a caller-supplied
+/// policy against the information a proposal would leak, it computes the strictest
+/// [`PrivacyPolicy`] that still permits the proposal. Any policy that
+/// [`PrivacyPolicy::is_compatible_with`] the returned value is sufficient to execute the
+/// transaction; the returned value is itself the strictest such policy.
+///
+/// This reports the privacy implications of a proposed transaction without requiring the
+/// caller to commit to a policy up front.
+// Extracted ahead of its caller: this is not yet wired into a JSON-RPC method on this
+// branch, hence `allow(dead_code)`; drop the attribute when the propose path lands.
+#[allow(dead_code)]
+pub(super) fn required_privacy_policy<FeeRuleT, NoteRef>(
+    proposal: &Proposal<FeeRuleT, NoteRef>,
+) -> PrivacyPolicy {
+    // The required policy for the whole proposal is the meet (greatest lower bound, i.e.
+    // most-permissive-needed) of the policies required by each step. We start from
+    // `FullPrivacy` (the strictest policy, the lattice top); `meet` with each step's
+    // requirement relaxes it exactly as much as that step's leakage demands.
+    proposal
+        .steps()
+        .iter()
+        .fold(PrivacyPolicy::FullPrivacy, |required, step| {
+            // This mirrors the branch structure of `enforce_privacy_policy` exactly; keep
+            // the two in sync. Each step fires exactly one branch, yielding the single
+            // policy level that step requires.
+            let has_transparent_recipient = step.output_in_pool(PoolType::Transparent);
+            let has_transparent_change = step.change_in_pool(PoolType::Transparent);
+            let has_sapling_recipient =
+                step.output_in_pool(PoolType::SAPLING) || step.change_in_pool(PoolType::SAPLING);
+            let has_orchard_recipient =
+                step.output_in_pool(PoolType::ORCHARD) || step.change_in_pool(PoolType::ORCHARD);
+
+            let step_required = if step.input_in_pool(PoolType::Transparent) {
+                let received_addrs = step
+                    .transparent_inputs()
+                    .iter()
+                    .map(|input| input.recipient_address())
+                    .collect::<HashSet<_>>();
+
+                if received_addrs.len() > 1 {
+                    if has_transparent_recipient || has_transparent_change {
+                        PrivacyPolicy::NoPrivacy
+                    } else {
+                        PrivacyPolicy::AllowLinkingAccountAddresses
+                    }
+                } else if has_transparent_recipient || has_transparent_change {
+                    PrivacyPolicy::AllowFullyTransparent
+                } else {
+                    PrivacyPolicy::AllowRevealedSenders
+                }
+            } else if has_transparent_recipient || has_transparent_change {
+                PrivacyPolicy::AllowRevealedRecipients
+            } else if (step.input_in_pool(PoolType::ORCHARD) && has_sapling_recipient)
+                || (step.input_in_pool(PoolType::SAPLING) && has_orchard_recipient)
+            {
+                // TODO: As in `enforce_privacy_policy`, this should only trigger when there
+                // is a non-fee valueBalance.
+                PrivacyPolicy::AllowRevealedAmounts
+            } else {
+                // Nothing is revealed by this step.
+                PrivacyPolicy::FullPrivacy
+            };
+
+            required.meet(step_required)
+        })
+}
+
+/// Parses the optional `privacy_policy` JSON-RPC argument into a [`PrivacyPolicy`],
+/// defaulting to [`PrivacyPolicy::FullPrivacy`] when absent and rejecting the unsupported
+/// `"LegacyCompat"` policy.
+// Extracted ahead of its caller; not yet wired into a JSON-RPC method on this branch, hence
+// `allow(dead_code)`.
+#[allow(dead_code)]
+pub(super) fn parse_privacy_policy(privacy_policy: Option<&str>) -> RpcResult<PrivacyPolicy> {
+    match privacy_policy {
+        Some("LegacyCompat") => Err(LegacyCode::InvalidParameter
+            .with_static("LegacyCompat privacy policy is unsupported in Zallet")),
+        Some(s) => PrivacyPolicy::from_str(s).ok_or_else(|| {
+            LegacyCode::InvalidParameter.with_message(format!("Unknown privacy policy {s}"))
+        }),
+        None => Ok(PrivacyPolicy::FullPrivacy),
+    }
+}
+
 pub(super) enum IncompatiblePrivacyPolicy {
     /// Requested [`PrivacyPolicy`] doesn’t include `NoPrivacy`.
     NoPrivacy,
@@ -811,6 +897,149 @@ mod build_request_tests {
             let request = build_request(&amounts)
                 .expect("a batch of distinct mixed-protocol recipients should build a request");
             prop_assert_eq!(request.payments().len(), pool_indices.len());
+        }
+    }
+}
+
+#[cfg(test)]
+mod privacy_policy_tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    const ALL_POLICIES: &[PrivacyPolicy] = &[
+        PrivacyPolicy::FullPrivacy,
+        PrivacyPolicy::AllowRevealedAmounts,
+        PrivacyPolicy::AllowRevealedRecipients,
+        PrivacyPolicy::AllowRevealedSenders,
+        PrivacyPolicy::AllowFullyTransparent,
+        PrivacyPolicy::AllowLinkingAccountAddresses,
+        PrivacyPolicy::NoPrivacy,
+    ];
+
+    #[test]
+    fn parse_privacy_policy_defaults_to_full_privacy_when_absent() {
+        assert_eq!(
+            parse_privacy_policy(None).unwrap(),
+            PrivacyPolicy::FullPrivacy,
+        );
+    }
+
+    #[test]
+    fn parse_privacy_policy_accepts_every_known_policy() {
+        // Every policy round-trips through its string name.
+        for &policy in ALL_POLICIES {
+            let name: &'static str = policy.into();
+            assert_eq!(parse_privacy_policy(Some(name)).unwrap(), policy);
+        }
+    }
+
+    #[test]
+    fn parse_privacy_policy_rejects_legacy_compat() {
+        let err = parse_privacy_policy(Some("LegacyCompat"))
+            .expect_err("LegacyCompat should be rejected");
+        assert_eq!(
+            err.message(),
+            "LegacyCompat privacy policy is unsupported in Zallet",
+        );
+    }
+
+    #[test]
+    fn parse_privacy_policy_rejects_unknown_policy() {
+        let err =
+            parse_privacy_policy(Some("Whatever")).expect_err("unknown policy should be rejected");
+        assert_eq!(err.message(), "Unknown privacy policy Whatever");
+    }
+
+    #[test]
+    fn meet_with_full_privacy_is_identity() {
+        // `FullPrivacy` is the lattice top: meeting it with any policy yields that policy.
+        for &policy in ALL_POLICIES {
+            assert_eq!(PrivacyPolicy::FullPrivacy.meet(policy), policy);
+            assert_eq!(policy.meet(PrivacyPolicy::FullPrivacy), policy);
+        }
+    }
+
+    #[test]
+    fn meet_with_no_privacy_is_no_privacy() {
+        // `NoPrivacy` is the lattice bottom: meeting it with any policy yields `NoPrivacy`.
+        for &policy in ALL_POLICIES {
+            assert_eq!(
+                PrivacyPolicy::NoPrivacy.meet(policy),
+                PrivacyPolicy::NoPrivacy,
+            );
+            assert_eq!(
+                policy.meet(PrivacyPolicy::NoPrivacy),
+                PrivacyPolicy::NoPrivacy,
+            );
+        }
+    }
+
+    #[test]
+    fn meet_is_commutative() {
+        for &a in ALL_POLICIES {
+            for &b in ALL_POLICIES {
+                assert_eq!(
+                    a.meet(b),
+                    b.meet(a),
+                    "meet should be commutative: {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn meet_combines_transparent_sender_and_recipient() {
+        // Revealing both senders and recipients requires the fully-transparent policy.
+        assert_eq!(
+            PrivacyPolicy::AllowRevealedSenders.meet(PrivacyPolicy::AllowRevealedRecipients),
+            PrivacyPolicy::AllowFullyTransparent,
+        );
+    }
+
+    #[test]
+    fn a_policy_is_compatible_with_itself_and_stricter_ones() {
+        // A caller-supplied policy must permit everything a required policy needs. Any policy
+        // satisfies `FullPrivacy`, and `NoPrivacy` satisfies any required policy.
+        for &policy in ALL_POLICIES {
+            assert!(policy.is_compatible_with(PrivacyPolicy::FullPrivacy));
+            assert!(PrivacyPolicy::NoPrivacy.is_compatible_with(policy));
+        }
+    }
+
+    /// A proptest strategy yielding an arbitrary [`PrivacyPolicy`].
+    fn arb_policy() -> impl Strategy<Value = PrivacyPolicy> {
+        prop::sample::select(ALL_POLICIES.to_vec())
+    }
+
+    proptest! {
+        /// `meet` is the greatest-lower-bound of a lattice, so it must be idempotent,
+        /// commutative, and associative. `required_privacy_policy` folds proposal steps with
+        /// `meet`, so these algebraic laws are what make that fold well-defined.
+        #[test]
+        fn meet_is_idempotent(a in arb_policy()) {
+            prop_assert_eq!(a.meet(a), a);
+        }
+
+        #[test]
+        fn meet_is_commutative_prop(a in arb_policy(), b in arb_policy()) {
+            prop_assert_eq!(a.meet(b), b.meet(a));
+        }
+
+        #[test]
+        fn meet_is_associative(a in arb_policy(), b in arb_policy(), c in arb_policy()) {
+            prop_assert_eq!(a.meet(b).meet(c), a.meet(b.meet(c)));
+        }
+
+        /// Any string that is neither a known policy name nor the rejected `"LegacyCompat"`
+        /// is reported as an unknown policy.
+        #[test]
+        fn parse_privacy_policy_rejects_arbitrary_unknown_strings(s in "[A-Za-z]{0,24}") {
+            prop_assume!(PrivacyPolicy::from_str(&s).is_none() && s != "LegacyCompat");
+            let err = parse_privacy_policy(Some(&s))
+                .expect_err("an unknown policy name should be rejected");
+            let expected = format!("Unknown privacy policy {s}");
+            prop_assert_eq!(err.message(), expected);
         }
     }
 }
