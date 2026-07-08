@@ -92,6 +92,16 @@ zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "e
 zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
 zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
 
+# TEMPORARY: explicit checkpoint retention (ensure_retained / retained_checkpoints).
+# The librustzcash rev above requires these shardtree/incrementalmerkletree APIs
+# and carries this same patch in its own workspace, but Cargo only honours
+# [patch] from the ROOT workspace, so it must be replicated in every manifest.
+# Points at zcash/incrementalmerkletree main (includes #184); replace with a
+# published shardtree release once one is cut. Keep in lockstep with the root and
+# backends/zebra manifests.
+shardtree = { git = "https://github.com/zcash/incrementalmerkletree", rev = "decefc469dbf1e686b20b7e7dcaa7cb4f122125b" }
+incrementalmerkletree = { git = "https://github.com/zcash/incrementalmerkletree", rev = "decefc469dbf1e686b20b7e7dcaa7cb4f122125b" }
+
 age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633bb70c91eef91142fd4" }
 
 zewif = { git = "https://github.com/zcash/zewif.git", rev = "0a5a234490a339ca8dda13614146e4769a3cd963" }
