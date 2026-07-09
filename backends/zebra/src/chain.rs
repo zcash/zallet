@@ -197,6 +197,16 @@ impl Chain for ZebraChain {
         self.reader().orchard_subtree_roots().await
     }
 
+    async fn get_ironwood_subtree_roots(
+        &self,
+    ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+        // TODO: The zebra read-state reader does not expose Ironwood subtree roots yet,
+        // and this backend does not serve regtest/NU6.3 (where Ironwood activates), so
+        // report none for now. Wire this up like `orchard_subtree_roots` once the reader
+        // surfaces the Ironwood tree.
+        Ok(vec![])
+    }
+
     async fn snapshot(&self) -> Result<Self::View, ChainError> {
         let reader = self.reader();
         let tip = reader

@@ -405,6 +405,27 @@ impl Chain for ZainoChain {
             .collect::<Result<Vec<_>, ChainError>>()
     }
 
+    async fn get_ironwood_subtree_roots(
+        &self,
+    ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+        // Ironwood shares the Orchard commitment tree's node type, so its subtree roots
+        // decode as `MerkleHashOrchard` just like Orchard's. Zaino reports no roots until
+        // NU6.3 has produced at least one full subtree.
+        self.subscriber
+            .get_subtree_roots(ShieldedPool::Ironwood, 0, None)
+            .await
+            .map_err(ChainError::backend)?
+            .into_iter()
+            .map(|(root_hash, end_height)| {
+                Ok(CommitmentTreeRoot::from_parts(
+                    BlockHeight::from_u32(end_height),
+                    orchard::tree::MerkleHashOrchard::from_bytes(&root_hash)
+                        .expect("zaino should provide canonical encodings"),
+                ))
+            })
+            .collect::<Result<Vec<_>, ChainError>>()
+    }
+
     async fn snapshot(&self) -> Result<ZainoChainView, ChainError> {
         let snapshot = self
             .subscriber
