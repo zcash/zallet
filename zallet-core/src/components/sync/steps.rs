@@ -17,7 +17,6 @@ use zcash_client_backend::{
 use zcash_client_sqlite::AccountUuid;
 use zcash_primitives::block::Block;
 use zcash_protocol::consensus::BlockHeight;
-use zip32::Scope;
 
 use crate::{
     components::{
@@ -27,7 +26,7 @@ use crate::{
     network::Network,
 };
 
-use super::{SyncError, decryptor};
+use super::{SyncError, WalletDecryptorHandle};
 
 pub(super) async fn update_subtree_roots<C: Chain>(
     chain: &C,
@@ -127,7 +126,7 @@ pub(super) async fn scan_blocks<V: ChainView>(
     db_data: &mut DbConnection,
     params: &Network,
     scan_range: &ScanRange,
-    decryptor: &decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    decryptor: &WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
 ) -> Result<ControlFlow<BlockHeight>, SyncError> {
     // Clamp the range to stop before any known consensus-divergence height (see
@@ -229,7 +228,7 @@ pub(super) async fn scan_block<V: ChainView>(
     db_data: &mut DbConnection,
     params: &Network,
     block: Block,
-    decryptor: &decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    decryptor: &WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
 ) -> Result<ControlFlow<BlockHeight>, SyncError> {
     let height = block.claimed_height();

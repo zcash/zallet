@@ -211,7 +211,7 @@ async fn initialize<C: Chain>(
     chain: &C,
     params: &Network,
     db_data: &mut DbConnection,
-    decryptor: decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    decryptor: WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
 ) -> Result<(ChainBlock, BlockHeight), SyncError> {
     info!("Initializing wallet for syncing");
@@ -470,7 +470,7 @@ async fn steady_state<C: Chain>(
     mut prev_tip: ChainBlock,
     lower_boundary: Arc<AtomicU32>,
     tip_change_signal: Arc<Notify>,
-    decryptor: decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    decryptor: WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
 ) -> Result<(), SyncError> {
     info!("Steady-state sync task started");
@@ -565,7 +565,7 @@ async fn steady_state_iteration<C: Chain>(
     prev_tip: &mut ChainBlock,
     lower_boundary: &AtomicU32,
     tip_change_signal: &Notify,
-    decryptor: &decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    decryptor: &WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
 ) -> Result<ControlFlow<BlockHeight>, SyncError> {
     let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
@@ -695,7 +695,7 @@ async fn recover_history<C: Chain>(
     params: &Network,
     db_data: &mut DbConnection,
     upper_boundary: Arc<AtomicU32>,
-    decryptor: decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    decryptor: WalletDecryptorHandle,
     batch_size: u32,
     shutdown_height: Option<BlockHeight>,
 ) -> Result<(), SyncError> {
