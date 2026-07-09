@@ -362,14 +362,22 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
         }
         .to_frontier();
 
-        // Zebra does not expose a separate Ironwood note commitment tree, and Ironwood
-        // (NU6.3) is not active on any chain Zallet syncs today, so its final tree is always
-        // empty here. When Zebra surfaces an Ironwood treestate, read it like the Orchard tree
-        // above; Ironwood shares the Orchard tree's shape.
-        let final_ironwood_tree = CommitmentTree::<
-            orchard::tree::MerkleHashOrchard,
-            { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
-        >::empty()
+        // Ironwood (NU6.3) shares the Orchard tree's shape. Zebra returns `None` for
+        // heights before NU6.3 activation, where the pool (and so its tree) is empty.
+        let final_ironwood_tree = match self.reader.ironwood_tree_bytes(hash).await? {
+            Some(bytes) => read_commitment_tree::<
+                orchard::tree::MerkleHashOrchard,
+                _,
+                { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+            >(&bytes[..])
+            .map_err(ChainError::invalid_data)?,
+            None if pinned_finalized => CommitmentTree::empty(),
+            None => {
+                return Err(ChainError::unavailable(
+                    "pinned ironwood treestate reorged away",
+                ));
+            }
+        }
         .to_frontier();
 
         Ok(Some(ChainState::new(
@@ -695,6 +703,9 @@ mod tests {
         async fn orchard_tree_bytes(&self, _: BlockHash) -> Result<Option<Vec<u8>>, ChainError> {
             Ok(None)
         }
+        async fn ironwood_tree_bytes(&self, _: BlockHash) -> Result<Option<Vec<u8>>, ChainError> {
+            Ok(None)
+        }
         async fn find_fork_point(
             &self,
             _: &BlockLocator,
@@ -805,9 +816,9 @@ mod tests {
     #[tokio::test]
     async fn tree_state_as_of_supplies_an_empty_ironwood_tree() {
         // The mock reader returns no tree bytes, so for a finalized height every pool's
-        // final tree is empty. This pins the Ironwood frontier that `ChainState::new` now
-        // requires: Zebra exposes no Ironwood treestate, so the zebra chain view must supply
-        // an empty one, matching the empty Sapling and Orchard trees.
+        // final tree is empty. For Ironwood this pins the `None` fallback: Zebra returns no
+        // tree for finalized heights where the pool was not yet active (pre-NU6.3), and the
+        // chain view must map that to an empty frontier like the Sapling and Orchard reads.
         let calls = Arc::new(AtomicU32::new(0));
         let view = test_view(10, 5, calls);
 

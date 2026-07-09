@@ -63,6 +63,11 @@ pub trait ChainReader: Clone + Send + Sync + 'static {
         &self,
         hash: BlockHash,
     ) -> impl Future<Output = Result<Option<Vec<u8>>, ChainError>> + Send;
+    /// Ironwood (NU6.3) reuses the Orchard note commitment tree shape.
+    fn ironwood_tree_bytes(
+        &self,
+        hash: BlockHash,
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, ChainError>> + Send;
     fn find_fork_point(
         &self,
         locator: &BlockLocator,
@@ -209,6 +214,18 @@ impl ChainReader for ReadStateChainReader {
         {
             ReadResponse::OrchardTree(opt) => Ok(opt.map(|tree| tree.to_rpc_bytes())),
             other => unreachable!("unexpected response to OrchardTree: {other:?}"),
+        }
+    }
+
+    async fn ironwood_tree_bytes(&self, hash: BlockHash) -> Result<Option<Vec<u8>>, ChainError> {
+        match self
+            .call(ReadRequest::IronwoodTree(HashOrHeight::Hash(
+                convert::to_zebra_hash(&hash),
+            )))
+            .await?
+        {
+            ReadResponse::IronwoodTree(opt) => Ok(opt.map(|tree| tree.to_rpc_bytes())),
+            other => unreachable!("unexpected response to IronwoodTree: {other:?}"),
         }
     }
 

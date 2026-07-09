@@ -37,6 +37,16 @@ be considered breaking changes.
   transient stale-view error (e.g. a reorg in progress right as the wallet
   started) that `steady_state`'s main loop already tolerates. It now retries the
   same way.
+- The `zebra` chain backend's `tree_state_as_of` always reported the Ironwood
+  note commitment tree as empty, regardless of the queried height. This was
+  correct before NU6.3 activated on any chain the backend could reach, but once
+  a chain crossed activation, every sync batch boundary re-derived the Ironwood
+  frontier as empty instead of reading the real (non-empty) tree, corrupting
+  the wallet's local shardtree state on the very next batch (surfacing as a
+  checkpoint or root conflict in `zcash_client_sqlite`, or an `Inserted root
+  conflicts with existing root` error from `shardtree`). The tree is now read
+  from the backend the same way as Sapling and Orchard, via
+  `ReadRequest::IronwoodTree`.
 
 ## [0.1.0-alpha.4] - 2026-06-25
 
