@@ -96,6 +96,8 @@ zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "2
 zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
 zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
 
+zebra-chain = { git = "https://github.com/ZcashFoundation/zebra.git", rev = "f8ead3f229c29864364873c5267a8db3d6ced4a5" }
+zebra-state = { git = "https://github.com/ZcashFoundation/zebra.git", rev = "f8ead3f229c29864364873c5267a8db3d6ced4a5" }
 
 # Replicated from librustzcash b43a4237's own [patch.crates-io]: main librustzcash is
 # built against zcash/orchard main (adds the public `Builder::bundle_type()`

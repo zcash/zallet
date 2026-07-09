@@ -6941,8 +6941,7 @@ dependencies = [
 [[package]]
 name = "zebra-chain"
 version = "11.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "600a4c35ee81350384226f8178fab2b088e38d5e0a9f6cb0b1051caba30702d7"
+source = "git+https://github.com/ZcashFoundation/zebra.git?rev=f8ead3f229c29864364873c5267a8db3d6ced4a5#f8ead3f229c29864364873c5267a8db3d6ced4a5"
 dependencies = [
  "bech32 0.11.1",
  "bitflags",
@@ -7040,7 +7039,7 @@ dependencies = [
  "zcash_script",
  "zcash_transparent 0.9.0-pre.0",
  "zebra-chain",
- "zebra-node-services",
+ "zebra-node-services 9.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zebra-script",
  "zebra-state",
 ]
@@ -7094,6 +7093,16 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
+ "tower 0.4.13",
+ "zebra-chain",
+]
+
+[[package]]
+name = "zebra-node-services"
+version = "9.0.0"
+source = "git+https://github.com/ZcashFoundation/zebra.git?rev=f8ead3f229c29864364873c5267a8db3d6ced4a5#f8ead3f229c29864364873c5267a8db3d6ced4a5"
+dependencies = [
  "tokio",
  "tower 0.4.13",
  "zebra-chain",
@@ -7155,7 +7164,7 @@ dependencies = [
  "zebra-chain",
  "zebra-consensus",
  "zebra-network",
- "zebra-node-services",
+ "zebra-node-services 9.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zebra-script",
  "zebra-state",
 ]
@@ -7177,8 +7186,7 @@ dependencies = [
 [[package]]
 name = "zebra-state"
 version = "10.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b95b81181253a46885e3254cc5a20e4d82b5258116c9e43db5c8e9660c6b973"
+source = "git+https://github.com/ZcashFoundation/zebra.git?rev=f8ead3f229c29864364873c5267a8db3d6ced4a5#f8ead3f229c29864364873c5267a8db3d6ced4a5"
 dependencies = [
  "bincode",
  "chrono",
@@ -7210,7 +7218,7 @@ dependencies = [
  "tower 0.4.13",
  "tracing",
  "zebra-chain",
- "zebra-node-services",
+ "zebra-node-services 9.0.0 (git+https://github.com/ZcashFoundation/zebra.git?rev=f8ead3f229c29864364873c5267a8db3d6ced4a5)",
 ]
 
 [[package]]
