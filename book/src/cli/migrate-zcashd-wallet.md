@@ -44,14 +44,26 @@ Additional CLI arguments:
 > For the Zallet alpha releases, the command also currently takes another required flag
 > `--this-is-alpha-code-and-you-will-need-to-redo-the-migration-later`.
 
-When run, Zallet will parse the `zcashd` wallet file, connect to the backing
-full node (to obtain necessary chain information for setting up wallet
-birthdays), create Zallet accounts corresponding to the structure of the
-`zcashd` wallet, and store the key material in the Zallet wallet. Parsing is
-performed using the `db_dump` command-line utility. By default Zallet uses the
-copy it vendors and builds, which is the recommended choice; a `zcashd`-provided
-`db_dump` from the `zcutil/bin` directory of a source installation (via
-`--zcashd-install-dir`), or one on the system `$PATH`, are used otherwise.
+When run, Zallet will parse the `zcashd` wallet file, export its contents to an
+in-memory [ZeWIF] (Zcash Wallet Interchange Format) document, connect to the
+backing full node (to obtain necessary chain information for setting up wallet
+birthdays), and import the document: Zallet accounts are created corresponding
+to the structure of the `zcashd` wallet, spending key material is stored in the
+Zallet keystore, and the account birthdays carry the note commitment tree state
+needed for recovery. Parsing is performed using the `db_dump` command-line
+utility. By default Zallet uses the copy it vendors and builds, which is the
+recommended choice; a `zcashd`-provided `db_dump` from the `zcutil/bin`
+directory of a source installation (via `--zcashd-install-dir`), or one on the
+system `$PATH`, are used otherwise.
+
+Some `zcashd` wallet contents cannot be represented in a Zallet wallet, and are
+reported (with counts) rather than migrated: Sprout spending keys (move any
+Sprout funds using `zcashd` before migrating), address book entries, watch-only
+entries recorded without their public keys or redeem scripts, and entries with
+uncompressed public keys. Migration of regtest wallets is not currently
+supported.
+
+[ZeWIF]: https://github.com/zcash/zewif
 
 [`zcashd`]: https://github.com/zcash/zcash
 [`zallet init-wallet-encryption`]: init-wallet-encryption.md

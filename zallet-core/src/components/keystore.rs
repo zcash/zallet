@@ -145,6 +145,9 @@ pub(super) mod db;
 mod error;
 pub(crate) use error::KeystoreError;
 
+#[cfg(feature = "zcashd-import")]
+pub(crate) mod zewif;
+
 type RelockTask = (SystemTime, JoinHandle<()>);
 
 #[derive(Clone)]
@@ -915,13 +918,6 @@ impl Encryptor {
 pub(crate) struct EncryptedStandaloneTransparentKey {
     pubkey: secp256k1::PublicKey,
     encrypted_key_bytes: Vec<u8>,
-}
-
-#[cfg(feature = "transparent-key-import")]
-impl EncryptedStandaloneTransparentKey {
-    pub(crate) fn pubkey(&self) -> &secp256k1::PublicKey {
-        &self.pubkey
-    }
 }
 
 fn encrypt_string(

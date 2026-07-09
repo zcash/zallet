@@ -188,32 +188,6 @@ impl DbConnection {
             })
         })
     }
-
-    /// Caches decrypted transactions in the persistent wallet store.
-    ///
-    /// This creates a single database transaction for all inserts, significantly reducing
-    /// overhead for large migrated wallets.
-    #[cfg(feature = "zcashd-import")]
-    pub(crate) fn store_decrypted_txs(
-        &mut self,
-        received_txs: Vec<DecryptedTransaction<'_, Transaction, AccountUuid>>,
-    ) -> Result<
-        (),
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletRead>::Error,
-    > {
-        self.with_mut(|mut db_data| {
-            db_data.transactionally(|wdb| {
-                let total = received_txs.len();
-                for (i, received_tx) in received_txs.into_iter().enumerate() {
-                    if i % 100 == 0 && i > 0 {
-                        tracing::info!("Stored {i}/{total} transactions");
-                    }
-                    wdb.store_decrypted_tx(received_tx)?;
-                }
-                Ok(())
-            })
-        })
-    }
 }
 
 impl WalletRead for DbConnection {
