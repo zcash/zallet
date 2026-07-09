@@ -11,6 +11,7 @@ use crate::components::{
     database::DbConnection,
     json_rpc::{server::LegacyCode, utils::fetch_account_birthday},
     keystore::KeyStore,
+    sync::WalletDecryptorHandle,
 };
 
 /// Response to a `z_importkey` RPC request.
@@ -68,6 +69,7 @@ pub(crate) async fn call<C: Chain>(
     wallet: &mut DbConnection,
     keystore: &KeyStore,
     chain: C,
+    decryptor: &WalletDecryptorHandle,
     key: &str,
     rescan: Option<&str>,
     start_height: Option<u64>,
@@ -150,6 +152,15 @@ pub(crate) async fn call<C: Chain>(
                 None,
             )
             .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+
+        // Reload viewing keys so the imported key is scanned without a restart. Don't wait
+        // for the reload to be processed: the marker is queued behind any blocks already in
+        // the decryptor, so awaiting it could block this call for a long time during sync.
+        if decryptor.reload_keys().await.is_none() {
+            tracing::warn!(
+                "sync engine has shut down; imported key won't be scanned until restart"
+            );
+        }
     }
 
     Ok(ResultType {

@@ -82,19 +82,31 @@ mod steps;
 #[derive(Debug)]
 pub(crate) struct WalletSync {}
 
+/// Handle the RPC layer uses to reload the sync engine's viewing keys after a key import.
+pub(crate) type WalletDecryptorHandle = decryptor::Handle<AccountUuid, (AccountUuid, Scope)>;
+
+/// Engine half of the batch decryptor, driven by the sync tasks spawned by [`WalletSync::spawn`].
+pub(crate) type WalletDecryptorEngine = decryptor::Engine<AccountUuid, (AccountUuid, Scope)>;
+
 impl WalletSync {
+    /// Builds the batch decryptor. Split from [`WalletSync::spawn`] so the RPC server can be
+    /// handed a handle before `spawn`'s initial scan, which would otherwise delay RPC startup.
+    pub(crate) fn build_decryptor() -> (WalletDecryptorHandle, WalletDecryptorEngine) {
+        // The batch decryptor's built-in defaults (queue size 1000, batch-size threshold
+        // 200, batch start delay 500ms) are appropriate for Zallet, so use them as-is.
+        decryptor::new().build()
+    }
+
     pub(crate) async fn spawn<C: Chain>(
         config: &ZalletConfig,
         db: Database,
         chain: C,
         shutdown_height: Option<BlockHeight>,
+        decryptor: WalletDecryptorHandle,
+        decryptor_engine: WalletDecryptorEngine,
     ) -> Result<(TaskHandle, TaskHandle, TaskHandle, TaskHandle), Error> {
         let params = config.consensus.network();
         let recover_batch_size = config.sync.recover_batch_size();
-
-        // The batch decryptor's built-in defaults (queue size 1000, batch-size threshold
-        // 200, batch start delay 500ms) are appropriate for Zallet, so use them as-is.
-        let (decryptor, decryptor_engine) = decryptor::new().build();
 
         // Spawn the processing tasks.
         let batch_decryptor_task = {
