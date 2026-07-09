@@ -12,6 +12,7 @@ use crate::components::{
         utils::{ensure_wallet_is_unlocked, parse_seedfp_parameter},
     },
     keystore::KeyStore,
+    sync::WalletDecryptorHandle,
 };
 
 /// Response to a `z_getnewaccount` RPC request.
@@ -37,6 +38,7 @@ pub(crate) async fn call<C: Chain>(
     wallet: &mut DbConnection,
     keystore: &KeyStore,
     chain: C,
+    decryptor: &WalletDecryptorHandle,
     account_name: &str,
     seedfp: Option<&str>,
 ) -> Response {
@@ -101,6 +103,11 @@ pub(crate) async fn call<C: Chain>(
     let (account_id, _usk) = wallet
         .create_account(account_name, &seed, &birthday, None)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+
+    // Reload viewing keys so the new account is scanned without a restart (see z_importkey).
+    if decryptor.reload_keys().await.is_none() {
+        tracing::warn!("sync engine has shut down; new account won't be scanned until restart");
+    }
 
     Ok(Account {
         account_uuid: account_id.expose_uuid().to_string(),

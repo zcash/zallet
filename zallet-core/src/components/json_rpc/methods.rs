@@ -949,6 +949,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             self.wallet().await?.as_mut(),
             &self.keystore,
             self.chain().await?,
+            &self.decryptor,
             account_name,
             seedfp,
         )
@@ -963,6 +964,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             self.wallet().await?.as_mut(),
             &self.keystore,
             self.chain().await?,
+            &self.decryptor,
             accounts,
         )
         .await
