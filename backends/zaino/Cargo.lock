@@ -3855,8 +3855,7 @@ dependencies = [
 [[package]]
 name = "orchard"
 version = "0.15.0-pre.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d77752de9c2865ca4a0d962b201b473d60bbe438d53a964a8707ec4bd401d631"
+source = "git+https://github.com/zcash/orchard?rev=475ef0ff77d45aebff93cb039d639250d82518a3#475ef0ff77d45aebff93cb039d639250d82518a3"
 dependencies = [
  "aes",
  "bitvec",
@@ -4552,7 +4551,6 @@ version = "0.11.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
 dependencies = [
- "aws-lc-rs",
  "bytes",
  "getrandom 0.3.4",
  "lru-slab",
@@ -4937,7 +4935,6 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
@@ -7458,10 +7455,11 @@ dependencies = [
 [[package]]
 name = "zaino-common"
 version = "0.2.0"
-source = "git+https://github.com/zingolabs/zaino.git?rev=e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c#e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c"
+source = "git+https://github.com/zingolabs/zaino.git?rev=8048bf8df61cd409af8c22518a16514bee02a0fb#8048bf8df61cd409af8c22518a16514bee02a0fb"
 dependencies = [
  "hex",
  "nu-ansi-term",
+ "rustls",
  "serde",
  "thiserror 2.0.18",
  "time",
@@ -7469,16 +7467,14 @@ dependencies = [
  "tracing-subscriber",
  "tracing-tree",
  "zebra-chain",
- "zingo_common_components",
 ]
 
 [[package]]
 name = "zaino-fetch"
 version = "0.2.1"
-source = "git+https://github.com/zingolabs/zaino.git?rev=e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c#e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c"
+source = "git+https://github.com/zingolabs/zaino.git?rev=8048bf8df61cd409af8c22518a16514bee02a0fb#8048bf8df61cd409af8c22518a16514bee02a0fb"
 dependencies = [
  "base64 0.22.1",
- "byteorder",
  "derive_more",
  "hex",
  "http",
@@ -7488,7 +7484,6 @@ dependencies = [
  "reqwest 0.13.1",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
@@ -7503,7 +7498,7 @@ dependencies = [
 [[package]]
 name = "zaino-proto"
 version = "0.1.3"
-source = "git+https://github.com/zingolabs/zaino.git?rev=e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c#e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c"
+source = "git+https://github.com/zingolabs/zaino.git?rev=8048bf8df61cd409af8c22518a16514bee02a0fb#8048bf8df61cd409af8c22518a16514bee02a0fb"
 dependencies = [
  "prost",
  "tonic",
@@ -7517,7 +7512,7 @@ dependencies = [
 [[package]]
 name = "zaino-state"
 version = "0.3.1"
-source = "git+https://github.com/zingolabs/zaino.git?rev=e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c#e7c9dfdb891d45c18ba53d75f5a54a90d3ec627c"
+source = "git+https://github.com/zingolabs/zaino.git?rev=8048bf8df61cd409af8c22518a16514bee02a0fb#8048bf8df61cd409af8c22518a16514bee02a0fb"
 dependencies = [
  "arc-swap",
  "bitflags 2.13.0",
@@ -8497,15 +8492,6 @@ dependencies = [
  "zcash_transparent 0.8.0",
  "zewif",
  "zip32",
-]
-
-[[package]]
-name = "zingo_common_components"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29f41ddb12ba9aa1fdbf4025fb54639f1fddd25c6e297574922b39fabfb730d4"
-dependencies = [
- "hex",
 ]
 
 [[package]]

@@ -97,7 +97,9 @@ impl ZebraChain {
         )?;
 
         // Open zebrad's state read-only and start the non-finalized syncer.
-        let (read_state_service, sync_task) = {
+        // The chain-tip-change watcher is only needed by the zaino backend's
+        // `ValidatorConnector::State`; this backend follows the tip directly.
+        let (read_state_service, _chain_tip_change, sync_task) = {
             use zcash_protocol::consensus::Parameters as _;
             let zebra_network =
                 network_to_zebra(params.network_type()).map_err(|e| ErrorKind::Init.context(e))?;

@@ -112,7 +112,7 @@ tracing-subscriber = "0.3"
 zcash_protocol = "0.10.0-pre.0"
 
 # Zcash payment protocols
-orchard = "0.15.0-pre.1"
+orchard = "0.15.0-pre.2"
 sapling = { package = "sapling-crypto", version = "0.7" }
 transparent = { package = "zcash_transparent", version = "0.9.0-pre.0" }
 zcash_encoding = "0.4"
@@ -186,6 +186,12 @@ zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe
 # shardtree release once one is cut.
 shardtree = { git = "https://github.com/zcash/incrementalmerkletree", rev = "decefc469dbf1e686b20b7e7dcaa7cb4f122125b" }
 incrementalmerkletree = { git = "https://github.com/zcash/incrementalmerkletree", rev = "decefc469dbf1e686b20b7e7dcaa7cb4f122125b" }
+
+# Replicated from librustzcash b43a4237's own [patch.crates-io]: main librustzcash is
+# built against zcash/orchard main (adds the public `Builder::bundle_type()`
+# accessor), which the crates.io 0.15.0-pre.2 release predates. Required for the
+# librustzcash rev above to compile.
+orchard = { git = "https://github.com/zcash/orchard", rev = "475ef0ff77d45aebff93cb039d639250d82518a3" }
 # NOTE: incrementalmerkletree-testing is deliberately NOT patched here: the root
 # graph does not use it (only the backend workspaces do, and their patch blocks
 # carry it).
