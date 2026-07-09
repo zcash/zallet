@@ -228,9 +228,8 @@ impl ZainoChain {
             None => (ValidatorConnector::Fetch(fetcher.clone()), None),
             Some(rss) => {
                 let (read_state_service, chain_tip_change, sync_task) = {
-                    use zcash_protocol::consensus::Parameters as _;
-                    let zebra_network = network_to_zebra(params.network_type())
-                        .map_err(|e| ErrorKind::Init.context(e))?;
+                    let zebra_network =
+                        network_to_zebra(&params).map_err(|e| ErrorKind::Init.context(e))?;
                     init_read_state_service(
                         &zebra_network,
                         &rss.grpc_address,

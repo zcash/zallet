@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use tokio::net::lookup_host;
 use tokio::task::JoinHandle;
 use tracing::info;
-use zcash_protocol::consensus::NetworkType;
+use zcash_protocol::consensus::{NetworkType, NetworkUpgrade, Parameters};
 use zebra_rpc::sync::init_read_state_with_syncer;
 use zebra_state::{ChainTipChange, ReadStateService};
 
@@ -106,20 +106,41 @@ impl std::error::Error for ReadStateError {
     }
 }
 
-/// Converts a network type into the corresponding `zebra-chain` network.
+/// Converts the wallet's consensus parameters into the corresponding
+/// `zebra-chain` network.
 ///
-/// Returns an error for regtest, which the read-state-service backend does not
-/// support.
-pub fn network_to_zebra(
-    network: NetworkType,
+/// For regtest, a Zebra Regtest network is constructed whose network-upgrade
+/// activation heights mirror the wallet's configured `regtest_nuparams` (read
+/// through the [`Parameters`] trait), so the on-disk state produced by the
+/// co-located zebrad is interpreted under matching consensus rules. The pre-NU5
+/// upgrades default to height 1 (filled by zebra's regtest parameter builder),
+/// so only the configured heights need to be supplied.
+pub fn network_to_zebra<P: Parameters>(
+    params: &P,
 ) -> Result<zebra_chain::parameters::Network, ReadStateError> {
-    use zebra_chain::parameters::Network as ZebraNetwork;
-    match network {
+    use zebra_chain::parameters::{Network as ZebraNetwork, testnet::ConfiguredActivationHeights};
+    match params.network_type() {
         NetworkType::Main => Ok(ZebraNetwork::Mainnet),
         NetworkType::Test => Ok(ZebraNetwork::new_default_testnet()),
-        NetworkType::Regtest => Err(ReadStateError::UnsupportedNetwork(
-            "the read-state-service indexer backend does not support regtest",
-        )),
+        NetworkType::Regtest => {
+            let height = |nu: NetworkUpgrade| params.activation_height(nu).map(u32::from);
+            let heights = ConfiguredActivationHeights {
+                before_overwinter: Some(1),
+                overwinter: height(NetworkUpgrade::Overwinter),
+                sapling: height(NetworkUpgrade::Sapling),
+                blossom: height(NetworkUpgrade::Blossom),
+                heartwood: height(NetworkUpgrade::Heartwood),
+                canopy: height(NetworkUpgrade::Canopy),
+                nu5: height(NetworkUpgrade::Nu5),
+                nu6: height(NetworkUpgrade::Nu6),
+                nu6_1: height(NetworkUpgrade::Nu6_1),
+                nu6_2: height(NetworkUpgrade::Nu6_2),
+                nu6_3: height(NetworkUpgrade::Nu6_3),
+                nu7: None,
+                ..Default::default()
+            };
+            Ok(ZebraNetwork::new_regtest(heights.into()))
+        }
     }
 }
 

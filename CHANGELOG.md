@@ -8,6 +8,15 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- The `zebra` chain backend (and the `zaino` backend's read-state-service mode)
+  now support regtest. The read-state service builds a Zebra Regtest network
+  whose network-upgrade activation heights mirror the wallet's configured
+  `regtest_nuparams`, so it interprets the co-located zebrad's on-disk state
+  under matching consensus rules. Previously these backends rejected regtest at
+  startup with an "does not support regtest" error.
+
 ### Fixed
 
 - `steady_state` sync no longer crashes the whole wallet when the backend's best

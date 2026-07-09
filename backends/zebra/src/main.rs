@@ -3,7 +3,7 @@
 //! This binary reads finalized chain state directly from a co-located zebrad's
 //! state database and follows the non-finalized tip over zebrad's gRPC indexer
 //! interface. It requires a zebrad built with the (non-default) `indexer`
-//! feature, and does not support regtest.
+//! feature.
 
 #![deny(warnings, missing_docs, trivial_casts, unused_qualifications)]
 #![forbid(unsafe_code)]

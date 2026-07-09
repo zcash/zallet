@@ -100,9 +100,8 @@ impl ZebraChain {
         // The chain-tip-change watcher is only needed by the zaino backend's
         // `ValidatorConnector::State`; this backend follows the tip directly.
         let (read_state_service, _chain_tip_change, sync_task) = {
-            use zcash_protocol::consensus::Parameters as _;
             let zebra_network =
-                network_to_zebra(params.network_type()).map_err(|e| ErrorKind::Init.context(e))?;
+                network_to_zebra(&params).map_err(|e| ErrorKind::Init.context(e))?;
             init_read_state_service(
                 &zebra_network,
                 &rss.grpc_address,
@@ -603,19 +602,42 @@ mod tests {
 
     #[test]
     fn network_to_zebra_maps_main_and_test() {
+        let main = Network::from_type(NetworkType::Main, &[]);
+        let test = Network::from_type(NetworkType::Test, &[]);
+        assert!(matches!(network_to_zebra(&main), Ok(ZebraNetwork::Mainnet)));
         assert!(matches!(
-            network_to_zebra(NetworkType::Main),
-            Ok(ZebraNetwork::Mainnet)
-        ));
-        assert!(matches!(
-            network_to_zebra(NetworkType::Test),
+            network_to_zebra(&test),
             Ok(ZebraNetwork::Testnet(_))
         ));
     }
 
     #[test]
-    fn network_to_zebra_rejects_regtest() {
-        assert!(network_to_zebra(NetworkType::Regtest).is_err());
+    fn network_to_zebra_builds_regtest_with_matching_heights() {
+        use zcash_protocol::consensus::{NetworkUpgrade, Parameters as _};
+        use zebra_chain::block::Height as ZebraHeight;
+        use zebra_chain::parameters::NetworkUpgrade as ZebraUpgrade;
+
+        // NU5 at height 2 (earlier upgrades inherit height 1 in regtest). Regtest
+        // is now supported rather than rejected.
+        let regtest = Network::from_type(
+            NetworkType::Regtest,
+            &["c2d6d0b4:2".to_string().try_into().unwrap()],
+        );
+        let zebra = network_to_zebra(&regtest).expect("regtest network builds");
+        assert!(zebra.is_regtest());
+
+        // The configured NU5 height is threaded into the Zebra regtest network,
+        // matching what the wallet parameters report.
+        assert_eq!(
+            regtest
+                .activation_height(NetworkUpgrade::Nu5)
+                .map(u32::from),
+            Some(2),
+        );
+        assert_eq!(
+            ZebraUpgrade::Nu5.activation_height(&zebra),
+            Some(ZebraHeight(2)),
+        );
     }
 
     use std::sync::atomic::{AtomicU32, Ordering};

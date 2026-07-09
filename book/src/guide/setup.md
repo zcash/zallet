@@ -108,8 +108,9 @@ Notes:
 - zebrad's on-disk state format must match Zallet's `zebra-state` version; a
   mismatch fails fast with a "no zebra-state v… database found" error rather than
   silently creating an empty database.
-- Reading state this way does not support regtest; use the JSON-RPC `zaino` backend
-  (without this section) for regtest.
+- Regtest is supported: the backend builds a Zebra Regtest network from the wallet's
+  configured `regtest_nuparams`, so it interprets zebrad's state under matching
+  consensus rules.
 
 If you have an existing `zcash.conf`, you can use it as a starting point:
 ```
