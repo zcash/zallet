@@ -200,11 +200,7 @@ impl Chain for ZebraChain {
     async fn get_ironwood_subtree_roots(
         &self,
     ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
-        // TODO: The zebra read-state reader does not expose Ironwood subtree roots yet,
-        // and this backend does not serve regtest/NU6.3 (where Ironwood activates), so
-        // report none for now. Wire this up like `orchard_subtree_roots` once the reader
-        // surfaces the Ironwood tree.
-        Ok(vec![])
+        self.reader().ironwood_subtree_roots().await
     }
 
     async fn snapshot(&self) -> Result<Self::View, ChainError> {
@@ -701,6 +697,11 @@ mod tests {
             Ok(vec![])
         }
         async fn orchard_subtree_roots(
+            &self,
+        ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+            Ok(vec![])
+        }
+        async fn ironwood_subtree_roots(
             &self,
         ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
             Ok(vec![])

@@ -84,6 +84,12 @@ pub trait ChainReader: Clone + Send + Sync + 'static {
         Output = Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError>,
     > + Send;
 
+    fn ironwood_subtree_roots(
+        &self,
+    ) -> impl Future<
+        Output = Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError>,
+    > + Send;
+
     /// Whether `outpoint` is unspent on the best chain. Authoritative (reads the UTXO set, not
     /// the optional spend index).
     #[cfg(feature = "spend-index")]
@@ -310,6 +316,35 @@ impl ChainReader for ReadStateChainReader {
                 })
                 .collect(),
             other => unreachable!("unexpected response to OrchardSubtrees: {other:?}"),
+        }
+    }
+
+    async fn ironwood_subtree_roots(
+        &self,
+    ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+        match self
+            .call(ReadRequest::IronwoodSubtrees {
+                start_index: NoteCommitmentSubtreeIndex(0),
+                limit: None,
+            })
+            .await?
+        {
+            ReadResponse::IronwoodSubtrees(map) => map
+                .into_values()
+                .map(|d| {
+                    let node = Option::from(orchard::tree::MerkleHashOrchard::from_bytes(
+                        &d.root.to_repr(),
+                    ))
+                    .ok_or_else(|| {
+                        ChainError::invalid_data("non-canonical ironwood subtree root")
+                    })?;
+                    Ok(CommitmentTreeRoot::from_parts(
+                        BlockHeight::from_u32(d.end_height.0),
+                        node,
+                    ))
+                })
+                .collect(),
+            other => unreachable!("unexpected response to IronwoodSubtrees: {other:?}"),
         }
     }
 
