@@ -805,7 +805,7 @@ version = "0.2.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.incrementalmerkletree]]
-version = "0.8.2@git:decefc469dbf1e686b20b7e7dcaa7cb4f122125b"
+version = "0.8.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.indenter]]
@@ -1485,7 +1485,7 @@ version = "1.7.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.shardtree]]
-version = "0.6.2@git:decefc469dbf1e686b20b7e7dcaa7cb4f122125b"
+version = "0.7.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.shlex]]
