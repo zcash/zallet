@@ -22,7 +22,7 @@ pub(crate) struct TotalBalance {
     /// The total value of unspent transparent outputs, in ZEC
     transparent: String,
 
-    /// The total value of unspent Sapling and Orchard outputs, in ZEC
+    /// The total value of unspent Sapling, Orchard, and Ironwood outputs, in ZEC
     private: String,
 
     /// The total value of unspent shielded and transparent outputs, in ZEC
@@ -63,7 +63,10 @@ pub(crate) fn call(
             |(transparent, private), (_, balance)| {
                 (
                     transparent + balance.unshielded_balance().total(),
-                    private + balance.sapling_balance().total() + balance.orchard_balance().total(),
+                    private
+                        + balance.sapling_balance().total()
+                        + balance.orchard_balance().total()
+                        + balance.ironwood_balance().total(),
                 )
             },
         )

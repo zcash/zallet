@@ -227,7 +227,7 @@ impl ZainoChain {
         let (source, sync_handle) = match &config.indexer.read_state_service {
             None => (ValidatorConnector::Fetch(fetcher.clone()), None),
             Some(rss) => {
-                let (read_state_service, sync_task) = {
+                let (read_state_service, chain_tip_change, sync_task) = {
                     use zcash_protocol::consensus::Parameters as _;
                     let zebra_network = network_to_zebra(params.network_type())
                         .map_err(|e| ErrorKind::Init.context(e))?;
@@ -243,6 +243,11 @@ impl ZainoChain {
                     read_state_service,
                     mempool_fetcher: fetcher.clone(),
                     network: network_to_zaino(params),
+                    chain_tip_change,
+                    // The wallet retains ownership of the syncer via the
+                    // `AbortOnDrop` guard below (aborted on every shutdown path),
+                    // so the connector does not also manage the sync task here.
+                    sync_task_handle: None,
                 });
                 (source, Some(AbortOnDrop::new(sync_task)))
             }
@@ -400,6 +405,27 @@ impl Chain for ZainoChain {
             .collect::<Result<Vec<_>, ChainError>>()
     }
 
+    async fn get_ironwood_subtree_roots(
+        &self,
+    ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+        // Ironwood shares the Orchard commitment tree's node type, so its subtree roots
+        // decode as `MerkleHashOrchard` just like Orchard's. Zaino reports no roots until
+        // NU6.3 has produced at least one full subtree.
+        self.subscriber
+            .get_subtree_roots(ShieldedPool::Ironwood, 0, None)
+            .await
+            .map_err(ChainError::backend)?
+            .into_iter()
+            .map(|(root_hash, end_height)| {
+                Ok(CommitmentTreeRoot::from_parts(
+                    BlockHeight::from_u32(end_height),
+                    orchard::tree::MerkleHashOrchard::from_bytes(&root_hash)
+                        .expect("zaino should provide canonical encodings"),
+                ))
+            })
+            .collect::<Result<Vec<_>, ChainError>>()
+    }
+
     async fn snapshot(&self) -> Result<ZainoChainView, ChainError> {
         let snapshot = self
             .subscriber
@@ -466,7 +492,7 @@ impl ChainView for ZainoChainView {
             .map_err(ChainError::backend)?;
 
         let chain_state = if let Some(hash) = block_hash {
-            let (sapling_treestate, orchard_treestate) = self
+            let (sapling_treestate, orchard_treestate, ironwood_treestate) = self
                 .chain
                 .get_treestate(&hash)
                 .await
@@ -474,22 +500,40 @@ impl ChainView for ZainoChainView {
 
             let final_sapling_tree = match sapling_treestate {
                 None => CommitmentTree::empty(),
-                Some(sapling_tree_bytes) => read_commitment_tree::<
+                Some(sapling_treestate) => read_commitment_tree::<
                     sapling::Node,
                     _,
                     { sapling::NOTE_COMMITMENT_TREE_DEPTH },
-                >(&sapling_tree_bytes[..])
+                >(&sapling_treestate.final_state[..])
                 .map_err(ChainError::backend)?,
             }
             .to_frontier();
 
             let final_orchard_tree = match orchard_treestate {
                 None => CommitmentTree::empty(),
-                Some(orchard_tree_bytes) => read_commitment_tree::<
+                Some(orchard_treestate) => read_commitment_tree::<
                     orchard::tree::MerkleHashOrchard,
                     _,
                     { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
-                >(&orchard_tree_bytes[..])
+                >(&orchard_treestate.final_state[..])
+                .map_err(ChainError::backend)?,
+            }
+            .to_frontier();
+
+            // Ironwood shares the Orchard tree's shape. The validator reports an
+            // Ironwood treestate only from NU6.3 activation onward; before then it is
+            // `None` and the final tree is empty. Reading the real frontier (rather than
+            // always using an empty tree) is required once Ironwood notes exist,
+            // otherwise the wallet's advancing Ironwood commitment tree conflicts with
+            // the empty checkpoint frontier and `put_blocks` fails with a
+            // `CheckpointConflict`.
+            let final_ironwood_tree = match ironwood_treestate {
+                None => CommitmentTree::empty(),
+                Some(ironwood_treestate) => read_commitment_tree::<
+                    orchard::tree::MerkleHashOrchard,
+                    _,
+                    { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+                >(&ironwood_treestate.final_state[..])
                 .map_err(ChainError::backend)?,
             }
             .to_frontier();
@@ -499,6 +543,7 @@ impl ChainView for ZainoChainView {
                 BlockHash(hash.0),
                 final_sapling_tree,
                 final_orchard_tree,
+                final_ironwood_tree,
             ))
         } else {
             None

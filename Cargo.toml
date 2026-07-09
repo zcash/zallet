@@ -112,7 +112,7 @@ tracing-subscriber = "0.3"
 zcash_protocol = "0.10.0-pre.0"
 
 # Zcash payment protocols
-orchard = "0.15.0-pre.1"
+orchard = "0.15.0-pre.2"
 sapling = { package = "sapling-crypto", version = "0.7" }
 transparent = { package = "zcash_transparent", version = "0.9.0-pre.0" }
 zcash_encoding = "0.4"
@@ -164,19 +164,19 @@ tonic = "0.14"
 # three workspace manifests (root, backends/zebra, backends/zaino) and their
 # lockfiles on one identical rev, which utils/check-lockstep.sh enforces in CI.
 # Do not edit these revs by hand.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
-transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
-zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
+transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
 # NOTE: zcash_history is deliberately NOT patched here: the root graph does not
 # use it (only the backend workspaces do, and their patch blocks carry it).
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2992595d944d2fddc0d38ef24e242be7e037ba" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "9fe5abf78a15940aa84fd895fed75162f21fcb53" }
 
 # TEMPORARY: explicit checkpoint retention (ensure_retained / retained_checkpoints).
 # The librustzcash rev above requires these shardtree/incrementalmerkletree APIs
@@ -186,6 +186,12 @@ zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "ea2
 # shardtree release once one is cut.
 shardtree = { git = "https://github.com/zcash/incrementalmerkletree", rev = "decefc469dbf1e686b20b7e7dcaa7cb4f122125b" }
 incrementalmerkletree = { git = "https://github.com/zcash/incrementalmerkletree", rev = "decefc469dbf1e686b20b7e7dcaa7cb4f122125b" }
+
+# Replicated from librustzcash b43a4237's own [patch.crates-io]: main librustzcash is
+# built against zcash/orchard main (adds the public `Builder::bundle_type()`
+# accessor), which the crates.io 0.15.0-pre.2 release predates. Required for the
+# librustzcash rev above to compile.
+orchard = { git = "https://github.com/zcash/orchard", rev = "475ef0ff77d45aebff93cb039d639250d82518a3" }
 # NOTE: incrementalmerkletree-testing is deliberately NOT patched here: the root
 # graph does not use it (only the backend workspaces do, and their patch blocks
 # carry it).

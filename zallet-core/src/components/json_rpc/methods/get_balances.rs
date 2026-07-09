@@ -75,6 +75,13 @@ struct AccountBalance {
     #[serde(skip_serializing_if = "Option::is_none")]
     orchard: Option<Balance>,
 
+    /// The balance held by the account in the Ironwood shielded pool.
+    ///
+    /// Ironwood (NU6.3, ZIP 2005) notes are Orchard-shaped but tracked as a
+    /// distinct pool. Omitted if no Ironwood funds are present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ironwood: Option<Balance>,
+
     /// The total funds in all pools held by the account.
     total: Balance,
 }
@@ -179,6 +186,7 @@ pub(crate) fn call(wallet: &DbConnection, minconf: Option<u32>) -> Response {
                 transparent_watchonly: vec![],
                 sapling: opt_balance_from(account.sapling_balance())?,
                 orchard: opt_balance_from(account.orchard_balance())?,
+                ironwood: opt_balance_from(account.ironwood_balance())?,
                 total: balance_from(account)?,
             })
         })

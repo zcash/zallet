@@ -13,7 +13,7 @@ use zcash_client_backend::{
         Account,
         wallet::{
             ConfirmationsPolicy, create_proposed_transactions,
-            input_selection::{GreedyInputSelector, TransparentSpendPolicy},
+            input_selection::{GreedyInputSelector, SpendPolicy},
             propose_transfer,
         },
     },
@@ -222,8 +222,13 @@ pub(crate) async fn call<C: Chain>(
         request,
         confirmations_policy,
         // Zallet does not yet spend transparent funds in a general transfer; `ANY_TADDR`
-        // spending is rejected above. This preserves the prior shielded-only behavior.
-        &TransparentSpendPolicy::ShieldedOnly,
+        // spending is rejected above. The default `SpendPolicy` permits every shielded pool
+        // present in the build and no transparent spending, preserving the prior
+        // shielded-only behavior.
+        &SpendPolicy::default(),
+        // Do not request a specific transaction version; building falls back to the version
+        // implied by the target height.
+        None,
     )
     // TODO: Map errors to `zcashd` shape.
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
@@ -236,7 +241,7 @@ pub(crate) async fn call<C: Chain>(
             .shielded_inputs()
             .iter()
             .flat_map(|inputs| inputs.notes())
-            .filter(|note| note.note().protocol() == ShieldedPool::Orchard)
+            .filter(|note| note.note().pool() == ShieldedPool::Orchard)
             .count();
 
         let orchard_outputs = step

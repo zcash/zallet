@@ -17,6 +17,7 @@ use crate::components::{database::DbConnection, json_rpc::server::LegacyCode};
 const POOL_TRANSPARENT: &str = "transparent";
 const POOL_SAPLING: &str = "sapling";
 const POOL_ORCHARD: &str = "orchard";
+const POOL_IRONWOOD: &str = "ironwood";
 
 /// Response to a `z_viewtransaction` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -62,9 +63,10 @@ impl WalletTxOutput {
         }
     }
 
-    /// Builds the output detail for a `v_tx_outputs` row, or `None` if the output
-    /// belongs to a pool that Zallet does not yet surface (Ironwood), so that the
-    /// output is elided from `listtransactions` rather than failing the whole call.
+    /// Builds the output detail for a `v_tx_outputs` row.
+    ///
+    /// Returns `None` only if the pool code is one Zallet cannot render (there is
+    /// currently no such case; every known pool, including Ironwood, is surfaced).
     #[allow(clippy::too_many_arguments)]
     fn new(
         pool_code: i64,
@@ -82,8 +84,8 @@ impl WalletTxOutput {
             PoolType::Transparent => POOL_TRANSPARENT,
             PoolType::Shielded(ShieldedPool::Sapling) => POOL_SAPLING,
             PoolType::Shielded(ShieldedPool::Orchard) => POOL_ORCHARD,
-            // Ironwood is not yet supported; elide such outputs from the results.
-            PoolType::Shielded(ShieldedPool::Ironwood) => return Ok(None),
+            // Ironwood notes are Orchard-shaped but tracked as a distinct pool.
+            PoolType::Shielded(ShieldedPool::Ironwood) => POOL_IRONWOOD,
         }
         .to_string();
 

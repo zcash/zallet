@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 use tracing::info;
 use zcash_protocol::consensus::NetworkType;
 use zebra_rpc::sync::init_read_state_with_syncer;
-use zebra_state::ReadStateService;
+use zebra_state::{ChainTipChange, ReadStateService};
 
 /// A boxed error from the zebra crates.
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -151,7 +151,7 @@ pub async fn init_read_state_service(
     zebra_network: &zebra_chain::parameters::Network,
     grpc_address: &str,
     zebra_state_path: PathBuf,
-) -> Result<(ReadStateService, JoinHandle<()>), ReadStateError> {
+) -> Result<(ReadStateService, ChainTipChange, JoinHandle<()>), ReadStateError> {
     // Resolve the gRPC indexer address used by the non-finalized syncer.
     let grpc_addr = lookup_host(grpc_address)
         .await
@@ -195,7 +195,7 @@ pub async fn init_read_state_service(
     }
 
     info!("Initializing read-only Zebra state service");
-    let (read_state_service, _latest_tip, _tip_change, sync_task) =
+    let (read_state_service, _latest_tip, tip_change, sync_task) =
         init_read_state_with_syncer(zebra_config, zebra_network, grpc_addr)
             .await
             // Outer JoinError from the spawned init task.
@@ -203,5 +203,5 @@ pub async fn init_read_state_service(
             // Inner BoxError from read-state initialization.
             .map_err(ReadStateError::Init)?;
 
-    Ok((read_state_service, sync_task))
+    Ok((read_state_service, tip_change, sync_task))
 }

@@ -143,6 +143,17 @@ pub trait Chain: Clone + Send + Sync + 'static {
         Output = Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError>,
     > + Send;
 
+    /// Returns the Ironwood note commitment subtree roots, in index order.
+    ///
+    /// Ironwood (NU6.3) shares the Orchard commitment tree's node type. These roots are
+    /// required for received Ironwood notes to become spendable: without them the
+    /// Ironwood tree never stabilizes and notes stay pending.
+    fn get_ironwood_subtree_roots(
+        &self,
+    ) -> impl Future<
+        Output = Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError>,
+    > + Send;
+
     /// Captures a consistent view of the chain as of the current tip.
     ///
     /// Every read through the returned [`ChainView`] reflects one fixed chain history for
@@ -1178,6 +1189,12 @@ mod tests {
         }
 
         async fn get_orchard_subtree_roots(
+            &self,
+        ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+            unreachable!("the compatibility check does not read subtree roots")
+        }
+
+        async fn get_ironwood_subtree_roots(
             &self,
         ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
             unreachable!("the compatibility check does not read subtree roots")

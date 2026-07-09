@@ -46,7 +46,7 @@ pub(crate) struct UnspentOutput {
 
     /// The shielded value pool.
     ///
-    /// One of `["sapling", "orchard", "transparent"]`.
+    /// One of `["sapling", "orchard", "ironwood", "transparent"]`.
     pool: String,
 
     /// The Transparent UTXO, Sapling output or Orchard action index.
@@ -246,7 +246,11 @@ pub(crate) fn call(
         let notes = wallet
             .select_unspent_notes(
                 account_id,
-                &[ShieldedPool::Sapling, ShieldedPool::Orchard],
+                &[
+                    ShieldedPool::Sapling,
+                    ShieldedPool::Orchard,
+                    ShieldedPool::Ironwood,
+                ],
                 target_height,
                 &[],
             )
@@ -365,6 +369,62 @@ pub(crate) fn call(
             unspent_outputs.push(UnspentOutput {
                 txid: note.txid().to_string(),
                 pool: "orchard".into(),
+                outindex: note.output_index().into(),
+                confirmations,
+                is_watch_only,
+                account_uuid: account_id.expose_uuid().to_string(),
+                // TODO: Ensure we generate the same kind of shielded address as `zcashd`.
+                address: (!wallet_internal).then(|| {
+                    UnifiedAddress::from_receivers(Some(note.note().recipient()), None, None)
+                        .expect("valid")
+                        .encode(wallet.params())
+                }),
+                value: value_from_zatoshis(note.value()),
+                value_zat: u64::from(note.value()),
+                memo: Some(memo),
+                memo_str,
+                wallet_internal,
+            })
+        }
+
+        // Ironwood notes are Orchard-shaped (their recipient is an Orchard
+        // address and they live behind an Orchard receiver), so this mirrors
+        // the Orchard block above; only the reported pool and the memo lookup
+        // protocol differ.
+        for note in notes.ironwood().iter().filter(|n| {
+            addresses.iter().all(|addr| {
+                addr.as_understood_unified_receivers()
+                    .iter()
+                    .any(|r| match r {
+                        zcash_keys::address::Receiver::Orchard(address) => {
+                            address == &n.note().recipient()
+                        }
+                        _ => false,
+                    })
+            })
+        }) {
+            let tx_mined_height = get_mined_height(*note.txid())?;
+            let confirmations = tx_mined_height
+                .map_or(0, |h| u32::from(target_height.saturating_sub(u32::from(h))));
+
+            // skip notes that do not have sufficient confirmations according to minconf,
+            // or that have too many confirmations according to maxconf
+            if tx_mined_height
+                .iter()
+                .any(|h| *h > target_height.saturating_sub(minconf))
+                || maxconf.iter().any(|c| confirmations > *c)
+            {
+                continue;
+            }
+
+            let wallet_internal = note.spending_key_scope() == Scope::Internal;
+
+            let (memo, memo_str) =
+                get_memo(*note.txid(), ShieldedPool::Ironwood, note.output_index())?;
+
+            unspent_outputs.push(UnspentOutput {
+                txid: note.txid().to_string(),
+                pool: "ironwood".into(),
                 outindex: note.output_index().into(),
                 confirmations,
                 is_watch_only,

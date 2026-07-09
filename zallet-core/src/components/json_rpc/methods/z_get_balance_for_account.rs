@@ -48,6 +48,14 @@ struct Pools {
     /// Omitted if zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     orchard: Option<PoolBalance>,
+
+    /// The amount held by the account in the Ironwood value pool.
+    ///
+    /// Ironwood (NU6.3, ZIP 2005) notes are Orchard-shaped; funds received to an
+    /// Orchard receiver once NU6.3 is active are reported here rather than under
+    /// `orchard`. Omitted if zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ironwood: Option<PoolBalance>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -105,6 +113,7 @@ fn response_for_balance(
             transparent: pool_balance(account_balance.unshielded_balance().spendable_value()),
             sapling: pool_balance(account_balance.sapling_balance().spendable_value()),
             orchard: pool_balance(account_balance.orchard_balance().spendable_value()),
+            ironwood: pool_balance(account_balance.ironwood_balance().spendable_value()),
         },
         minimum_confirmations: minconf.unwrap_or(1),
     }
@@ -127,8 +136,13 @@ mod tests {
     use super::response_for_balance;
 
     /// Builds an `AccountBalance` with the given spendable values (in zatoshis)
-    /// in the transparent, Sapling, and Orchard pools respectively.
-    fn account_balance(transparent: u64, sapling: u64, orchard: u64) -> AccountBalance {
+    /// in the transparent, Sapling, Orchard, and Ironwood pools respectively.
+    fn account_balance(
+        transparent: u64,
+        sapling: u64,
+        orchard: u64,
+        ironwood: u64,
+    ) -> AccountBalance {
         let zat = Zatoshis::const_from_u64;
         let mut balance = AccountBalance::ZERO;
         balance
@@ -143,6 +157,9 @@ mod tests {
             .with_orchard_balance_mut::<_, BalanceError>(|b| b.add_spendable_value(zat(orchard)))
             .unwrap();
         balance
+            .with_ironwood_balance_mut::<_, BalanceError>(|b| b.add_spendable_value(zat(ironwood)))
+            .unwrap();
+        balance
     }
 
     /// Renders the response for a balance to its JSON representation (the actual
@@ -151,10 +168,11 @@ mod tests {
         transparent: u64,
         sapling: u64,
         orchard: u64,
+        ironwood: u64,
         minconf: Option<u32>,
     ) -> serde_json::Value {
         serde_json::to_value(response_for_balance(
-            &account_balance(transparent, sapling, orchard),
+            &account_balance(transparent, sapling, orchard, ironwood),
             minconf,
         ))
         .unwrap()
@@ -165,7 +183,7 @@ mod tests {
     #[test]
     fn empty_account_has_no_pools() {
         assert_eq!(
-            rendered(0, 0, 0, None),
+            rendered(0, 0, 0, 0, None),
             json!({"pools": {}, "minimum_confirmations": 1}),
         );
     }
@@ -175,15 +193,19 @@ mod tests {
     #[test]
     fn single_pool_is_rendered() {
         assert_eq!(
-            rendered(0, 5 * COIN, 0, None),
+            rendered(0, 5 * COIN, 0, 0, None),
             json!({"pools": {"sapling": {"valueZat": 5 * COIN}}, "minimum_confirmations": 1}),
         );
         assert_eq!(
-            rendered(0, 0, 5 * COIN, None),
+            rendered(0, 0, 5 * COIN, 0, None),
             json!({"pools": {"orchard": {"valueZat": 5 * COIN}}, "minimum_confirmations": 1}),
         );
         assert_eq!(
-            rendered(COIN, 0, 0, None),
+            rendered(0, 0, 0, 5 * COIN, None),
+            json!({"pools": {"ironwood": {"valueZat": 5 * COIN}}, "minimum_confirmations": 1}),
+        );
+        assert_eq!(
+            rendered(COIN, 0, 0, 0, None),
             json!({"pools": {"transparent": {"valueZat": COIN}}, "minimum_confirmations": 1}),
         );
     }
@@ -193,7 +215,7 @@ mod tests {
     #[test]
     fn multiple_pools_are_rendered() {
         assert_eq!(
-            rendered(0, 5 * COIN, 625 * COIN / 100, None),
+            rendered(0, 5 * COIN, 625 * COIN / 100, 0, None),
             json!({
                 "pools": {
                     "sapling": {"valueZat": 5 * COIN},
@@ -204,11 +226,27 @@ mod tests {
         );
     }
 
+    // The Ironwood pool appears alongside the other shielded pools when funded
+    // (Ironwood notes are Orchard-shaped but tracked as a distinct pool).
+    #[test]
+    fn ironwood_pool_is_rendered_alongside_others() {
+        assert_eq!(
+            rendered(0, 0, 5 * COIN, 3 * COIN, None),
+            json!({
+                "pools": {
+                    "orchard": {"valueZat": 5 * COIN},
+                    "ironwood": {"valueZat": 3 * COIN},
+                },
+                "minimum_confirmations": 1,
+            }),
+        );
+    }
+
     // Pools with a zero balance are omitted even when other pools are funded.
     #[test]
     fn zero_pools_are_omitted_among_funded_pools() {
         assert_eq!(
-            rendered(COIN, 0, 2 * COIN, None),
+            rendered(COIN, 0, 2 * COIN, 0, None),
             json!({
                 "pools": {
                     "transparent": {"valueZat": COIN},
@@ -223,15 +261,15 @@ mod tests {
     #[test]
     fn minimum_confirmations_echoes_minconf() {
         assert_eq!(
-            rendered(0, COIN, 0, None)["minimum_confirmations"],
+            rendered(0, COIN, 0, 0, None)["minimum_confirmations"],
             json!(1)
         );
         assert_eq!(
-            rendered(0, COIN, 0, Some(5))["minimum_confirmations"],
+            rendered(0, COIN, 0, 0, Some(5))["minimum_confirmations"],
             json!(5)
         );
         assert_eq!(
-            rendered(0, COIN, 0, Some(0))["minimum_confirmations"],
+            rendered(0, COIN, 0, 0, Some(0))["minimum_confirmations"],
             json!(0)
         );
     }

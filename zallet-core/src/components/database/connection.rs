@@ -376,6 +376,13 @@ impl WalletRead for DbConnection {
         self.with(|db_data| db_data.get_orchard_nullifiers(query))
     }
 
+    fn get_ironwood_nullifiers(
+        &self,
+        query: zcash_client_backend::data_api::NullifierQuery,
+    ) -> Result<Vec<(Self::AccountId, orchard::note::Nullifier)>, Self::Error> {
+        self.with(|db_data| db_data.get_ironwood_nullifiers(query))
+    }
+
     fn get_transparent_receivers(
         &self,
         account: Self::AccountId,
@@ -774,5 +781,34 @@ impl WalletCommitmentTrees for DbConnection {
         >],
     ) -> Result<(), ShardTreeError<Self::Error>> {
         self.with_mut(|mut db_data| db_data.put_orchard_subtree_roots(start_index, roots))
+    }
+
+    // Ironwood shares the Orchard note commitment tree's shape (same shard store and depths),
+    // so these mirror the Orchard methods; `with_ironwood_tree_mut` returns `Option` because a
+    // backend may not track an Ironwood tree, but `WalletDb` does, so we forward to it rather
+    // than fall back to the trait's no-op default (which would silently drop Ironwood tree
+    // updates made through this connection).
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, callback: F) -> Result<Option<A>, E>
+    where
+        for<'a> F: FnMut(
+            &'a mut ShardTree<
+                Self::OrchardShardStore<'a>,
+                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_SHARD_HEIGHT,
+            >,
+        ) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        self.with_mut(|mut db_data| db_data.with_ironwood_tree_mut(callback))
+    }
+
+    fn put_ironwood_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[zcash_client_backend::data_api::chain::CommitmentTreeRoot<
+            orchard::tree::MerkleHashOrchard,
+        >],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_mut(|mut db_data| db_data.put_ironwood_subtree_roots(start_index, roots))
     }
 }

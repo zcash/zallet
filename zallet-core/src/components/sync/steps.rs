@@ -53,6 +53,17 @@ pub(super) async fn update_subtree_roots<C: Chain>(
     info!("Orchard tree has {} subtrees", orchard_roots.len());
     db_data.put_orchard_subtree_roots(0, &orchard_roots)?;
 
+    // Ironwood (NU6.3) shares the Orchard tree shape. Inserting its subtree roots is what
+    // lets received Ironwood notes become spendable; without them the tree never
+    // stabilizes and the notes stay pending.
+    let ironwood_roots = chain
+        .get_ironwood_subtree_roots()
+        .await
+        .map_err(SyncError::Chain)?;
+
+    info!("Ironwood tree has {} subtrees", ironwood_roots.len());
+    db_data.put_ironwood_subtree_roots(0, &ironwood_roots)?;
+
     Ok(())
 }
 
@@ -162,6 +173,7 @@ pub(super) async fn scan_blocks<V: ChainView>(
             from_state.block_hash(),
             Some(from_state.final_sapling_tree().tree_size() as u32),
             Some(from_state.final_orchard_tree().tree_size() as u32),
+            Some(from_state.final_ironwood_tree().tree_size() as u32),
         ));
 
         // Get the nullifiers for the unspent notes we are tracking, and the transparent
@@ -250,6 +262,7 @@ pub(super) async fn scan_block<V: ChainView>(
         from_state.block_hash(),
         Some(from_state.final_sapling_tree().tree_size() as u32),
         Some(from_state.final_orchard_tree().tree_size() as u32),
+        Some(from_state.final_ironwood_tree().tree_size() as u32),
     ));
 
     // Get the nullifiers for the unspent notes we are tracking, and the transparent

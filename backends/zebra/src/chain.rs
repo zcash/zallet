@@ -97,7 +97,9 @@ impl ZebraChain {
         )?;
 
         // Open zebrad's state read-only and start the non-finalized syncer.
-        let (read_state_service, sync_task) = {
+        // The chain-tip-change watcher is only needed by the zaino backend's
+        // `ValidatorConnector::State`; this backend follows the tip directly.
+        let (read_state_service, _chain_tip_change, sync_task) = {
             use zcash_protocol::consensus::Parameters as _;
             let zebra_network =
                 network_to_zebra(params.network_type()).map_err(|e| ErrorKind::Init.context(e))?;
@@ -193,6 +195,16 @@ impl Chain for ZebraChain {
         &self,
     ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
         self.reader().orchard_subtree_roots().await
+    }
+
+    async fn get_ironwood_subtree_roots(
+        &self,
+    ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+        // TODO: The zebra read-state reader does not expose Ironwood subtree roots yet,
+        // and this backend does not serve regtest/NU6.3 (where Ironwood activates), so
+        // report none for now. Wire this up like `orchard_subtree_roots` once the reader
+        // surfaces the Ironwood tree.
+        Ok(vec![])
     }
 
     async fn snapshot(&self) -> Result<Self::View, ChainError> {
@@ -355,11 +367,22 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
         }
         .to_frontier();
 
+        // Zebra does not expose a separate Ironwood note commitment tree, and Ironwood
+        // (NU6.3) is not active on any chain Zallet syncs today, so its final tree is always
+        // empty here. When Zebra surfaces an Ironwood treestate, read it like the Orchard tree
+        // above; Ironwood shares the Orchard tree's shape.
+        let final_ironwood_tree = CommitmentTree::<
+            orchard::tree::MerkleHashOrchard,
+            { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+        >::empty()
+        .to_frontier();
+
         Ok(Some(ChainState::new(
             height,
             hash,
             final_sapling_tree,
             final_orchard_tree,
+            final_ironwood_tree,
         )))
     }
 
@@ -754,5 +777,26 @@ mod tests {
 
         // Above the captured tip.
         assert_eq!(view.resolve(BlockHeight::from_u32(11)).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn tree_state_as_of_supplies_an_empty_ironwood_tree() {
+        // The mock reader returns no tree bytes, so for a finalized height every pool's
+        // final tree is empty. This pins the Ironwood frontier that `ChainState::new` now
+        // requires: Zebra exposes no Ironwood treestate, so the zebra chain view must supply
+        // an empty one, matching the empty Sapling and Orchard trees.
+        let calls = Arc::new(AtomicU32::new(0));
+        let view = test_view(10, 5, calls);
+
+        let state = view
+            .tree_state_as_of(BlockHeight::from_u32(3))
+            .await
+            .unwrap()
+            .expect("a finalized height with no tree bytes resolves to an empty chain state");
+
+        assert_eq!(state.block_height(), BlockHeight::from_u32(3));
+        assert_eq!(state.final_sapling_tree().tree_size(), 0);
+        assert_eq!(state.final_orchard_tree().tree_size(), 0);
+        assert_eq!(state.final_ironwood_tree().tree_size(), 0);
     }
 }
