@@ -21,7 +21,6 @@ publish = false
 
 [dependencies]
 zallet-core = { path = "../../zallet-core" }
-zallet-zebra-read-state = { path = "../../crates/zebra-read-state" }
 
 futures = "0.3"
 hex = "0.4"
@@ -39,7 +38,9 @@ zcash_client_backend = "0.23"
 zcash_keys = { version = "0.15.0-pre.0", features = ["unstable"] }
 zcash_primitives = "0.29.0-pre.0"
 zcash_protocol = "0.10.0-pre.0"
+zebra-chain = "11"
 zebra-rpc = "11"
+zebra-state = "10"
 
 [features]
 default = []

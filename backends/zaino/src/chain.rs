@@ -46,11 +46,11 @@ use zallet_core::{
     network::Network,
 };
 
+use crate::read_state::{AbortOnDrop, init_read_state_service, network_to_zebra};
 use zallet_core::components::chain::{
     BlockLocator, Chain, ChainBlock, ChainError, ChainFactory, ChainTx, ChainView, ReportedUpgrade,
     UpgradeStatus,
 };
-use zallet_zebra_read_state::{AbortOnDrop, init_read_state_service, network_to_zebra};
 
 /// Classifies a block-fetch error, distinguishing transient reorg-window failures from
 /// genuine backend errors.

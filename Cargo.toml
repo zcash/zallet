@@ -1,6 +1,6 @@
 [workspace]
 members = ["zallet-core", "zallet", "tools/gen-copyright"]
-exclude = ["backends", "crates"]
+exclude = ["backends"]
 resolver = "2"
 
 [workspace.package]

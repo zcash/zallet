@@ -6933,22 +6933,11 @@ dependencies = [
  "zaino-fetch",
  "zaino-state",
  "zallet-core",
- "zallet-zebra-read-state",
  "zcash_client_backend",
  "zcash_keys 0.15.0-pre.0",
  "zcash_primitives 0.29.0-pre.0",
  "zcash_protocol 0.10.0-pre.0",
  "zcash_transparent 0.9.0-pre.0",
- "zebra-rpc",
-]
-
-[[package]]
-name = "zallet-zebra-read-state"
-version = "0.1.0-alpha.4"
-dependencies = [
- "tokio",
- "tracing",
- "zcash_protocol 0.10.0-pre.0",
  "zebra-chain",
  "zebra-rpc",
  "zebra-state",

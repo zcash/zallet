@@ -10,6 +10,7 @@
 use i18n_embed::DesktopLanguageRequester;
 
 mod chain;
+mod read_state;
 
 /// Boot Zallet with the Zaino backend.
 fn main() {

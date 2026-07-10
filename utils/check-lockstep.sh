@@ -25,7 +25,6 @@ PACKAGES=(
   zallet-core/Cargo.toml
   backends/zebra/Cargo.toml
   backends/zaino/Cargo.toml
-  crates/zebra-read-state/Cargo.toml
 )
 
 # The lockstep set: the union of [patch.crates-io] package names across the

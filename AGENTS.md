@@ -99,7 +99,6 @@ execs the matching per-backend binary (`zallet-zebra`, `zallet-zaino`).
 │   │                        #   (Zebra read-state backend); deps on zallet-core
 │   └── zaino/               # Workspace for the `zallet-zaino` binary
 │                            #   (Zaino indexer backend); deps on zallet-core
-├── crates/zebra-read-state/ # Shared crate used by the zebra backend
 ├── utils/                   # Build + librustzcash lockstep scripts
 ├── book/                    # Documentation (mdBook)
 └── .github/workflows/       # CI configuration

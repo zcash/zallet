@@ -41,13 +41,13 @@ use zallet_core::{
     error::{Error, ErrorKind},
     network::Network,
 };
-use zallet_zebra_read_state::{AbortOnDrop, init_read_state_service, network_to_zebra};
-
 mod convert;
 mod reader;
 mod rpc;
 use reader::{ChainReader, ReadStateChainReader};
 use rpc::ValidatorRpcClient;
+
+use crate::read_state::{AbortOnDrop, init_read_state_service, network_to_zebra};
 
 /// The maximum reorg depth (`zebra-state`'s `MAX_BLOCK_REORG_HEIGHT`); blocks deeper than
 /// this below the captured tip are treated as finalized and served by height.
@@ -605,7 +605,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
 
 #[cfg(test)]
 mod tests {
-    use zallet_zebra_read_state::network_to_zebra;
+    use crate::read_state::network_to_zebra;
     use zebra_chain::parameters::Network as ZebraNetwork;
 
     #[test]

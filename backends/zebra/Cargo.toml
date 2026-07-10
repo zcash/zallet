@@ -29,7 +29,6 @@ path = "tests/acceptance.rs"
 
 [dependencies]
 zallet-core = { path = "../../zallet-core" }
-zallet-zebra-read-state = { path = "../../crates/zebra-read-state" }
 
 base64 = "0.22"
 futures = "0.3"
@@ -41,13 +40,14 @@ sapling = { package = "sapling-crypto", version = "0.7" }
 serde = { version = "1", features = ["serde_derive"] }
 jsonrpsee = { version = "0.24", features = ["async-client"] }
 jsonrpsee-http-client = { version = "0.24", default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread"] }
 tower = { version = "0.4", features = ["timeout"] }
 transparent = { package = "zcash_transparent", version = "0.9.0-pre.0" }
 zcash_client_backend = "0.23"
 zcash_primitives = "0.29.0-pre.0"
 zcash_protocol = "0.10.0-pre.0"
 zebra-chain = "11"
+zebra-rpc = "11"
 zebra-state = { version = "10", features = ["indexer"] }
 
 [dev-dependencies]
