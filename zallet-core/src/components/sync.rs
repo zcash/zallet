@@ -82,19 +82,31 @@ mod steps;
 #[derive(Debug)]
 pub(crate) struct WalletSync {}
 
+/// Handle the RPC layer uses to reload the sync engine's viewing keys after a key import.
+pub(crate) type WalletDecryptorHandle = decryptor::Handle<AccountUuid, (AccountUuid, Scope)>;
+
+/// Engine half of the batch decryptor, driven by the sync tasks spawned by [`WalletSync::spawn`].
+pub(crate) type WalletDecryptorEngine = decryptor::Engine<AccountUuid, (AccountUuid, Scope)>;
+
 impl WalletSync {
+    /// Builds the batch decryptor. Split from [`WalletSync::spawn`] so the RPC server can be
+    /// handed a handle before `spawn`'s initial scan, which would otherwise delay RPC startup.
+    pub(crate) fn build_decryptor() -> (WalletDecryptorHandle, WalletDecryptorEngine) {
+        // The batch decryptor's built-in defaults (queue size 1000, batch-size threshold
+        // 200, batch start delay 500ms) are appropriate for Zallet, so use them as-is.
+        decryptor::new().build()
+    }
+
     pub(crate) async fn spawn<C: Chain>(
         config: &ZalletConfig,
         db: Database,
         chain: C,
         shutdown_height: Option<BlockHeight>,
+        decryptor: WalletDecryptorHandle,
+        decryptor_engine: WalletDecryptorEngine,
     ) -> Result<(TaskHandle, TaskHandle, TaskHandle, TaskHandle), Error> {
         let params = config.consensus.network();
         let recover_batch_size = config.sync.recover_batch_size();
-
-        // The batch decryptor's built-in defaults (queue size 1000, batch-size threshold
-        // 200, batch start delay 500ms) are appropriate for Zallet, so use them as-is.
-        let (decryptor, decryptor_engine) = decryptor::new().build();
 
         // Spawn the processing tasks.
         let batch_decryptor_task = {
@@ -199,7 +211,7 @@ async fn initialize<C: Chain>(
     chain: &C,
     params: &Network,
     db_data: &mut DbConnection,
-    decryptor: decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    decryptor: WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
 ) -> Result<(ChainBlock, BlockHeight), SyncError> {
     info!("Initializing wallet for syncing");
@@ -458,7 +470,7 @@ async fn steady_state<C: Chain>(
     mut prev_tip: ChainBlock,
     lower_boundary: Arc<AtomicU32>,
     tip_change_signal: Arc<Notify>,
-    decryptor: decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    decryptor: WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
 ) -> Result<(), SyncError> {
     info!("Steady-state sync task started");
@@ -553,7 +565,7 @@ async fn steady_state_iteration<C: Chain>(
     prev_tip: &mut ChainBlock,
     lower_boundary: &AtomicU32,
     tip_change_signal: &Notify,
-    decryptor: &decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    decryptor: &WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
 ) -> Result<ControlFlow<BlockHeight>, SyncError> {
     let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
@@ -683,7 +695,7 @@ async fn recover_history<C: Chain>(
     params: &Network,
     db_data: &mut DbConnection,
     upper_boundary: Arc<AtomicU32>,
-    decryptor: decryptor::Handle<AccountUuid, (AccountUuid, Scope)>,
+    decryptor: WalletDecryptorHandle,
     batch_size: u32,
     shutdown_height: Option<BlockHeight>,
 ) -> Result<(), SyncError> {

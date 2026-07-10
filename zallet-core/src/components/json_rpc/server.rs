@@ -19,7 +19,7 @@ use super::methods::{RpcImpl, RpcServer as _};
 #[cfg(zallet_build = "wallet")]
 use {
     super::methods::{WalletRpcImpl, WalletRpcServer},
-    crate::components::keystore::KeyStore,
+    crate::components::{keystore::KeyStore, sync::WalletDecryptorHandle},
 };
 
 mod error;
@@ -38,6 +38,7 @@ pub(crate) async fn spawn<C: Chain>(
     wallet: Database,
     #[cfg(zallet_build = "wallet")] keystore: KeyStore,
     chain: C,
+    #[cfg(zallet_build = "wallet")] decryptor: WalletDecryptorHandle,
 ) -> Result<ServerTask, Error> {
     // Caller should make sure `bind` only contains a single address (for now).
     assert_eq!(config.bind.len(), 1);
@@ -45,7 +46,8 @@ pub(crate) async fn spawn<C: Chain>(
 
     // Initialize the RPC methods.
     #[cfg(zallet_build = "wallet")]
-    let wallet_rpc_impl = WalletRpcImpl::new(wallet.clone(), keystore.clone(), chain.clone());
+    let wallet_rpc_impl =
+        WalletRpcImpl::new(wallet.clone(), keystore.clone(), chain.clone(), decryptor);
     let rpc_impl = RpcImpl::new(
         wallet,
         #[cfg(zallet_build = "wallet")]

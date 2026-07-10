@@ -18,6 +18,8 @@ use super::{TaskHandle, chain::Chain, database::Database};
 
 #[cfg(zallet_build = "wallet")]
 use super::keystore::KeyStore;
+#[cfg(zallet_build = "wallet")]
+use super::sync::WalletDecryptorHandle;
 
 #[cfg(zallet_build = "wallet")]
 mod asyncop;
@@ -36,6 +38,7 @@ impl JsonRpc {
         db: Database,
         #[cfg(zallet_build = "wallet")] keystore: KeyStore,
         chain: C,
+        #[cfg(zallet_build = "wallet")] decryptor: WalletDecryptorHandle,
     ) -> Result<TaskHandle, Error> {
         let rpc = config.rpc.clone();
 
@@ -54,6 +57,8 @@ impl JsonRpc {
                 #[cfg(zallet_build = "wallet")]
                 keystore,
                 chain,
+                #[cfg(zallet_build = "wallet")]
+                decryptor,
             )
             .await
         } else {

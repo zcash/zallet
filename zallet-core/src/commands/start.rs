@@ -61,6 +61,9 @@ impl StartCmd {
         // returns the height at which to shut down before reaching them.
         let shutdown_height = check_consensus_compatibility(&chain).await?;
 
+        // Build the decryptor up front so the RPC server has its handle before the initial scan.
+        let (decryptor_handle, decryptor_engine) = WalletSync::build_decryptor();
+
         // Launch RPC server.
         let rpc_task_handle = JsonRpc::spawn(
             &config,
@@ -68,6 +71,8 @@ impl StartCmd {
             #[cfg(zallet_build = "wallet")]
             keystore,
             chain.clone(),
+            #[cfg(zallet_build = "wallet")]
+            decryptor_handle.clone(),
         )
         .await?;
 
@@ -77,7 +82,15 @@ impl StartCmd {
             wallet_sync_recover_history_task_handle,
             wallet_sync_batch_decryptor_task_handle,
             wallet_sync_data_requests_task_handle,
-        ) = WalletSync::spawn(&config, db, chain, shutdown_height).await?;
+        ) = WalletSync::spawn(
+            &config,
+            db,
+            chain,
+            shutdown_height,
+            decryptor_handle,
+            decryptor_engine,
+        )
+        .await?;
 
         info!("Spawned Zallet tasks");
 

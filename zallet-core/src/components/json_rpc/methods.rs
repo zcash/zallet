@@ -12,7 +12,9 @@ use crate::components::{
 #[cfg(zallet_build = "wallet")]
 use {
     super::asyncop::{AsyncOperation, ContextInfo, OperationId},
-    crate::components::{json_rpc::payments::AmountParameter, keystore::KeyStore},
+    crate::components::{
+        json_rpc::payments::AmountParameter, keystore::KeyStore, sync::WalletDecryptorHandle,
+    },
     serde::Serialize,
     tokio::sync::RwLock,
 };
@@ -741,16 +743,23 @@ impl<C: Chain> RpcImpl<C> {
 pub(crate) struct WalletRpcImpl<C: Chain> {
     general: RpcImpl<C>,
     keystore: KeyStore,
+    decryptor: WalletDecryptorHandle,
     async_ops: RwLock<Vec<AsyncOperation>>,
 }
 
 #[cfg(zallet_build = "wallet")]
 impl<C: Chain> WalletRpcImpl<C> {
     /// Creates a new instance of the wallet-specific RPC handler.
-    pub(crate) fn new(wallet: Database, keystore: KeyStore, chain_view: C) -> Self {
+    pub(crate) fn new(
+        wallet: Database,
+        keystore: KeyStore,
+        chain_view: C,
+        decryptor: WalletDecryptorHandle,
+    ) -> Self {
         Self {
             general: RpcImpl::new(wallet, keystore.clone(), chain_view),
             keystore,
+            decryptor,
             async_ops: RwLock::new(Vec::new()),
         }
     }
@@ -947,6 +956,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             self.wallet().await?.as_mut(),
             &self.keystore,
             self.chain().await?,
+            &self.decryptor,
             account_name,
             seedfp,
         )
@@ -961,6 +971,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             self.wallet().await?.as_mut(),
             &self.keystore,
             self.chain().await?,
+            &self.decryptor,
             accounts,
         )
         .await
@@ -1048,6 +1059,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             self.wallet().await?.as_mut(),
             &self.keystore,
             self.chain().await?,
+            &self.decryptor,
             key,
             rescan,
             start_height,
