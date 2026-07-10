@@ -124,11 +124,6 @@ pub(crate) async fn call<C: Chain>(
         //   historical blocks from that point.
         // - "no" → use the current chain tip so the sync engine only tracks new
         //   transactions going forward.
-        //
-        // TODO: When rescan is "yes" and the key already exists, zcashd would force a
-        // rescan from start_height. `WalletWrite::rewind_to_height` could now drive this,
-        // but it rewinds the *entire* wallet (every account) rather than just this key, so
-        // we defer wiring it up until that global side effect is the desired behaviour.
         let effective_height = match rescan {
             "yes" | "whenkeyisnew" => start_height,
             "no" => chain_tip.unwrap_or_else(|| {
@@ -161,6 +156,14 @@ pub(crate) async fn call<C: Chain>(
                 "sync engine has shut down; imported key won't be scanned until restart"
             );
         }
+    } else if rescan == "yes" {
+        // The key is already known but the caller requested a rescan: truncate to just before
+        // `start_height` so the sync engine re-scans `start_height..=tip`. Use `truncate_to_height`,
+        // not the account-scoped `rewind_to_chain_state` — the latter doesn't snap to a shared
+        // Sapling/Orchard checkpoint and corrupts the DB on a deep rewind (integration-tests #76).
+        wallet
+            .truncate_to_height(start_height.saturating_sub(1))
+            .map_err(|e| LegacyCode::Misc.with_message(format!("Rescan failed: {e}")))?;
     }
 
     Ok(ResultType {
