@@ -17,6 +17,7 @@ tokio = { workspace = true, features = ["fs", "io-std", "io-util", "rt-multi-thr
 
 # Data structures
 nonempty.workspace = true
+pczt.workspace = true
 
 # Build script
 shadow-rs.workspace = true
@@ -117,11 +118,13 @@ uuid.workspace = true
 zcash_client_backend = { workspace = true, features = [
     "lightwalletd-tonic-tls-webpki-roots",
     "orchard",
+    "pczt",
     "sync-decryptor",
     "transparent-inputs",
 ] }
 zcash_client_sqlite = { workspace = true, features = [
     "orchard",
+    "serde",
     "transparent-inputs",
 ] }
 zcash_note_encryption.workspace = true
