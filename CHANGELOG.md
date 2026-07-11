@@ -10,6 +10,28 @@ be considered breaking changes.
 
 ### Added
 
+- Three account-based transaction methods. Where `z_sendmany` takes an address as
+  its source of funds, these take an account UUID together with a `fund_source`
+  naming where within the account the funds may be drawn from: `"orchard"`,
+  `"sapling"`, `"any_transparent"`, or an explicit array of transparent addresses.
+  A source that cannot cover the payment reports insufficient funds rather than
+  quietly reaching into another pool.
+  - `z_proposetransaction` proposes a transaction and returns it as a PCZT, along
+    with the privacy policy required to execute it. Nothing is signed, no proof is
+    generated, and no spending key is touched, so the caller can inspect what the
+    transaction would reveal and then decide, instead of having to commit to a
+    privacy policy up front as `z_sendmany` requires.
+  - `z_finalizetransaction` signs and broadcasts a PCZT from
+    `z_proposetransaction`. The privacy policy the caller supplies is held against
+    the one recorded for that PCZT at proposal time, so a caller cannot acknowledge
+    a weaker policy than the transaction actually requires.
+  - `z_sendfromaccount` does both in one shot, returning the txid. Because there is
+    no proposal to review, the privacy policy is required rather than optional.
+  - `fund_source: "orchard"` permits the Ironwood pool as well as Orchard. Ironwood
+    notes are Orchard-shaped, and once NU6.3 activates an account's
+    Orchard-receiver funds are held there rather than in the legacy Orchard pool,
+    so restricting the source to Orchard alone would report insufficient funds for
+    an account whose Orchard money is all in Ironwood.
 - `z_sendmany` can now spend transparent funds, making transparent-to-transparent
   transfers possible. Previously it passed a shielded-only spend policy to the
   proposal builder, so no transparent input could ever be selected, and the
