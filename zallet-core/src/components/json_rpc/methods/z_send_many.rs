@@ -13,11 +13,14 @@ use zcash_client_backend::{
         Account,
         wallet::{
             ConfirmationsPolicy, create_proposed_transactions,
-            input_selection::{GreedyInputSelector, SpendPolicy},
+            input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy},
             propose_transfer,
         },
     },
-    fees::{DustOutputPolicy, StandardFeeRule, standard::MultiOutputChangeStrategy},
+    fees::{
+        DustOutputPolicy, StandardFeeRule, TransparentChangePolicy,
+        standard::MultiOutputChangeStrategy,
+    },
     wallet::OvkPolicy,
 };
 use zcash_client_sqlite::ReceivedNoteId;
@@ -64,6 +67,45 @@ pub(super) const PARAM_FEE_DESC: &str = "If set, it must be null.";
 pub(super) const PARAM_PRIVACY_POLICY_DESC: &str =
     "Policy for what information leakage is acceptable.";
 
+/// The sources of funds a transfer from `source` may draw upon.
+///
+/// Spending from a bare transparent address draws only on that address's UTXOs: the funds are
+/// already public, and confining selection to the named address avoids linking it to the
+/// account's other transparent receivers. Every other source stays shielded-only, so a
+/// shielded send can never silently reach into transparent funds.
+///
+/// Coinbase UTXOs are excluded: `TransparentSpendPolicy` defaults to
+/// `CoinbasePolicy::NonCoinbase`, and consensus requires coinbase to be spent to a single
+/// shielded output, which is `z_shieldcoinbase`'s job.
+///
+/// The privacy policy deliberately does not narrow this: the selector returns its best
+/// proposal, and `enforce_privacy_policy` rejects it afterwards if it leaks more than the
+/// caller permitted.
+fn spend_policy_for(source: &Address) -> SpendPolicy {
+    match source {
+        Address::Transparent(taddr) => SpendPolicy::shielded_pools([])
+            .with_transparent(TransparentSpendPolicy::from_one_address(*taddr)),
+        _ => SpendPolicy::default(),
+    }
+}
+
+/// Whether change may be returned to the transparent pool.
+///
+/// Permitted exactly when `spend_policy` can spend transparent funds in the first place, which
+/// keeps a fully transparent send transparent end to end rather than sweeping its change into a
+/// shielded pool. A shielded send therefore cannot acquire a transparent change output by this
+/// route.
+///
+/// The change strategy independently enforces the same thing (it emits transparent change only
+/// when the transaction's net flows are fully transparent, i.e. it has no shielded input or
+/// output at all), but that is its invariant, not ours.
+fn transparent_change_policy_for(spend_policy: &SpendPolicy) -> TransparentChangePolicy {
+    match spend_policy.transparent() {
+        Some(_) => TransparentChangePolicy::TransparentChangeAllowed,
+        None => TransparentChangePolicy::ShieldChange,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn call<C: Chain>(
     mut wallet: DbHandle,
@@ -88,7 +130,7 @@ pub(crate) async fn call<C: Chain>(
 
     let request = build_request(&amounts)?;
 
-    let account = match fromaddress.as_str() {
+    let (account, spend_policy) = match fromaddress.as_str() {
         // Select from the legacy transparent address pool.
         // TODO: Support this if we're going to. https://github.com/zcash/zallet/issues/138
         "ANY_TADDR" => Err(LegacyCode::WalletAccountsUnsupported
@@ -101,7 +143,9 @@ pub(crate) async fn call<C: Chain>(
             )
             })?;
 
-            get_account_for_address(wallet.as_ref(), &address)
+            let account = get_account_for_address(wallet.as_ref(), &address)?;
+
+            Ok((account, spend_policy_for(&address)))
         }
     }?;
 
@@ -198,19 +242,40 @@ pub(crate) async fn call<C: Chain>(
         }
     }
 
+    let transparent_change_policy = transparent_change_policy_for(&spend_policy);
+
+    // Where shielded change goes when the transaction has no shielded flows to infer a pool
+    // from. A transaction that does have shielded flows ignores this and keeps its change in
+    // the pool it is already using.
+    //
+    // This stays Orchard rather than Ironwood: the change strategy promotes it to Ironwood
+    // itself once NU6.3 is active (the turnstile forbids value from entering the Orchard
+    // pool, so change out of a purely transparent transaction has to land in Ironwood), and
+    // it does so against the transaction's target height, which is not known here. Naming
+    // Ironwood outright would instead send change to a pool that does not exist yet on a
+    // chain where NU6.3 has not activated.
+    let fallback_change_pool = ShieldedPool::Orchard;
+
+    // Shielded change is split across several notes, per the wallet's note-management
+    // configuration, so the account keeps a usable set of denominations.
+    let split_policy = APP.config().note_management.split_policy();
+
+    // Change too small to be worth its own output is added to the fee instead.
+    let dust_output_policy = DustOutputPolicy::default();
+
+    // No memo is attached to change. A change memo would force the change into a shielded
+    // pool, since a transparent output cannot carry one.
+    let change_memo = None;
+
     let change_strategy = MultiOutputChangeStrategy::new(
         StandardFeeRule::Zip317,
-        None,
-        ShieldedPool::Orchard,
-        DustOutputPolicy::default(),
-        APP.config().note_management.split_policy(),
-    );
+        change_memo,
+        fallback_change_pool,
+        dust_output_policy,
+        split_policy,
+    )
+    .with_transparent_change_policy(transparent_change_policy);
 
-    // TODO: Once `zcash_client_backend` supports spending transparent coins arbitrarily,
-    // consider using the privacy policy here to avoid selecting incompatible funds. This
-    // would match what `zcashd` did more closely (though we might instead decide to let
-    // the selector return its best proposal and then continue to reject afterwards, as we
-    // currently do).
     let input_selector = GreedyInputSelector::new();
 
     let proposal = propose_transfer::<_, _, _, _, Infallible>(
@@ -221,11 +286,7 @@ pub(crate) async fn call<C: Chain>(
         &change_strategy,
         request,
         confirmations_policy,
-        // Zallet does not yet spend transparent funds in a general transfer; `ANY_TADDR`
-        // spending is rejected above. The default `SpendPolicy` permits every shielded pool
-        // present in the build and no transparent spending, preserving the prior
-        // shielded-only behavior.
-        &SpendPolicy::default(),
+        &spend_policy,
         // Do not request a specific transaction version; building falls back to the version
         // implied by the target height.
         None,
@@ -365,4 +426,145 @@ async fn run<C: Chain>(
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
 
     broadcast_transactions(&wallet, chain, txids.into()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+    use zcash_client_backend::{
+        data_api::wallet::input_selection::{CoinbasePolicy, TransparentSource},
+        fees::TransparentChangePolicy,
+    };
+    use zcash_keys::{
+        address::{Address, UnifiedAddress},
+        keys::{UnifiedAddressRequest, UnifiedSpendingKey},
+    };
+    use zcash_protocol::consensus::Network;
+    use zip32::AccountId;
+
+    use super::{SpendPolicy, spend_policy_for, transparent_change_policy_for};
+
+    /// A unified address carrying every receiver type, derived from `seed` and `account`.
+    ///
+    /// No wallet database and no chain: the policy derivations under test are pure functions
+    /// of the source address, which is what makes them unit-testable here rather than in
+    /// `integration-tests`.
+    ///
+    /// Returns `None` for the seeds and diversifiers ZIP 32 rejects, so a property can skip
+    /// them rather than assert on an address that cannot exist.
+    fn ua_from(seed: &[u8; 32], account: u32) -> Option<UnifiedAddress> {
+        let account = AccountId::try_from(account).ok()?;
+        let usk = UnifiedSpendingKey::from_seed(&Network::TestNetwork, seed, account).ok()?;
+        let (ua, _) = usk
+            .to_unified_full_viewing_key()
+            .default_address(UnifiedAddressRequest::ALLOW_ALL)
+            .ok()?;
+        Some(ua)
+    }
+
+    /// ZIP 32 account indices are non-hardened, so they occupy the low 31 bits.
+    fn arb_account() -> impl Strategy<Value = u32> {
+        0u32..(1 << 31)
+    }
+
+    proptest! {
+        // Each case derives a spending key, which is expensive, so take fewer samples than
+        // the default 256. The properties hold for every source address, not for rare
+        // corners of the seed space, so a modest sample establishes them.
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        /// Whatever key it was derived from, a transparent source draws only on that one
+        /// address's UTXOs, and on no shielded note.
+        #[test]
+        fn transparent_source_spends_only_that_address_and_no_shielded_pool(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+        ) {
+            let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            let Some(&taddr) = ua.transparent() else { return Ok(()) };
+
+            let policy = spend_policy_for(&Address::Transparent(taddr));
+
+            // A transparent send must not reach into the account's shielded funds. The
+            // permitted-pool SET being empty says this exhaustively: it forbids every
+            // shielded pool, including any added to `ShieldedPool` after this was written,
+            // which enumerating the variants here would not.
+            prop_assert!(
+                policy.shielded().is_empty(),
+                "a transparent source must permit no shielded pool, got {:?}",
+                policy.shielded(),
+            );
+
+            let transparent = policy
+                .transparent()
+                .expect("a transparent source permits transparent spending");
+
+            // Only the named address, so spending it does not link the source to the
+            // account's other transparent receivers.
+            match transparent.source() {
+                TransparentSource::FromAddresses(addrs) => prop_assert_eq!(
+                    addrs.iter().copied().collect::<Vec<_>>(),
+                    vec![taddr],
+                    "selection must be confined to the named address",
+                ),
+                other => prop_assert!(
+                    false,
+                    "expected a single-address source, got {other:?}",
+                ),
+            }
+
+            // Coinbase must be spent to a single shielded output (`z_shieldcoinbase`'s
+            // job), so a general transfer never draws on it.
+            prop_assert_eq!(transparent.coinbase(), CoinbasePolicy::NonCoinbase);
+        }
+
+        /// The property whose absence made transparent spending impossible, inverted: a
+        /// shielded source must never be able to select a transparent input, even though the
+        /// unified address it names does carry a transparent receiver.
+        #[test]
+        fn shielded_source_permits_no_transparent_spending(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+        ) {
+            let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+
+            let policy = spend_policy_for(&Address::Unified(ua));
+
+            prop_assert!(
+                policy.transparent().is_none(),
+                "a shielded source must not permit transparent spending",
+            );
+
+            // Shielded selection is left exactly as it was before transparent spending
+            // existed. Comparing against the default's pool set keeps that true for any
+            // pool added later, rather than pinning today's three.
+            let unchanged = SpendPolicy::default();
+            prop_assert_eq!(policy.shielded(), unchanged.shielded());
+        }
+
+        /// Change may be returned to the transparent pool exactly when the source could spend
+        /// transparent funds in the first place.
+        #[test]
+        fn transparent_change_permitted_exactly_when_transparent_funds_are_spendable(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+        ) {
+            let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            let Some(&taddr) = ua.transparent() else { return Ok(()) };
+
+            let transparent_source = spend_policy_for(&Address::Transparent(taddr));
+            prop_assert_eq!(
+                transparent_change_policy_for(&transparent_source),
+                TransparentChangePolicy::TransparentChangeAllowed,
+                "a fully transparent send keeps its change transparent",
+            );
+
+            let shielded_source = spend_policy_for(&Address::Unified(ua));
+            prop_assert_eq!(
+                transparent_change_policy_for(&shielded_source),
+                TransparentChangePolicy::ShieldChange,
+                "a shielded send must not acquire a transparent change output",
+            );
+        }
+    }
 }

@@ -18,6 +18,7 @@ use zcash_client_backend::{
         error::{FindAccountForAddressError, RewindError},
         wallet::{ConfirmationsPolicy, TargetHeight},
     },
+    fees::StandardFeeRule,
     keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
     wallet::{Note, ReceivedNote, TransparentAddressMetadata, WalletTransparentOutput},
 };
@@ -500,6 +501,32 @@ impl InputSource for DbConnection {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn select_spendable_transparent_outputs(
+        &self,
+        account: Self::AccountId,
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+        output_filter: CoinbaseFilter,
+        address_allow_list: Option<&[TransparentAddress]>,
+        target_value: TargetValue,
+        max_inputs: usize,
+        fee_rule: &StandardFeeRule,
+    ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
+        self.with(|db_data| {
+            db_data.select_spendable_transparent_outputs(
+                account,
+                target_height,
+                confirmations_policy,
+                output_filter,
+                address_allow_list,
+                target_value,
+                max_inputs,
+                fee_rule,
+            )
+        })
+    }
+
     fn get_account_metadata(
         &self,
         account: Self::AccountId,
@@ -659,6 +686,14 @@ impl WalletWrite for DbConnection {
         n: usize,
     ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Self::Error> {
         self.with_mut(|mut db_data| db_data.reserve_next_n_ephemeral_addresses(account_id, n))
+    }
+
+    fn reserve_next_n_internal_addresses(
+        &mut self,
+        account_id: Self::AccountId,
+        n: usize,
+    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Self::Error> {
+        self.with_mut(|mut db_data| db_data.reserve_next_n_internal_addresses(account_id, n))
     }
 
     fn set_transaction_status(

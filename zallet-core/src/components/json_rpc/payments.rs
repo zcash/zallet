@@ -628,6 +628,23 @@ pub(super) fn get_account_for_address(
     wallet: &DbConnection,
     address: &Address,
 ) -> RpcResult<Account> {
+    // A bare transparent address is generally not a wallet address in its own right: it is
+    // a *receiver* of one of the account's unified addresses, so it never compares equal to
+    // any `AddressInfo` in the scan below (those hold the whole UA). `find_account_for_address`
+    // resolves an address through its receivers, so it maps such a taddr back to its owning
+    // account; without it, a taddr `fromaddress` can never be spent from.
+    if let Some(account_id) = wallet
+        .find_account_for_address(wallet.params(), address)
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+    {
+        return Ok(wallet
+            .get_account(account_id)
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+            .expect("present"));
+    }
+
+    // Fall back to scanning the account address lists, which also covers address kinds the
+    // receiver index does not resolve.
     // TODO: Make this more efficient with a `WalletRead` method.
     //       https://github.com/zcash/librustzcash/issues/1944
     for account_id in wallet
