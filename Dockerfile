@@ -29,16 +29,27 @@
 FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS builder
 
 # Build deps: protobuf (tonic/PROTOC), clang+llvm (bindgen / *-sys C/C++ deps),
-# pkg-config, and git (zaino-state's build.rs embeds the commit). Versions are
-# pinned to the bookworm snapshot that the digest-pinned base resolves to; bump
-# them together with the base digest above.
+# pkg-config, and git (zaino-state's build.rs embeds the commit).
+#
+# These versions are NOT implied by the digest-pinned base: apt resolves them
+# against the live bookworm archive, which only ever serves the CURRENT revision
+# of each package. So a bookworm point release (or a security update) deletes the
+# revision pinned here and the build fails with "Version '...' was not found",
+# even though nothing in this repo changed. When that happens, re-read the
+# candidate versions from the pinned base and bump the offending pin:
+#
+#   docker run --rm rust:1.91.1-slim-bookworm@sha256:8514999d... \
+#     bash -c 'apt-get update -qq && apt-cache policy protobuf-compiler'
+#
+# (Pinning apt to a snapshot.debian.org timestamp would make this immune, at the
+# cost of no longer picking up security updates automatically.)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential=12.9 \
         clang=1:14.0-55.7~deb12u1 \
         llvm-dev=1:14.0-55.7~deb12u1 \
         libclang-dev=1:14.0-55.7~deb12u1 \
-        protobuf-compiler=3.21.12-3 \
+        protobuf-compiler=3.21.12-3+deb12u1 \
         pkg-config=1.8.1-1 \
         git=1:2.39.5-0+deb12u3 \
         ca-certificates=20230311+deb12u1 \

@@ -160,6 +160,41 @@ on `PATH` at run time.
 
 PRs MUST NOT introduce new warnings from `cargo +beta clippy --tests --all-features --all-targets`. Preexisting beta clippy warnings need not be resolved, but new ones introduced by a PR will block merging.
 
+## Auditing Dependency Version Bumps
+
+This applies to any change to a pinned dependency version: the `Dockerfile` and `Dockerfile.stagex` apt pins and base-image digests, and by extension any other pinned external artifact.
+
+A version bump is a supply-chain change. Bumping a pin means executing different third-party code in our build, so **a pin MUST NOT be bumped merely because the build went red.** "CI is broken, so I raised the number until it went green" is not a review; it is how a malicious or merely broken upstream gets in unexamined.
+
+Note that the Dockerfile's apt pins rot on their own, with no change on our side: `deb.debian.org` serves only the *current* revision of each package, so a Debian point release or security update deletes the pinned revision and the build fails with `Version '...' was not found`. That is expected, and it is exactly the moment this audit is required.
+
+**An agent bumping a pin MUST do all of the following**, and MUST NOT open the PR without them:
+
+1. **Read the actual diff.** Not the version number, not the changelog summary: the code. For a Debian package, fetch both source packages and diff them, e.g.
+
+   ```bash
+   curl -sfL http://deb.debian.org/debian/pool/main/p/protobuf/protobuf_<old>.debian.tar.xz -o old.tar.xz
+   curl -sfL http://deb.debian.org/debian/pool/main/p/protobuf/protobuf_<new>.debian.tar.xz -o new.tar.xz
+   # then diff debian/patches/series and inspect every added patch
+   ```
+
+   Determine which source trees each patch touches, and state whether they are code we actually ship or execute.
+
+2. **Link a discussion a human can follow.** The PR description MUST cite the upstream source: the Debian changelog URL (`https://metadata.ftp-master.debian.org/changelogs/main/<x>/<pkg>/<pkg>_<version>_changelog`), the CVE identifiers, the Debian bug numbers, and the upstream advisory or commit where applicable. A reviewer must be able to verify the claim without redoing the archaeology.
+
+3. **State the impact on us explicitly.** Which of the changed components does this image actually use? A protobuf update that only patches its Java, Python, and PHP runtimes does not affect a build that uses `protoc` solely for Rust codegen and ships none of those runtimes; say so, and say how you established it.
+
+4. **Confirm the new pin resolves**, against the digest-pinned base rather than your laptop:
+
+   ```bash
+   docker run --rm rust:<tag>@sha256:<digest> \
+     bash -c 'apt-get update -qq && apt-cache policy <package>'
+   ```
+
+5. **Keep the bump minimal.** Bump only the pins that actually moved; re-read the candidate versions and leave the rest alone. Never relax a pin to an unpinned or range version to dodge the problem, and never silence `hadolint`.
+
+If the diff is not benign, or you cannot establish what changed, STOP and say so in the PR rather than merging a version you have not audited.
+
 ## Commit & Pull Request Guidelines
 
 ### Commit History
