@@ -131,7 +131,6 @@ pub fn network_to_zebra<P: Parameters>(
                 nu6_2: height(NetworkUpgrade::Nu6_2),
                 nu6_3: height(NetworkUpgrade::Nu6_3),
                 nu7: None,
-                ..Default::default()
             };
             Ok(ZebraNetwork::new_regtest(heights.into()))
         }
@@ -197,7 +196,7 @@ pub async fn init_read_state_service(
     match zebra_state::state_database_format_version_on_disk(&zebra_config, zebra_network).map_err(
         |e| ReadStateError::DatabaseVersion {
             path: zebra_config.cache_dir.clone(),
-            source: e.into(),
+            source: e,
         },
     )? {
         Some(_) => {}
