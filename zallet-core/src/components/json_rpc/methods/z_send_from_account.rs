@@ -142,6 +142,8 @@ pub(crate) async fn call<C: Chain>(
     run(
         wallet,
         chain,
+        account_id,
+        usk.to_unified_full_viewing_key(),
         proposal,
         #[cfg(feature = "zcashd-import")]
         SpendingKeys::new(usk, standalone_keys),

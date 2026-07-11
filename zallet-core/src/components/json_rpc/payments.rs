@@ -716,18 +716,31 @@ mod legacy_pool_tests {
     }
 }
 
-/// Maximum number of proposal policies retained by [`RequiredPolicyCache`].
+/// Maximum number of proposals retained by [`RequiredPolicyCache`].
 const REQUIRED_POLICY_CACHE_CAPACITY: usize = 256;
 
-/// A bounded, insertion-ordered cache mapping a PCZT (by content hash) to the [`PrivacyPolicy`]
-/// required to execute it.
+/// What [`RequiredPolicyCache`] records about a proposed PCZT.
+#[derive(Clone)]
+struct CachedProposalInfo {
+    /// The strictest privacy policy that still permits this transaction.
+    required_policy: PrivacyPolicy,
+    /// The transparent payments the caller explicitly requested, one entry per proposal step
+    /// (in step order). See [`verify_and_broadcast_transactions`]'s `expected_payments`
+    /// parameter, which this is recorded for.
+    transparent_payments: Vec<Vec<(TransparentAddress, Zatoshis)>>,
+}
+
+/// A bounded, insertion-ordered cache mapping a PCZT (by content hash) to what
+/// `z_finalizetransaction` needs in order to check it: the [`PrivacyPolicy`] required to
+/// execute it, and the transparent payments its proposal explicitly requested.
 ///
-/// `z_proposetransaction` computes the required policy exactly from the proposal and records it
-/// here; `z_finalizetransaction` looks it up to enforce that the caller acknowledged a sufficient
-/// policy, without having to re-derive it from the (lossy) PCZT. Entries are evicted in insertion
-/// order once the capacity is exceeded.
+/// `z_proposetransaction` computes both exactly from the proposal and records them here;
+/// `z_finalizetransaction` looks them up so it can enforce that the caller acknowledged a
+/// sufficient policy, and that every transparent output not explicitly requested is a
+/// wallet-derived address, without having to re-derive either from the (lossy) PCZT. Entries
+/// are evicted in insertion order once the capacity is exceeded.
 struct RequiredPolicyCache {
-    by_pczt: HashMap<[u8; 32], PrivacyPolicy>,
+    by_pczt: HashMap<[u8; 32], CachedProposalInfo>,
     order: VecDeque<[u8; 32]>,
     capacity: usize,
 }
@@ -741,9 +754,13 @@ impl RequiredPolicyCache {
         }
     }
 
-    fn insert(&mut self, key: [u8; 32], policy: PrivacyPolicy) {
-        // Re-inserting an existing key just refreshes the policy without growing the cache.
-        if self.by_pczt.insert(key, policy).is_none() {
+    fn get(&self, key: &[u8; 32]) -> Option<CachedProposalInfo> {
+        self.by_pczt.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: [u8; 32], info: CachedProposalInfo) {
+        // Re-inserting an existing key just refreshes the entry without growing the cache.
+        if self.by_pczt.insert(key, info).is_none() {
             self.order.push_back(key);
             while self.order.len() > self.capacity {
                 if let Some(evicted) = self.order.pop_front() {
@@ -760,17 +777,61 @@ static REQUIRED_POLICY_CACHE: LazyLock<Mutex<RequiredPolicyCache>> =
 /// The cache key for a PCZT: the SHA-256 of its serialized bytes.
 ///
 /// `z_proposetransaction` and `z_finalizetransaction` hash the same canonical serialization, so
-/// the policy recorded at proposal time is found again at finalize time.
+/// the entry recorded at proposal time is found again at finalize time.
 pub(super) fn pczt_policy_key(pczt_bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(pczt_bytes).into()
 }
 
-/// Records the privacy policy required to execute the PCZT identified by `key`.
-pub(super) fn record_required_policy(key: [u8; 32], policy: PrivacyPolicy) {
+/// Records what `z_finalizetransaction` needs to check the PCZT identified by `key`: the
+/// privacy policy required to execute it, and the transparent payments its proposal explicitly
+/// requested (see [`verify_and_broadcast_transactions`]).
+pub(super) fn record_required_policy(
+    key: [u8; 32],
+    required_policy: PrivacyPolicy,
+    transparent_payments: Vec<Vec<(TransparentAddress, Zatoshis)>>,
+) {
     REQUIRED_POLICY_CACHE
         .lock()
         .expect("policy cache mutex is not poisoned")
-        .insert(key, policy);
+        .insert(
+            key,
+            CachedProposalInfo {
+                required_policy,
+                transparent_payments,
+            },
+        );
+}
+
+/// Returns the previously-recorded required policy for the PCZT identified by `key`, if it is
+/// still cached.
+pub(super) fn cached_required_policy(key: &[u8; 32]) -> Option<PrivacyPolicy> {
+    REQUIRED_POLICY_CACHE
+        .lock()
+        .expect("policy cache mutex is not poisoned")
+        .get(key)
+        .map(|info| info.required_policy)
+}
+
+/// Returns the previously-recorded expected transparent payments for the PCZT identified by
+/// `key`, if it is still cached.
+///
+/// `None` covers both "not cached" (eviction, a process restart since this cache is in-memory
+/// only, or a PCZT proposed by a different node) and "cached with no transparent payments in
+/// any step": both make an exact `expected_payments` list unavailable, and
+/// [`verify_and_broadcast_transactions`] treats `None` as "skip this check" rather than
+/// misreporting a proposal with transparent payments as having none. This mirrors
+/// `cached_required_policy`'s cache-miss behavior (accept the caller's acknowledgement without
+/// cross-checking it): we cannot reliably re-derive either property from the PCZT alone, so a
+/// miss trades this defense-in-depth check for availability rather than rejecting an otherwise
+/// valid transaction. See zcash/wallet#217.
+pub(super) fn cached_expected_transparent_payments(
+    key: &[u8; 32],
+) -> Option<Vec<Vec<(TransparentAddress, Zatoshis)>>> {
+    REQUIRED_POLICY_CACHE
+        .lock()
+        .expect("policy cache mutex is not poisoned")
+        .get(key)
+        .map(|info| info.transparent_payments)
 }
 
 /// Whether change may be returned to the transparent pool.
@@ -1068,7 +1129,7 @@ pub(super) fn check_transparent_outputs<E>(
 /// address underlying a TEX address. Ephemeral (ZIP 320) intermediate outputs are not
 /// payments — they appear in a step's proposed change and must instead verify as
 /// wallet-derived.
-fn proposed_transparent_payments<FeeRuleT, NoteRef>(
+pub(super) fn proposed_transparent_payments<FeeRuleT, NoteRef>(
     params: &Network,
     proposal: &Proposal<FeeRuleT, NoteRef>,
 ) -> RpcResult<Vec<Vec<(TransparentAddress, Zatoshis)>>> {
@@ -1126,80 +1187,106 @@ fn proposed_transparent_payments<FeeRuleT, NoteRef>(
 /// requested by the proposal nor as an address derived from `ufvk` (see
 /// [`check_transparent_outputs`]) is never handed to the broadcast step. `ufvk` must be
 /// derived from the wallet seed, not read from the database.
-pub(super) async fn verify_and_broadcast_transactions<C: Chain, FeeRuleT, NoteRef>(
+pub(super) async fn verify_and_broadcast_transactions<C: Chain>(
     wallet: &DbConnection,
     chain: C,
     account_id: AccountUuid,
     ufvk: &UnifiedFullViewingKey,
-    proposal: &Proposal<FeeRuleT, NoteRef>,
+    // The transparent payments the caller explicitly requested, one entry per proposal step
+    // (in step order), or `None` to skip the check entirely. Outputs matching one of these
+    // exactly are the caller's requested payments; every other transparent output must be a
+    // wallet-derived address (change or an ephemeral ZIP 320 output), verified against `ufvk`.
+    // `None` is for callers that cannot supply this reliably (see
+    // `z_finalizetransaction`'s cache-miss fallback); it trades this defense-in-depth check
+    // for availability rather than rejecting a transaction that would otherwise be valid.
+    expected_payments: Option<Vec<Vec<(TransparentAddress, Zatoshis)>>>,
     txids: Vec<TxId>,
 ) -> RpcResult<SendResult> {
     let params = *wallet.params();
-    let expected_payments = proposed_transparent_payments(&params, proposal)?;
-
-    // The builder creates one transaction per proposal step, in step order.
-    if txids.len() != expected_payments.len() {
-        return Err(LegacyCode::Wallet.with_static(
-            "Internal error: built transaction count does not match proposal step count.",
-        ));
-    }
 
     let mut transactions = Vec::with_capacity(txids.len());
-    for (txid, expected) in txids.iter().zip(expected_payments) {
-        let tx = wallet
-            .get_transaction(*txid)
-            .map_err(|e| {
-                LegacyCode::Database.with_message(format!("Failed to get transaction: {e}"))
-            })?
-            .ok_or_else(|| {
-                LegacyCode::Wallet
-                    .with_message(format!("Wallet does not contain transaction {txid}"))
-            })?;
 
-        let outputs = tx
-            .transparent_bundle()
-            .map(|bundle| {
-                bundle
-                    .vout
-                    .iter()
-                    .map(|txout| (txout.recipient_address(), txout.value()))
-                    .collect::<Vec<_>>()
+    if let Some(expected_payments) = expected_payments {
+        // The builder creates one transaction per proposal step, in step order.
+        if txids.len() != expected_payments.len() {
+            return Err(LegacyCode::Wallet.with_static(
+                "Internal error: built transaction count does not match proposal step count.",
+            ));
+        }
+
+        for (txid, expected) in txids.iter().zip(expected_payments) {
+            let tx = wallet
+                .get_transaction(*txid)
+                .map_err(|e| {
+                    LegacyCode::Database.with_message(format!("Failed to get transaction: {e}"))
+                })?
+                .ok_or_else(|| {
+                    LegacyCode::Wallet
+                        .with_message(format!("Wallet does not contain transaction {txid}"))
+                })?;
+
+            let outputs = tx
+                .transparent_bundle()
+                .map(|bundle| {
+                    bundle
+                        .vout
+                        .iter()
+                        .map(|txout| (txout.recipient_address(), txout.value()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            check_transparent_outputs(outputs, expected, ufvk.transparent(), |addr| {
+                wallet
+                    .get_transparent_address_metadata(account_id, addr)
+                    .map(|meta| meta.map(|m| m.source().clone()))
             })
-            .unwrap_or_default();
-
-        check_transparent_outputs(outputs, expected, ufvk.transparent(), |addr| {
-            wallet
-                .get_transparent_address_metadata(account_id, addr)
-                .map(|meta| meta.map(|m| m.source().clone()))
-        })
-        .map_err(|e| match e {
-            TransparentOutputError::Lookup(e) => LegacyCode::Database.with_message(e.to_string()),
-            TransparentOutputError::UnrecognizedScript { vout } => {
-                LegacyCode::Wallet.with_message(fl!(
-                    "err-transparent-output-not-wallet-derived",
-                    output = format!("output index {vout}"),
-                ))
-            }
-            TransparentOutputError::MissingPayment(addr) => LegacyCode::Wallet.with_message(fl!(
-                "err-transparent-payment-missing",
-                address = Address::Transparent(addr).encode(&params),
-            )),
-            TransparentOutputError::UnknownAddress(addr)
-            | TransparentOutputError::DerivationMismatch(addr)
-            | TransparentOutputError::NoTransparentKey(addr) => {
-                LegacyCode::Wallet.with_message(fl!(
+            .map_err(|e| match e {
+                TransparentOutputError::Lookup(e) => {
+                    LegacyCode::Database.with_message(e.to_string())
+                }
+                TransparentOutputError::UnrecognizedScript { vout } => {
+                    LegacyCode::Wallet.with_message(fl!(
+                        "err-transparent-output-not-wallet-derived",
+                        output = format!("output index {vout}"),
+                    ))
+                }
+                TransparentOutputError::MissingPayment(addr) => {
+                    LegacyCode::Wallet.with_message(fl!(
+                        "err-transparent-payment-missing",
+                        address = Address::Transparent(addr).encode(&params),
+                    ))
+                }
+                TransparentOutputError::UnknownAddress(addr)
+                | TransparentOutputError::DerivationMismatch(addr)
+                | TransparentOutputError::NoTransparentKey(addr) => {
+                    LegacyCode::Wallet.with_message(fl!(
+                        "err-transparent-output-not-wallet-derived",
+                        output = Address::Transparent(addr).encode(&params),
+                    ))
+                }
+                #[cfg(feature = "transparent-key-import")]
+                TransparentOutputError::NotDerived(addr) => LegacyCode::Wallet.with_message(fl!(
                     "err-transparent-output-not-wallet-derived",
                     output = Address::Transparent(addr).encode(&params),
-                ))
-            }
-            #[cfg(feature = "transparent-key-import")]
-            TransparentOutputError::NotDerived(addr) => LegacyCode::Wallet.with_message(fl!(
-                "err-transparent-output-not-wallet-derived",
-                output = Address::Transparent(addr).encode(&params),
-            )),
-        })?;
+                )),
+            })?;
 
-        transactions.push(tx);
+            transactions.push(tx);
+        }
+    } else {
+        for txid in &txids {
+            let tx = wallet
+                .get_transaction(*txid)
+                .map_err(|e| {
+                    LegacyCode::Database.with_message(format!("Failed to get transaction: {e}"))
+                })?
+                .ok_or_else(|| {
+                    LegacyCode::Wallet
+                        .with_message(format!("Wallet does not contain transaction {txid}"))
+                })?;
+            transactions.push(tx);
+        }
     }
 
     if APP.config().external.broadcast() {

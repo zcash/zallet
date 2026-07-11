@@ -21,8 +21,8 @@ use crate::{
         json_rpc::{
             fund_source::FundSource,
             payments::{
-                AmountParameter, build_request, pczt_policy_key, propose_transfer_with_policy,
-                record_required_policy, required_privacy_policy,
+                AmountParameter, build_request, pczt_policy_key, proposed_transparent_payments,
+                propose_transfer_with_policy, record_required_policy, required_privacy_policy,
             },
             server::LegacyCode,
             utils::parse_account_parameter,
@@ -139,7 +139,11 @@ pub(crate) async fn call(
     let pczt_bytes = pczt
         .serialize()
         .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to serialize PCZT: {e:?}")))?;
-    record_required_policy(pczt_policy_key(&pczt_bytes), privacy_policy);
+    record_required_policy(
+        pczt_policy_key(&pczt_bytes),
+        privacy_policy,
+        proposed_transparent_payments(&params, &proposal)?,
+    );
 
     Ok(ResultType {
         pczt: hex::encode(pczt_bytes),

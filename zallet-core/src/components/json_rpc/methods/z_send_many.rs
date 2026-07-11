@@ -39,7 +39,8 @@ use crate::{
             payments::{
                 AmountParameter, IncompatiblePrivacyPolicy, PrivacyPolicy, SendResult,
                 build_request, enforce_privacy_policy, get_account_for_address,
-                get_legacy_pool_account, propose_transfer_with_policy,
+                get_legacy_pool_account, proposed_transparent_payments,
+                propose_transfer_with_policy,
                 verify_and_broadcast_transactions,
             },
             server::LegacyCode,
@@ -415,8 +416,16 @@ pub(super) async fn run<C: Chain>(
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
 
-    verify_and_broadcast_transactions(&wallet, chain, account_id, &ufvk, &proposal, txids.into())
-        .await
+    let expected_payments = proposed_transparent_payments(wallet.params(), &proposal)?;
+    verify_and_broadcast_transactions(
+        &wallet,
+        chain,
+        account_id,
+        &ufvk,
+        Some(expected_payments),
+        txids.into(),
+    )
+    .await
 }
 
 #[cfg(test)]
