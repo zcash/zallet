@@ -21,8 +21,8 @@ use crate::{
         json_rpc::{
             fund_source::FundSource,
             payments::{
-                AmountParameter, build_request, pczt_policy_key, proposed_transparent_payments,
-                propose_transfer_with_policy, record_required_policy, required_privacy_policy,
+                AmountParameter, build_request, pczt_policy_key, propose_transfer_with_policy,
+                proposed_transparent_payments, record_required_policy, required_privacy_policy,
             },
             server::LegacyCode,
             utils::parse_account_parameter,

@@ -39,9 +39,8 @@ use crate::{
             payments::{
                 AmountParameter, IncompatiblePrivacyPolicy, PrivacyPolicy, SendResult,
                 build_request, enforce_privacy_policy, get_account_for_address,
-                get_legacy_pool_account, proposed_transparent_payments,
-                propose_transfer_with_policy,
-                verify_and_broadcast_transactions,
+                get_legacy_pool_account, propose_transfer_with_policy,
+                proposed_transparent_payments, verify_and_broadcast_transactions,
             },
             server::LegacyCode,
         },

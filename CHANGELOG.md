@@ -10,6 +10,28 @@ be considered breaking changes.
 
 ### Added
 
+- Three account-based transaction methods. Where `z_sendmany` takes an address as
+  its source of funds, these take an account UUID together with a `fund_source`
+  naming where within the account the funds may be drawn from: `"orchard"`,
+  `"sapling"`, `"any_transparent"`, or an explicit array of transparent addresses.
+  A source that cannot cover the payment reports insufficient funds rather than
+  quietly reaching into another pool.
+  - `z_proposetransaction` proposes a transaction and returns it as a PCZT, along
+    with the privacy policy required to execute it. Nothing is signed, no proof is
+    generated, and no spending key is touched, so the caller can inspect what the
+    transaction would reveal and then decide, instead of having to commit to a
+    privacy policy up front as `z_sendmany` requires.
+  - `z_finalizetransaction` signs and broadcasts a PCZT from
+    `z_proposetransaction`. The privacy policy the caller supplies is held against
+    the one recorded for that PCZT at proposal time, so a caller cannot acknowledge
+    a weaker policy than the transaction actually requires.
+  - `z_sendfromaccount` does both in one shot, returning the txid. Because there is
+    no proposal to review, the privacy policy is required rather than optional.
+  - `fund_source: "orchard"` permits the Ironwood pool as well as Orchard. Ironwood
+    notes are Orchard-shaped, and once NU6.3 activates an account's
+    Orchard-receiver funds are held there rather than in the legacy Orchard pool,
+    so restricting the source to Orchard alone would report insufficient funds for
+    an account whose Orchard money is all in Ironwood.
 - RPC methods:
   - `z_exportviewingkey`. In addition to the `zcashd` behaviour (exporting the
     Sapling extended full viewing key for a Sapling address), it accepts
@@ -50,17 +72,22 @@ be considered breaking changes.
   `spendable` and `pending` buckets. Previously only the shielded pools
   contributed, so a wallet holding only transparent funds reported a zero
   spendable total.
-- `z_sendmany` and `z_shieldcoinbase` now verify, after building a transaction
-  and before broadcasting it, that every transparent output either exactly
-  matches a requested payment or has an address that re-derives from the
-  wallet-seed-derived account key at the derivation path the wallet database
-  records for it. Shielded outputs are constructed in-process from the spending
-  key material, but transparent change and ephemeral (ZIP 320) output addresses
-  are read from database records that are not integrity-protected, so a
-  modified record could previously redirect change to an arbitrary address
-  while the requested payments (and thus the operation) still succeeded. A
-  transaction that fails this check is reported as wallet database corruption
-  or tampering and is never handed to the broadcast step.
+- `z_sendmany`, `z_shieldcoinbase`, and `z_sendfromaccount` now verify, after
+  building a transaction and before broadcasting it, that every transparent
+  output either exactly matches a requested payment or has an address that
+  re-derives from the wallet-seed-derived account key at the derivation path
+  the wallet database records for it. Shielded outputs are constructed
+  in-process from the spending key material, but transparent change and
+  ephemeral (ZIP 320) output addresses are read from database records that are
+  not integrity-protected, so a modified record could previously redirect
+  change to an arbitrary address while the requested payments (and thus the
+  operation) still succeeded. A transaction that fails this check is reported
+  as wallet database corruption or tampering and is never handed to the
+  broadcast step. `z_finalizetransaction` performs the same check when the PCZT
+  being finalized was proposed by this wallet process and is still cached
+  (the common case); a cache miss (proposed by a different process, or
+  evicted) skips it, matching how the privacy-policy acknowledgement check
+  already degrades in that case.
 - The keystore now verifies decrypted key material against the database row it
   was looked up by: seeds and mnemonics must reproduce the seed fingerprint
   their row is keyed by, and standalone transparent keys must reproduce the

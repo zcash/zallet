@@ -1245,12 +1245,11 @@ pub(super) async fn verify_and_broadcast_transactions<C: Chain>(
                 TransparentOutputError::Lookup(e) => {
                     LegacyCode::Database.with_message(e.to_string())
                 }
-                TransparentOutputError::UnrecognizedScript { vout } => {
-                    LegacyCode::Wallet.with_message(fl!(
+                TransparentOutputError::UnrecognizedScript { vout } => LegacyCode::Wallet
+                    .with_message(fl!(
                         "err-transparent-output-not-wallet-derived",
                         output = format!("output index {vout}"),
-                    ))
-                }
+                    )),
                 TransparentOutputError::MissingPayment(addr) => {
                     LegacyCode::Wallet.with_message(fl!(
                         "err-transparent-payment-missing",
@@ -1259,12 +1258,11 @@ pub(super) async fn verify_and_broadcast_transactions<C: Chain>(
                 }
                 TransparentOutputError::UnknownAddress(addr)
                 | TransparentOutputError::DerivationMismatch(addr)
-                | TransparentOutputError::NoTransparentKey(addr) => {
-                    LegacyCode::Wallet.with_message(fl!(
+                | TransparentOutputError::NoTransparentKey(addr) => LegacyCode::Wallet
+                    .with_message(fl!(
                         "err-transparent-output-not-wallet-derived",
                         output = Address::Transparent(addr).encode(&params),
-                    ))
-                }
+                    )),
                 #[cfg(feature = "transparent-key-import")]
                 TransparentOutputError::NotDerived(addr) => LegacyCode::Wallet.with_message(fl!(
                     "err-transparent-output-not-wallet-derived",
