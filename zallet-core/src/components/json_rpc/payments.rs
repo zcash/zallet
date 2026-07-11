@@ -6,6 +6,7 @@ use std::{
 };
 
 use abscissa_core::Application;
+use documented::Documented;
 use jsonrpsee::core::JsonValue;
 use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
 use schemars::JsonSchema;
@@ -859,7 +860,7 @@ pub(super) async fn broadcast_transactions<C: Chain>(
 }
 
 /// The result of sending a payment.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Documented, JsonSchema)]
 pub(crate) struct SendResult {
     /// The ID of the resulting transaction, if the payment only produced one.
     ///
