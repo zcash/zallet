@@ -10,6 +10,29 @@ be considered breaking changes.
 
 ### Added
 
+- `z_sendmany` can now spend transparent funds, making transparent-to-transparent
+  transfers possible. Previously it passed a shielded-only spend policy to the
+  proposal builder, so no transparent input could ever be selected, and the
+  `AllowFullyTransparent` privacy policy was unreachable.
+  - Transparent funds are spendable only when `fromaddress` names a transparent
+    address. Input selection then draws on that address's UTXOs alone, so a
+    shielded send can never silently reach into transparent funds, and the named
+    address is not linked to the account's other transparent receivers. Every
+    other source remains shielded-only, unchanged. (`ANY_TADDR` as a source is
+    still unsupported.)
+  - Coinbase outputs are not spendable this way: consensus requires them to be
+    spent to a single shielded output, which remains `z_shieldcoinbase`'s job. A
+    transparent spend therefore requires a non-coinbase UTXO.
+  - A transaction that both spends transparent funds and has transparent
+    recipients or change requires the `AllowFullyTransparent` privacy policy. A
+    transparent source paying a shielded recipient still only needs
+    `AllowRevealedSenders`.
+  - Change on a fully transparent send stays in the transparent pool, at an
+    internal-scope (BIP 44) change address, and a fresh one is reserved per
+    transaction so that consecutive sends cannot be linked through a reused
+    change address. Transparent change is emitted only when the transaction has
+    no shielded input or output at all; any send with a shielded component
+    continues to shield its change exactly as before.
 - The `zebra` chain backend (and the `zaino` backend's read-state-service mode)
   now support regtest. The read-state service builds a Zebra Regtest network
   whose network-upgrade activation heights mirror the wallet's configured
@@ -39,6 +62,19 @@ be considered breaking changes.
 
 ### Fixed
 
+- `get_account_for_address` now resolves a bare transparent address to the account
+  that owns it. It previously compared the address against the account's listed
+  addresses, which are unified addresses; a transparent receiver never compares
+  equal to the unified address it belongs to, so passing a `taddr` as a payment
+  source failed with "Invalid from address, no payment source found for address."
+- The wallet database connection now implements
+  `InputSource::select_spendable_transparent_outputs` and
+  `WalletWrite::reserve_next_n_internal_addresses`. Both are defaulted in their
+  traits to an `unimplemented!()`, so omitting them compiled cleanly and instead
+  panicked the wallet process at run time: the first on selecting any transparent
+  input, the second on producing transparent change. Nothing reached either while
+  transparent spending was impossible; both are on the path of any transparent
+  spend, and of the forthcoming `z_sendfromaccount` and `z_proposetransaction`.
 - `steady_state` sync no longer crashes the whole wallet when the backend's best
   chain reorgs away a block the wallet had already stored (`BlockConflict`).
   Previously this error wasn't recognized as retryable, so it propagated as a
