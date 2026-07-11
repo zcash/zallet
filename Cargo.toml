@@ -45,7 +45,8 @@ ripemd = "0.1"
 sha2 = "0.10"
 
 # Key storage
-age = { version = "0.11", features = ["armor", "cli-common", "plugin"] }
+# =0.11.1 selects the patched git age below over the incompatible crates.io release.
+age = { version = "=0.11.1", features = ["armor", "cli-common", "plugin"] }
 bech32 = "0.11"
 bip0039 = "0.12"
 
@@ -70,7 +71,7 @@ serde = { version = "1", features = ["serde_derive"] }
 semver = "1"
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
 toml = "0.8"
-zcash_address = "0.13.0-pre.0"
+zcash_address = "0.13.0"
 
 # Randomness
 rand = "0.8"
@@ -111,21 +112,21 @@ tracing-log = "0.2"
 tracing-subscriber = "0.3"
 
 # Zcash consensus
-zcash_protocol = "0.10.0-pre.0"
+zcash_protocol = "0.10.0"
 
 # Zcash payment protocols
-orchard = "0.15.0-pre.2"
+orchard = "0.15.0"
 sapling = { package = "sapling-crypto", version = "0.7" }
-transparent = { package = "zcash_transparent", version = "0.9.0-pre.0" }
+transparent = { package = "zcash_transparent", version = "0.9.0" }
 zcash_encoding = "0.4"
-zcash_keys = { version = "0.15.0-pre.0", features = [
+zcash_keys = { version = "0.15.0", features = [
     "transparent-inputs",
     "sapling",
     "orchard",
     "transparent-key-encoding",
 ] }
-zcash_primitives = "0.29.0-pre.0"
-zcash_proofs = "0.29.0-pre.0"
+zcash_primitives = "0.29.0"
+zcash_proofs = "0.29.0"
 zcash_script = "0.4.3"
 zcash_spec = "0.2"
 secp256k1 = { version = "0.29", features = ["recovery"] }
@@ -160,36 +161,20 @@ anyhow = "1.0"
 tonic = "0.14"
 
 [patch.crates-io]
-# Temporary pin to librustzcash/main.
-# This should point to a proper release on crates.io
-#
-# Update the librustzcash rev ONLY via utils/sync-librustzcash.sh: it keeps all
-# three workspace manifests (root, backends/zebra, backends/zaino) and their
-# lockfiles on one identical rev, which utils/check-lockstep.sh enforces in CI.
-# Do not edit these revs by hand.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-# NOTE: zcash_history is deliberately NOT patched here: the root graph does not
-# use it (only the backend workspaces do, and their patch blocks carry it).
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-
-
-# Replicated from librustzcash b43a4237's own [patch.crates-io]: main librustzcash is
-# built against zcash/orchard main (adds the public `Builder::bundle_type()`
-# accessor), which the crates.io 0.15.0-pre.2 release predates. Required for the
-# librustzcash rev above to compile.
-orchard = { git = "https://github.com/zcash/orchard", rev = "475ef0ff77d45aebff93cb039d639250d82518a3" }
-# NOTE: incrementalmerkletree-testing is deliberately NOT patched here: the root
-# graph does not use it (only the backend workspaces do, and their patch blocks
-# carry it).
+# Temporary pins for APIs not yet on crates.io. Update the librustzcash rev
+# only via utils/sync-librustzcash.sh; utils/check-lockstep.sh enforces that
+# all three workspaces stay in lockstep.
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
 
 age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633bb70c91eef91142fd4" }
 
