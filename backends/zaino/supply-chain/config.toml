@@ -42,6 +42,9 @@ audit-as-crates-io = true
 [policy."orchard:0.15.0-pre.2@git:475ef0ff77d45aebff93cb039d639250d82518a3"]
 audit-as-crates-io = true
 
+[policy.pczt]
+audit-as-crates-io = false
+
 [policy.shardtree]
 audit-as-crates-io = true
 

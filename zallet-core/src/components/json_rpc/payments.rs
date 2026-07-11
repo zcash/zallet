@@ -1,10 +1,16 @@
-use std::{collections::HashSet, convert::Infallible, fmt};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    convert::Infallible,
+    fmt,
+    sync::{LazyLock, Mutex},
+};
 
 use abscissa_core::Application;
 use jsonrpsee::core::JsonValue;
 use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
     data_api::{
@@ -634,6 +640,63 @@ mod parse_memo_tests {
             "Invalid parameter, expected memo data in hexadecimal format."
         );
     }
+}
+
+/// Maximum number of proposal policies retained by [`RequiredPolicyCache`].
+const REQUIRED_POLICY_CACHE_CAPACITY: usize = 256;
+
+/// A bounded, insertion-ordered cache mapping a PCZT (by content hash) to the [`PrivacyPolicy`]
+/// required to execute it.
+///
+/// `z_proposetransaction` computes the required policy exactly from the proposal and records it
+/// here; `z_finalizetransaction` looks it up to enforce that the caller acknowledged a sufficient
+/// policy, without having to re-derive it from the (lossy) PCZT. Entries are evicted in insertion
+/// order once the capacity is exceeded.
+struct RequiredPolicyCache {
+    by_pczt: HashMap<[u8; 32], PrivacyPolicy>,
+    order: VecDeque<[u8; 32]>,
+    capacity: usize,
+}
+
+impl RequiredPolicyCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            by_pczt: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn insert(&mut self, key: [u8; 32], policy: PrivacyPolicy) {
+        // Re-inserting an existing key just refreshes the policy without growing the cache.
+        if self.by_pczt.insert(key, policy).is_none() {
+            self.order.push_back(key);
+            while self.order.len() > self.capacity {
+                if let Some(evicted) = self.order.pop_front() {
+                    self.by_pczt.remove(&evicted);
+                }
+            }
+        }
+    }
+}
+
+static REQUIRED_POLICY_CACHE: LazyLock<Mutex<RequiredPolicyCache>> =
+    LazyLock::new(|| Mutex::new(RequiredPolicyCache::new(REQUIRED_POLICY_CACHE_CAPACITY)));
+
+/// The cache key for a PCZT: the SHA-256 of its serialized bytes.
+///
+/// `z_proposetransaction` and `z_finalizetransaction` hash the same canonical serialization, so
+/// the policy recorded at proposal time is found again at finalize time.
+pub(super) fn pczt_policy_key(pczt_bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(pczt_bytes).into()
+}
+
+/// Records the privacy policy required to execute the PCZT identified by `key`.
+pub(super) fn record_required_policy(key: [u8; 32], policy: PrivacyPolicy) {
+    REQUIRED_POLICY_CACHE
+        .lock()
+        .expect("policy cache mutex is not poisoned")
+        .insert(key, policy);
 }
 
 /// Whether change may be returned to the transparent pool.

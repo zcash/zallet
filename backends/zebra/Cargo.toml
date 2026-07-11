@@ -85,6 +85,7 @@ tokio-console = ["zallet-core/tokio-console"]
 # all three manifests and lockfiles at once); do not edit these revs by hand.
 equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
 f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
 transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
 zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
 zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }

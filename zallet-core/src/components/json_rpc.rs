@@ -23,6 +23,7 @@ use super::sync::WalletDecryptorHandle;
 
 #[cfg(zallet_build = "wallet")]
 mod asyncop;
+mod fund_source;
 pub(crate) mod methods;
 #[cfg(zallet_build = "wallet")]
 mod payments;

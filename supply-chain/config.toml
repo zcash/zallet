@@ -42,6 +42,9 @@ audit-as-crates-io = true
 [policy."orchard:0.15.0-pre.2@git:475ef0ff77d45aebff93cb039d639250d82518a3"]
 audit-as-crates-io = true
 
+[policy.pczt]
+audit-as-crates-io = false
+
 [policy.shardtree]
 audit-as-crates-io = true
 
@@ -397,6 +400,18 @@ criteria = "safe-to-deploy"
 
 [[exemptions.daggy]]
 version = "0.8.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.darling]]
+version = "0.21.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.darling_core]]
+version = "0.21.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.darling_macro]]
+version = "0.21.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.deadpool]]
@@ -1233,6 +1248,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.serde_spanned]]
 version = "1.1.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_with]]
+version = "3.17.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_with_macros]]
+version = "3.17.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.serdect]]
