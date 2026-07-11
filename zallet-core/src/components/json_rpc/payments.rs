@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt};
+use std::{collections::HashSet, convert::Infallible, fmt};
 
 use abscissa_core::Application;
 use jsonrpsee::core::JsonValue;
@@ -7,17 +7,29 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
-    data_api::WalletRead,
+    data_api::{
+        WalletRead,
+        wallet::{
+            ConfirmationsPolicy,
+            input_selection::{GreedyInputSelector, SpendPolicy},
+            propose_transfer,
+        },
+    },
+    fees::{
+        DustOutputPolicy, StandardFeeRule, TransparentChangePolicy,
+        standard::MultiOutputChangeStrategy,
+    },
     proposal::Proposal,
     zip321::{Payment, TransactionRequest},
 };
-use zcash_client_sqlite::wallet::Account;
+use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, wallet::Account};
 use zcash_keys::address::Address;
-use zcash_protocol::{PoolType, TxId, memo::MemoBytes, value::Zatoshis};
+use zcash_protocol::{PoolType, ShieldedPool, TxId, memo::MemoBytes, value::Zatoshis};
 
 use crate::{
     components::{chain::Chain, database::DbConnection},
     fl,
+    network::Network,
     prelude::APP,
 };
 
@@ -622,6 +634,93 @@ mod parse_memo_tests {
             "Invalid parameter, expected memo data in hexadecimal format."
         );
     }
+}
+
+/// Whether change may be returned to the transparent pool.
+///
+/// Permitted exactly when `spend_policy` can spend transparent funds in the first place, which
+/// keeps a fully transparent send transparent end to end rather than sweeping its change into a
+/// shielded pool. A shielded send therefore cannot acquire a transparent change output by this
+/// route.
+///
+/// The change strategy independently enforces the same thing (it emits transparent change only
+/// when the transaction's net flows are fully transparent, i.e. it has no shielded input or
+/// output at all), but that is its invariant, not ours.
+pub(super) fn transparent_change_policy_for(spend_policy: &SpendPolicy) -> TransparentChangePolicy {
+    match spend_policy.transparent() {
+        Some(_) => TransparentChangePolicy::TransparentChangeAllowed,
+        None => TransparentChangePolicy::ShieldChange,
+    }
+}
+
+/// Proposes a transfer of `request` from `account`, drawing only on the funds `spend_policy`
+/// permits.
+///
+/// Every send path builds its proposal here, so they agree on the fee rule, the change strategy,
+/// and the input selector, and differ only in the spend policy they ask for. That policy is what
+/// distinguishes `z_sendmany`'s source address from the account methods' `fund_source`.
+///
+/// The privacy policy is deliberately not consulted: the selector returns its best proposal, and
+/// `enforce_privacy_policy` rejects it afterwards if it leaks more than the caller permitted.
+pub(super) fn propose_transfer_with_policy(
+    wallet: &mut DbConnection,
+    params: &Network,
+    account: AccountUuid,
+    request: TransactionRequest,
+    confirmations_policy: ConfirmationsPolicy,
+    spend_policy: &SpendPolicy,
+) -> RpcResult<Proposal<StandardFeeRule, ReceivedNoteId>> {
+    // Where shielded change goes when the transaction has no shielded flows to infer a pool
+    // from. A transaction that does have shielded flows ignores this and keeps its change in
+    // the pool it is already using.
+    //
+    // This stays Orchard rather than Ironwood: the change strategy promotes it to Ironwood
+    // itself once NU6.3 is active (the turnstile forbids value from entering the Orchard pool,
+    // so change out of a purely transparent transaction has to land in Ironwood), and it does
+    // so against the transaction's target height, which is not known here. Naming Ironwood
+    // outright would instead send change to a pool that does not exist yet on a chain where
+    // NU6.3 has not activated.
+    let fallback_change_pool = ShieldedPool::Orchard;
+
+    // Shielded change is split across several notes, per the wallet's note-management
+    // configuration, so the account keeps a usable set of denominations.
+    let split_policy = APP.config().note_management.split_policy();
+
+    // Change too small to be worth its own output is added to the fee instead.
+    let dust_output_policy = DustOutputPolicy::default();
+
+    // No memo is attached to change. A change memo would force the change into a shielded
+    // pool, since a transparent output cannot carry one.
+    let change_memo = None;
+
+    let change_strategy = MultiOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        change_memo,
+        fallback_change_pool,
+        dust_output_policy,
+        split_policy,
+    )
+    .with_transparent_change_policy(transparent_change_policy_for(spend_policy));
+
+    let input_selector = GreedyInputSelector::new();
+
+    // Do not request a specific transaction version; building falls back to the version implied
+    // by the target height.
+    let proposed_version = None;
+
+    propose_transfer::<_, _, _, _, Infallible>(
+        wallet,
+        params,
+        account,
+        &input_selector,
+        &change_strategy,
+        request,
+        confirmations_policy,
+        spend_policy,
+        proposed_version,
+    )
+    // TODO: Map errors to `zcashd` shape.
+    .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))
 }
 
 pub(super) fn get_account_for_address(
