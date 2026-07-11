@@ -668,6 +668,10 @@ impl RequiredPolicyCache {
         }
     }
 
+    fn get(&self, key: &[u8; 32]) -> Option<PrivacyPolicy> {
+        self.by_pczt.get(key).copied()
+    }
+
     fn insert(&mut self, key: [u8; 32], policy: PrivacyPolicy) {
         // Re-inserting an existing key just refreshes the policy without growing the cache.
         if self.by_pczt.insert(key, policy).is_none() {
@@ -698,6 +702,15 @@ pub(super) fn record_required_policy(key: [u8; 32], policy: PrivacyPolicy) {
         .lock()
         .expect("policy cache mutex is not poisoned")
         .insert(key, policy);
+}
+
+/// Returns the previously-recorded required policy for the PCZT identified by `key`, if it is
+/// still cached.
+pub(super) fn cached_required_policy(key: &[u8; 32]) -> Option<PrivacyPolicy> {
+    REQUIRED_POLICY_CACHE
+        .lock()
+        .expect("policy cache mutex is not poisoned")
+        .get(key)
 }
 
 /// Whether change may be returned to the transparent pool.

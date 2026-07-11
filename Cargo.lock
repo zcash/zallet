@@ -5570,6 +5570,7 @@ dependencies = [
  "base64ct",
  "bech32 0.11.1",
  "bip0039",
+ "bip32",
  "blake2b_simd",
  "clap",
  "clap_complete",

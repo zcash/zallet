@@ -63,6 +63,8 @@ mod validate_address;
 mod verify_message;
 mod view_transaction;
 #[cfg(zallet_build = "wallet")]
+mod z_finalize_transaction;
+#[cfg(zallet_build = "wallet")]
 mod z_get_balance_for_account;
 #[cfg(zallet_build = "wallet")]
 mod z_get_total_balance;
@@ -646,6 +648,25 @@ pub(crate) trait WalletRpc {
     ///
     /// The privacy policy required to execute the proposal is computed from the resulting
     /// transaction and returned alongside the PCZT; the caller does not supply one.
+    /// Finalizes a proposed transaction, signing and broadcasting it.
+    ///
+    /// Takes a PCZT produced by `z_proposetransaction`, applies this account's spend
+    /// authorizing signatures and proofs, extracts the resulting transaction, and broadcasts
+    /// it, returning the resulting txid.
+    ///
+    /// # Arguments
+    /// - `account`: The UUID of the account whose keys should sign the transaction.
+    /// - `pczt`: The hex-encoded PCZT to finalize, as returned by `z_proposetransaction`.
+    /// - `privacy_policy`: Policy for what information leakage is acceptable, acknowledging
+    ///   the privacy implications reported by `z_proposetransaction`.
+    #[method(name = "z_finalizetransaction")]
+    async fn z_finalize_transaction(
+        &self,
+        account: JsonValue,
+        pczt: String,
+        privacy_policy: String,
+    ) -> z_finalize_transaction::Response;
+
     #[method(name = "z_proposetransaction")]
     async fn z_propose_transaction(
         &self,
@@ -1120,6 +1141,23 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             key,
             rescan,
             start_height,
+        )
+        .await
+    }
+
+    async fn z_finalize_transaction(
+        &self,
+        account: JsonValue,
+        pczt: String,
+        privacy_policy: String,
+    ) -> z_finalize_transaction::Response {
+        z_finalize_transaction::call(
+            self.wallet().await?,
+            self.keystore.clone(),
+            self.chain().await?,
+            account,
+            pczt,
+            privacy_policy,
         )
         .await
     }
