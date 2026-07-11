@@ -159,6 +159,43 @@ on `PATH` at run time.
 
 PRs MUST NOT introduce new warnings from `cargo +beta clippy --tests --all-features --all-targets`. Preexisting beta clippy warnings need not be resolved, but new ones introduced by a PR will block merging.
 
+## Testing Scope: Unit Tests Only
+
+**This repository does NOT host integration tests or scenario tests.** Those
+live in [zcash/integration-tests](https://github.com/zcash/integration-tests),
+which drives the whole Z3 stack (`zebrad` + `zainod` + `zallet`) over real RPC
+against a regtest chain. Do not add a test here that stands up a chain, mines
+blocks, sends a transaction end to end, or otherwise asserts on the behaviour of
+the stack as a whole; it belongs there.
+
+What belongs here is unit tests: fast, in-process, no chain, no network, no
+fixture wallet seeded by mining. Test the pure logic a function owns, at the
+boundary where a decision is actually made:
+
+- Pure derivations and policy decisions (e.g. "a transparent `fromaddress`
+  yields a spend policy that permits only that address's UTXOs, and no shielded
+  pool").
+- Parsing, validation, and error mapping of RPC parameters.
+- Serialization and response shapes.
+- Property tests (`proptest`) over the above where the input space is wide.
+  Prefer a property over a fixture: derive the key material from an arbitrary
+  seed rather than a hardcoded one, so the property is established for every
+  input rather than for the one that happened to be written down.
+
+Assert on the whole of a value rather than enumerating its parts, so a test does
+not silently stop covering a variant added later. Prefer "the permitted-pool set
+is empty" to a loop over today's three pools.
+
+If a piece of logic can only be tested by building a chain, that is usually a
+sign it should be extracted into a pure function that CAN be unit-tested, with
+the remaining end-to-end behaviour covered in `integration-tests`. Prefer
+extracting.
+
+A change to this repository that needs new stack-level coverage should be paired
+with a PR to `integration-tests`, referenced from the description, and wired via
+a `ZIT-Revision: <branch>` line so this repository's CI exercises it (see the
+Cross-Repository CI Integration docs).
+
 ## Auditing Dependency Version Bumps
 
 This applies to any change to a pinned dependency version: the `Dockerfile` and `Dockerfile.stagex` apt pins and base-image digests, and by extension any other pinned external artifact.
