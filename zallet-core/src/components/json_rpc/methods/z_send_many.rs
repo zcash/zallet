@@ -322,48 +322,7 @@ pub(crate) async fn call<C: Chain>(
 
     enforce_privacy_policy(&proposal, privacy_policy)?;
 
-    let orchard_actions_limit = APP.config().builder.limits.orchard_actions().into();
-    for step in proposal.steps() {
-        let orchard_spends = step
-            .shielded_inputs()
-            .iter()
-            .flat_map(|inputs| inputs.notes())
-            .filter(|note| note.note().pool() == ShieldedPool::Orchard)
-            .count();
-
-        let orchard_outputs = step
-            .payment_pools()
-            .values()
-            .filter(|pool| pool == &&PoolType::ORCHARD)
-            .count()
-            + step
-                .balance()
-                .proposed_change()
-                .iter()
-                .filter(|change| change.output_pool() == PoolType::ORCHARD)
-                .count();
-
-        let orchard_actions = orchard_spends.max(orchard_outputs);
-
-        if orchard_actions > orchard_actions_limit {
-            let (count, kind) = if orchard_outputs <= orchard_actions_limit {
-                (orchard_spends, "inputs")
-            } else if orchard_spends <= orchard_actions_limit {
-                (orchard_outputs, "outputs")
-            } else {
-                (orchard_actions, "actions")
-            };
-
-            return Err(LegacyCode::Misc.with_message(fl!(
-                "err-excess-orchard-actions",
-                count = count,
-                kind = kind,
-                limit = orchard_actions_limit,
-                config = "-orchardactionlimit=N",
-                bound = format!("N >= %u"),
-            )));
-        }
-    }
+    check_orchard_actions_limit(&proposal)?;
 
     let derivation = account.source().key_derivation().ok_or_else(|| {
         LegacyCode::InvalidAddressOrKey
@@ -419,6 +378,64 @@ pub(crate) async fn call<C: Chain>(
     ))
 }
 
+/// Rejects a proposal whose Orchard action count exceeds the configured limit.
+///
+/// A step's action count is the greater of its Orchard spends and its Orchard outputs (an
+/// action carries at most one of each), so the limit is checked against that maximum, and the
+/// error names whichever of the two actually breached it.
+///
+/// Shared with the account-based transaction methods, which enforce the same limit on the
+/// proposals they build.
+pub(super) fn check_orchard_actions_limit<NoteRef>(
+    proposal: &Proposal<StandardFeeRule, NoteRef>,
+) -> RpcResult<()> {
+    let orchard_actions_limit = APP.config().builder.limits.orchard_actions().into();
+
+    for step in proposal.steps() {
+        let orchard_spends = step
+            .shielded_inputs()
+            .iter()
+            .flat_map(|inputs| inputs.notes())
+            .filter(|note| note.note().pool() == ShieldedPool::Orchard)
+            .count();
+
+        let orchard_outputs = step
+            .payment_pools()
+            .values()
+            .filter(|pool| pool == &&PoolType::ORCHARD)
+            .count()
+            + step
+                .balance()
+                .proposed_change()
+                .iter()
+                .filter(|change| change.output_pool() == PoolType::ORCHARD)
+                .count();
+
+        let orchard_actions = orchard_spends.max(orchard_outputs);
+
+        if orchard_actions > orchard_actions_limit {
+            let (count, kind) = if orchard_outputs <= orchard_actions_limit {
+                (orchard_spends, "inputs")
+            } else if orchard_spends <= orchard_actions_limit {
+                (orchard_outputs, "outputs")
+            } else {
+                (orchard_actions, "actions")
+            };
+
+            return Err(LegacyCode::Misc.with_message(fl!(
+                "err-excess-orchard-actions",
+                count = count,
+                kind = kind,
+                limit = orchard_actions_limit,
+                config = "-orchardactionlimit=N",
+                bound = format!("N >= %u"),
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Construct and send the transaction, returning the resulting txid.
 /// Errors in transaction construction will throw.
 ///
@@ -432,7 +449,7 @@ pub(crate) async fn call<C: Chain>(
 /// 2. #1360 Note selection is not optimal.
 /// 3. #1277 Spendable notes are not locked, so an operation running in parallel
 ///    could also try to use them.
-async fn run<C: Chain>(
+pub(super) async fn run<C: Chain>(
     mut wallet: DbHandle,
     chain: C,
     account_id: AccountUuid,
