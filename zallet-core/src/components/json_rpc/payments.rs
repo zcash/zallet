@@ -630,39 +630,68 @@ mod parse_memo_tests {
 
 #[cfg(test)]
 mod legacy_pool_tests {
+    use proptest::prelude::*;
     use zip32::{AccountId, fingerprint::SeedFingerprint};
 
     use super::{ZCASH_LEGACY_ACCOUNT, is_legacy_pool_account};
 
-    /// The legacy pool is one account of one seed: the account at the legacy ZIP 32 index,
-    /// derived from the seed the operator named. Nothing else may be spent as `ANY_TADDR`,
-    /// since every other account is a separate pool of funds under Zallet's semantics.
-    #[test]
-    fn legacy_pool_is_only_the_named_seeds_legacy_account() {
-        let legacy_seed_fp = SeedFingerprint::from_bytes([1; 32]);
-        let other_seed_fp = SeedFingerprint::from_bytes([2; 32]);
-        let legacy_index = AccountId::try_from(ZCASH_LEGACY_ACCOUNT)
-            .expect("the legacy account index is a valid ZIP 32 account index");
+    /// A ZIP 32 account index that is not the legacy one. Indices are non-hardened, so they
+    /// occupy the low 31 bits, and the legacy index is the largest of them.
+    fn arb_regular_account_index() -> impl Strategy<Value = u32> {
+        0u32..ZCASH_LEGACY_ACCOUNT
+    }
 
-        assert!(is_legacy_pool_account(
-            &legacy_seed_fp,
-            legacy_index,
-            &legacy_seed_fp,
-        ));
+    proptest! {
+        /// The legacy pool is one account of one seed: the account at the legacy ZIP 32
+        /// index, derived from the seed the operator named. Nothing else may be spent as
+        /// `ANY_TADDR`, since every other account is a separate pool of funds under Zallet's
+        /// semantics.
+        ///
+        /// Established over arbitrary seeds and arbitrary regular account indices, rather
+        /// than a hardcoded pair, so it holds for whatever seed a wallet actually carries.
+        #[test]
+        fn legacy_pool_is_only_the_named_seeds_legacy_account(
+            legacy_seed in any::<[u8; 32]>(),
+            other_seed in any::<[u8; 32]>(),
+            regular_index in arb_regular_account_index(),
+        ) {
+            // Two distinct `zcashd` wallets, hence two distinct seeds.
+            prop_assume!(legacy_seed != other_seed);
 
-        // A regular account of the legacy seed is a pool of funds in its own right.
-        assert!(!is_legacy_pool_account(
-            &legacy_seed_fp,
-            AccountId::ZERO,
-            &legacy_seed_fp,
-        ));
+            let legacy_seed_fp = SeedFingerprint::from_bytes(legacy_seed);
+            let other_seed_fp = SeedFingerprint::from_bytes(other_seed);
+            let legacy_index = AccountId::try_from(ZCASH_LEGACY_ACCOUNT)
+                .expect("the legacy account index is a valid ZIP 32 account index");
+            let regular_index = AccountId::try_from(regular_index)
+                .expect("indices below the legacy one are valid ZIP 32 account indices");
 
-        // Another `zcashd` wallet's legacy account is not this wallet's legacy pool.
-        assert!(!is_legacy_pool_account(
-            &other_seed_fp,
-            legacy_index,
-            &legacy_seed_fp,
-        ));
+            prop_assert!(is_legacy_pool_account(
+                &legacy_seed_fp,
+                legacy_index,
+                &legacy_seed_fp,
+            ));
+
+            // A regular account of the legacy seed is a pool of funds in its own right.
+            prop_assert!(!is_legacy_pool_account(
+                &legacy_seed_fp,
+                regular_index,
+                &legacy_seed_fp,
+            ));
+
+            // Another `zcashd` wallet's legacy account is not this wallet's legacy pool.
+            prop_assert!(!is_legacy_pool_account(
+                &other_seed_fp,
+                legacy_index,
+                &legacy_seed_fp,
+            ));
+
+            // And neither is any other account of that other wallet.
+            prop_assert!(!is_legacy_pool_account(
+                &other_seed_fp,
+                regular_index,
+                &legacy_seed_fp,
+            ));
+        }
     }
 }
 
