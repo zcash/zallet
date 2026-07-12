@@ -259,8 +259,8 @@ jobs:
 
           # Basic sanity check: the export image carries three binaries at its
           # root (zcash/zallet#540): /zallet is the launcher, and
-          # /zallet-zebra + /zallet-zaino are the real backend binaries.
-          for bin in zallet zallet-zebra zallet-zaino; do
+          # /zallet-zebra, /zallet-zaino, and /zallet-zinder are the real backend binaries.
+          for bin in zallet zallet-zebra zallet-zaino zallet-zinder; do
             if [[ ! -s "${ARTIFACT_ROOT}/${bin}" ]]; then
               echo "Missing ${bin} binary under ${ARTIFACT_ROOT}" >&2
               find "${ARTIFACT_ROOT}" -maxdepth 5 || true
@@ -277,6 +277,7 @@ jobs:
           install -m 0755 "${ARTIFACT_ROOT}/zallet"             "build/${PLATFORM_KEY}/zallet"
           install -m 0755 "${ARTIFACT_ROOT}/zallet-zebra" "build/${PLATFORM_KEY}/zallet-zebra"
           install -m 0755 "${ARTIFACT_ROOT}/zallet-zaino"       "build/${PLATFORM_KEY}/zallet-zaino"
+          install -m 0755 "${ARTIFACT_ROOT}/zallet-zinder"      "build/${PLATFORM_KEY}/zallet-zinder"
 
           # Copy the usr/local tree as-is (completions, manpages, docs, etc.)
           # If there is no usr/local in the artifact, this won't fail because of '|| true'
@@ -306,6 +307,10 @@ jobs:
             -v "$PWD/build/${{ matrix.platform_key }}/zallet-zaino":/usr/local/bin/zallet-zaino:ro \
             "debian:${SMOKE_TEST_DISTRO}-slim" \
             /usr/local/bin/zallet-zaino -h
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "$PWD/build/${{ matrix.platform_key }}/zallet-zinder":/usr/local/bin/zallet-zinder:ro \
+            "debian:${SMOKE_TEST_DISTRO}-slim" \
+            /usr/local/bin/zallet-zinder -h
 
       - name: Prepare standalone binary artifact
         env:
@@ -322,6 +327,7 @@ jobs:
           # `-launcher` artifact rather than replacing the plain name.
           cp "build/${PLATFORM_KEY}/zallet-zebra" "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}"
           cp "build/${PLATFORM_KEY}/zallet-zaino"       "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}-zaino"
+          cp "build/${PLATFORM_KEY}/zallet-zinder"      "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}-zinder"
           cp "build/${PLATFORM_KEY}/zallet"             "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}-launcher"
 
       - name: Generate provenance chain metadata
@@ -369,7 +375,8 @@ jobs:
         run: |
           set -euo pipefail
           for b in "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}" \
-                   "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}-zaino"; do
+                   "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}-zaino" \
+                   "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}-zinder"; do
             gpg -u sysadmin@zodl.com --armor --digest-algo SHA256 --detach-sign "$b"
           done
 
@@ -383,8 +390,8 @@ jobs:
           from pathlib import Path
 
           base = f"standalone/zallet-{os.environ['RELEASE_VERSION']}-{os.environ['BINARY_SUFFIX']}"
-          # SBOM for both backend binaries (default zebra-state + additive zaino).
-          for binary_path in (Path(base), Path(f"{base}-zaino")):
+          # SBOM for every backend binary.
+          for binary_path in (Path(base), Path(f"{base}-zaino"), Path(f"{base}-zinder")):
               if not binary_path.exists():
                   raise SystemExit(f"Missing binary at {binary_path}")
               checksum = hashlib.sha256(binary_path.read_bytes()).hexdigest()
@@ -413,6 +420,7 @@ jobs:
           subject-path: |
             standalone/zallet-${{ env.RELEASE_VERSION }}-${{ matrix.binary_suffix }}
             standalone/zallet-${{ env.RELEASE_VERSION }}-${{ matrix.binary_suffix }}-zaino
+            standalone/zallet-${{ env.RELEASE_VERSION }}-${{ matrix.binary_suffix }}-zinder
             standalone/zallet-${{ env.RELEASE_VERSION }}-${{ matrix.binary_suffix }}-launcher
 
       - name: Save binary attestation bundle
@@ -423,6 +431,7 @@ jobs:
           # binary has a co-located .intoto.jsonl next to it in the Release.
           cp -- "$BUNDLE_PATH" "standalone/zallet-${RELEASE_VERSION}-${{ matrix.binary_suffix }}.intoto.jsonl"
           cp -- "$BUNDLE_PATH" "standalone/zallet-${RELEASE_VERSION}-${{ matrix.binary_suffix }}-zaino.intoto.jsonl"
+          cp -- "$BUNDLE_PATH" "standalone/zallet-${RELEASE_VERSION}-${{ matrix.binary_suffix }}-zinder.intoto.jsonl"
           cp -- "$BUNDLE_PATH" "standalone/zallet-${RELEASE_VERSION}-${{ matrix.binary_suffix }}-launcher.intoto.jsonl"
 
       - name: Seed cargo target tree with the imported artifacts
@@ -443,12 +452,13 @@ jobs:
 
           # Seed the launcher and both real backend binaries for cargo-deb
           # --no-build: the `zallet` package installs `zallet` = the launcher
-          # plus the two backend binaries it dispatches to (zcash/zallet#540;
+          # plus the backend binaries it dispatches to (zcash/zallet#540;
           # the pre-split zallet-zebra *symlink* is obsolete — it is a
           # real binary now).
           install -m 0755 "build/${PLATFORM_KEY}/zallet"             "${TARGET_DIR}/zallet"
           install -m 0755 "build/${PLATFORM_KEY}/zallet-zebra" "${TARGET_DIR}/zallet-zebra"
           install -m 0755 "build/${PLATFORM_KEY}/zallet-zaino"       "${TARGET_DIR}/zallet-zaino"
+          install -m 0755 "build/${PLATFORM_KEY}/zallet-zinder"      "${TARGET_DIR}/zallet-zinder"
 
           # Copy the whole completions tree (whatever is inside)
           cp -a "${ROOT}/completions/." "${COMPLETIONS_DIR}/" 2>/dev/null || true
@@ -458,7 +468,7 @@ jobs:
 
           # Copy Debian copyright metadata. The license inventory is generated
           # by gen-copyright on the amd64 StageX path only; it is the union of
-          # all three shipped binaries' dependency graphs and arch-independent,
+          # all shipped binaries' dependency graphs and arch-independent,
           # so the arm64 (Nix-built) leg reuses the amd64 artifact's copy.
           if [[ -f "${ROOT}/debian-copyright" ]]; then
             install -m 0644 "${ROOT}/debian-copyright" "${TARGET_DIR}/debian-copyright"

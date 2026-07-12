@@ -82,11 +82,15 @@ RUN set -eux; \
     cargo build --release --locked \
       --manifest-path backends/zebra/Cargo.toml \
       --bin zallet-zebra --features rpc-cli,zcashd-import; \
+    cargo build --release --locked \
+      --manifest-path backends/zinder/Cargo.toml \
+      --bin zallet-zinder --features rpc-cli,zcashd-import; \
     # The user-facing `zallet` command is the launcher (root workspace); it
     # dispatches to the backend binary installed next to it.
     cargo build --release --locked --bin zallet; \
     install -D -m0755 target/release/zallet /out/zallet; \
     install -D -m0755 backends/zebra/target/release/zallet-zebra /out/zallet-zebra; \
+    install -D -m0755 backends/zinder/target/release/zallet-zinder /out/zallet-zinder; \
     # Collect the build.rs-generated share tree (completions, manpages,
     # debian-copyright), matching the StageX export layout where present.
     REL="backends/zebra/target/release"; \
@@ -102,6 +106,7 @@ RUN set -eux; \
 FROM scratch AS export
 COPY --from=builder /out/zallet /zallet
 COPY --from=builder /out/zallet-zebra /zallet-zebra
+COPY --from=builder /out/zallet-zinder /zallet-zinder
 COPY --from=builder /out/usr/local/share/zallet /usr/local/share/zallet
 
 # --- Stage 3: minimal runtime -----------------------------------------------
@@ -120,6 +125,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 COPY --from=builder /out/zallet /usr/local/bin/zallet
 COPY --from=builder /out/zallet-zebra /usr/local/bin/zallet-zebra
+COPY --from=builder /out/zallet-zinder /usr/local/bin/zallet-zinder
 COPY --from=builder /out/usr/local/share/zallet /usr/local/share/zallet
 USER 1000:1000
 WORKDIR /var/lib/zallet

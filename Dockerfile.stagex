@@ -35,8 +35,8 @@ ENV RUSTFLAGS="\
 WORKDIR /usr/src/zallet
 COPY . .
 
-# Fetch dependencies for all three resolution graphs (zcash/zallet#540): the
-# root workspace (launcher + zallet-core + tools) and the two backend
+# Fetch dependencies for all resolution graphs (zcash/zallet#540): the
+# root workspace (launcher + zallet-core + tools) and the backend
 # workspaces, each with its own lockfile.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -44,9 +44,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cargo fetch --locked --target ${TARGET_ARCH} \
         --manifest-path backends/zebra/Cargo.toml \
     && cargo fetch --locked --target ${TARGET_ARCH} \
-        --manifest-path backends/zaino/Cargo.toml
+        --manifest-path backends/zaino/Cargo.toml \
+    && cargo fetch --locked --target ${TARGET_ARCH} \
+        --manifest-path backends/zinder/Cargo.toml
 
-# Build the two backend binaries (each from its own workspace) and the
+# Build the backend binaries (each from its own workspace) and the
 # user-facing `zallet` launcher, which dispatches to whichever backend binary
 # the config's `backend` key names, installed next to itself.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -66,19 +68,25 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         --features rpc-cli,zcashd-import \
     && cargo install \
         --frozen \
+        --path backends/zinder \
+        --bin zallet-zinder \
+        --target ${TARGET_ARCH} \
+        --features rpc-cli,zcashd-import \
+    && cargo install \
+        --frozen \
         --path zallet \
         --bin zallet \
         --target ${TARGET_ARCH} \
     && OUT="/usr/src/zallet/target/${TARGET_ARCH}/release" \
     \
     # Copy completions and manpages out of the cache mount. They are generated
-    # by zallet-core's build script (both backend builds emit identical trees
+    # by zallet-core's build script (backend builds emit identical trees
     # into the shared target dir; the CLI surface is the same `zallet` command).
     && install -d /usr/local/share/zallet \
     && cp -a "${OUT}/completions" /usr/local/share/zallet/completions \
     && cp -a "${OUT}/manpages"  /usr/local/share/zallet/manpages \
     \
-    # Generate the Debian copyright file across the UNION of the three shipped
+    # Generate the Debian copyright file across the UNION of the shipped
     # binaries' dependency graphs (gen-copyright resolves each workspace's
     # lockfile; the per-binary graphs differ, so no single build can see all).
     #
@@ -99,10 +107,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # --- Stage 2: layer for local binary extraction ---
 FROM scratch AS export
 
-# All three binaries at the root: the launcher + the two real backend binaries.
+# The launcher and every backend binary at the root.
 COPY --from=builder /usr/local/cargo/bin/zallet /zallet
 COPY --from=builder /usr/local/cargo/bin/zallet-zebra /zallet-zebra
 COPY --from=builder /usr/local/cargo/bin/zallet-zaino /zallet-zaino
+COPY --from=builder /usr/local/cargo/bin/zallet-zinder /zallet-zinder
 
 # Export the whole zallet share tree (completions, manpages, metadata, etc.)
 COPY --from=builder /usr/local/share/zallet /usr/local/share/zallet
@@ -113,10 +122,11 @@ USER 1000:1000
 # `zallet` is the launcher: it reads the config's `backend` key (default
 # `zebra-state`) and execs the matching backend binary installed next to it.
 # Consumers that want a specific backend can also run `zallet-zebra` or
-# `zallet-zaino` directly (e.g. z3, or anyone whose zebrad is NOT built with
+# `zallet-zaino` or `zallet-zinder` directly (e.g. z3, or anyone whose zebrad is NOT built with
 # the `indexer` feature, runs the zaino backend).
 COPY --from=export /zallet /usr/local/bin/zallet
 COPY --from=export /zallet-zebra /usr/local/bin/zallet-zebra
 COPY --from=export /zallet-zaino /usr/local/bin/zallet-zaino
+COPY --from=export /zallet-zinder /usr/local/bin/zallet-zinder
 WORKDIR /var/lib/zallet
 ENTRYPOINT ["zallet"]

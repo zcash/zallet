@@ -164,7 +164,7 @@ tonic = "0.14"
 # This should point to a proper release on crates.io
 #
 # Update the librustzcash rev ONLY via utils/sync-librustzcash.sh: it keeps all
-# three workspace manifests (root, backends/zebra, backends/zaino) and their
+# workspace manifests (root plus every backend) and their
 # lockfiles on one identical rev, which utils/check-lockstep.sh enforces in CI.
 # Do not edit these revs by hand.
 equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }

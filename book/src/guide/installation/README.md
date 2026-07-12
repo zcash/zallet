@@ -14,8 +14,8 @@ the simplest options:
 
 ## Choosing a chain backend
 
-Zallet supports two chain backends. Each is a separate binary (built from its own cargo
-workspace, so the two can track different `zebra` releases), and the `zallet` command is
+Zallet supports three chain backends. Each is a separate binary (built from its own cargo
+workspace, so the backends can track different chain-service releases), and the `zallet` command is
 a small launcher that runs whichever backend your config file names:
 
 ```toml
@@ -27,6 +27,7 @@ backend = "zaino"
 |---------|:-------:|----------|-----------------------|----------|:-------:|
 | `zebra-state` | Yes | Linux only | co-located `zebrad`'s state database (`ReadStateService`) | `zebrad` built with the `indexer` feature + `[indexer.read_state_service]` config + shared state dir | No |
 | `zaino` | No | Linux, macOS, Windows | co-located `zebrad`'s JSON-RPC endpoint (optionally reads state directly when `[indexer.read_state_service]` is set) | co-located `zebrad` JSON-RPC endpoint | Yes |
+| `zinder` | No | Linux, macOS, Windows | Zinder's native wallet gRPC API | `zinder-query`, its ingest-control proxy, and a store with `raw_blob_policy = "all"` | Yes |
 
 The **`zebra` backend** is the default. It reads finalized chain state directly from
 a co-located `zebrad`'s state database and is the recommended choice for production
@@ -34,10 +35,17 @@ mainnet use on Linux. It **only works against a `zebrad` built with the non-defa
 `indexer` feature**.
 
 The **`zaino` backend** fetches chain data over JSON-RPC. It is the only backend that
-supports regtest and non-Linux platforms, and it does **not** require the `zebrad`
+supports regtest and non-Linux platforms without a separate Zinder deployment, and it does **not** require the `zebrad`
 `indexer` feature — so it is the right choice when Zebra and Zallet run as separate
 services/containers over JSON-RPC (for example, the stock `zfnd/zebra` images or the
 [z3](https://github.com/ZcashFoundation/z3) stack), or when you need regtest.
+
+The **`zinder` backend** uses Zinder's epoch-pinned gRPC reads, chain and mempool
+event streams, and transaction broadcaster. Configure `[indexer.zinder]` with the
+`zinder-query` `host:port`. The Zinder writer must retain full block and transaction
+bytes (`raw_blob_policy = "all"`), and `zinder-query` must be connected to the
+writer's ingest-control endpoint. The backend fails startup if the network,
+contract revision, or required capabilities do not match.
 
 ### Pre-compiled artifacts (Docker image / Debian package)
 
@@ -48,13 +56,15 @@ The official Docker image and Debian package ship the launcher and **both** back
 | `zallet` | launcher | the default command / image `ENTRYPOINT`; dispatches on the config's `backend` key |
 | `zallet-zebra` | `zebra` backend | directly runnable |
 | `zallet-zaino` | `zaino` backend | directly runnable |
+| `zallet-zinder` | `zinder` backend | directly runnable |
 
 All three share the same CLI surface, config format, and subcommands; only the chain-data
 backend differs, and you can bypass the launcher by running a backend binary directly (it
-will refuse to run against a config whose `backend` key names the other backend). The
+will refuse to run against a config whose `backend` key names a different backend). The
 pre-compiled standalone binaries on the GitHub Releases page are:
 `zallet-<version>-linux-<arch>` (the self-sufficient zebra-state backend),
-`zallet-<version>-linux-<arch>-zaino` (the zaino backend), and
+`zallet-<version>-linux-<arch>-zaino` (the zaino backend),
+`zallet-<version>-linux-<arch>-zinder` (the zinder backend), and
 `zallet-<version>-linux-<arch>-launcher` (the launcher; it needs a backend binary
 installed next to it or on the `PATH`, so most single-binary deployments want one of the
 backend binaries instead).
@@ -70,6 +80,9 @@ cargo install --locked --git https://github.com/zcash/zallet.git zallet-zebra
 
 # The zaino backend
 cargo install --locked --git https://github.com/zcash/zallet.git zallet-zaino
+
+# The zinder backend
+cargo install --locked --git https://github.com/zcash/zallet.git zallet-zinder
 
 # The launcher (optional; dispatches to whichever backend the config names)
 cargo install --locked --git https://github.com/zcash/zallet.git zallet

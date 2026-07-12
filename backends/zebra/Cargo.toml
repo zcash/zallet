@@ -82,7 +82,7 @@ tokio-console = ["zallet-core/tokio-console"]
 # only the backend graphs use it.
 #
 # Update the librustzcash rev ONLY via utils/sync-librustzcash.sh (which syncs
-# all three manifests and lockfiles at once); do not edit these revs by hand.
+# all four manifests and lockfiles at once); do not edit these revs by hand.
 equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
 f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
 transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }

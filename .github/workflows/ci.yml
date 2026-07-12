@@ -62,6 +62,11 @@ jobs:
           cargo test
           --manifest-path backends/zebra/Cargo.toml
           --features zcashd-import,rpc-cli,tokio-console
+      - name: Run tests (zinder backend)
+        run: >
+          cargo test
+          --manifest-path backends/zinder/Cargo.toml
+          --features zcashd-import,rpc-cli,tokio-console
       # End-to-end check of the `zallet` launcher: config-driven dispatch to the
       # backend binaries, and the backend binaries' own backend-key validation.
       - name: Launcher dispatch smoke test
@@ -69,6 +74,7 @@ jobs:
           cargo build --bin zallet
           cargo build --manifest-path backends/zebra/Cargo.toml --bin zallet-zebra
           cargo build --manifest-path backends/zaino/Cargo.toml --bin zallet-zaino
+          cargo build --manifest-path backends/zinder/Cargo.toml --bin zallet-zinder
           bindir="$(mktemp -d)"
           datadir="$(mktemp -d)"
           cp target/debug/zallet "$bindir/"
@@ -97,11 +103,20 @@ jobs:
           cp backends/zaino/target/debug/zallet-zaino "$bindir/"
           "$bindir/zallet" --datadir "$datadir" --version
 
+          # The same config-driven dispatch works for the Zinder backend.
+          sed -i 's/backend = "zaino"/backend = "zinder"/' "$datadir/zallet.toml"
+          if out=$("$bindir/zallet" --datadir "$datadir" --version 2>&1); then
+            echo "expected dispatch to a missing zallet-zinder to fail"; exit 1
+          fi
+          echo "$out" | grep -q "zallet-zinder" || { echo "error did not name zallet-zinder: $out"; exit 1; }
+          cp backends/zinder/target/debug/zallet-zinder "$bindir/"
+          "$bindir/zallet" --datadir "$datadir" --version
+
           # Belt-and-braces: a backend binary invoked directly against a config
           # that names the other backend refuses to run.
           if out=$("$bindir/zallet-zebra" --datadir "$datadir" example-config -o - \
             --this-is-alpha-code-and-you-will-need-to-recreate-the-example-later 2>&1); then
-            echo "expected zallet-zebra to reject a backend=zaino config"; exit 1
+            echo "expected zallet-zebra to reject a backend=zinder config"; exit 1
           fi
           echo "$out" | grep -q "provides the 'zebra' backend" \
             || { echo "unexpected mismatch error: $out"; exit 1; }
@@ -185,7 +200,7 @@ jobs:
         # Multi-path rm requires bash: the Windows default shell (pwsh) aliases
         # `rm` to Remove-Item, which rejects multiple positional paths.
         shell: bash
-        run: rm Cargo.lock backends/zebra/Cargo.lock backends/zaino/Cargo.lock
+        run: rm Cargo.lock backends/zebra/Cargo.lock backends/zaino/Cargo.lock backends/zinder/Cargo.lock
       - name: Build crates (zallet-core)
         run: >
           cargo build
@@ -209,7 +224,7 @@ jobs:
         # The `--` is load-bearing: the deleted lockfiles are not regenerated on
         # platforms that skip a backend build, and git fatals on a pathspec for
         # a nonexistent path unless the paths are `--`-separated.
-        run: git diff --exit-code -- ':!Cargo.lock' ':!backends/zebra/Cargo.lock' ':!backends/zaino/Cargo.lock'
+        run: git diff --exit-code -- ':!Cargo.lock' ':!backends/zebra/Cargo.lock' ':!backends/zaino/Cargo.lock' ':!backends/zinder/Cargo.lock'
 
   trigger-integration:
     name: Trigger integration tests
