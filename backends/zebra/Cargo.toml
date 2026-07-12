@@ -96,9 +96,6 @@ zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "8
 zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
 zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
 
-zebra-chain = { git = "https://github.com/ZcashFoundation/zebra.git", rev = "f8ead3f229c29864364873c5267a8db3d6ced4a5" }
-zebra-state = { git = "https://github.com/ZcashFoundation/zebra.git", rev = "f8ead3f229c29864364873c5267a8db3d6ced4a5" }
-
 # Temporary pin to rage/main: the keystore uses age APIs (`EncryptedIdentity`,
 # `Send + Sync` bounds on `IdentityFile::into_identities`) that the 0.11.x
 # maintenance releases exclude. Replace with the crates.io release once

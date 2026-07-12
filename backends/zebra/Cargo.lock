@@ -460,26 +460,6 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.69.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "271383c67ccabffb7381723dea0672a673f292304fcb45c01cc648c7a8d58088"
-dependencies = [
- "bitflags",
- "cexpr",
- "clang-sys",
- "itertools 0.12.1",
- "lazy_static",
- "lazycell",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 1.1.0",
- "shlex 1.3.0",
- "syn 2.0.118",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
@@ -491,7 +471,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "regex",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "shlex 1.3.0",
  "syn 2.0.118",
 ]
@@ -1468,7 +1448,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1597,7 +1577,7 @@ dependencies = [
  "fluent-syntax",
  "intl-memoizer",
  "intl_pluralrules",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "self_cell",
  "smallvec",
  "unic-langid",
@@ -2638,7 +2618,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2652,15 +2632,6 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
-
-[[package]]
-name = "itertools"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
-dependencies = [
- "either",
-]
 
 [[package]]
 name = "itertools"
@@ -2738,7 +2709,7 @@ dependencies = [
  "parking_lot",
  "pin-project",
  "rand 0.8.7",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2888,12 +2859,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lazycell"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
-
-[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2938,14 +2903,13 @@ dependencies = [
 
 [[package]]
 name = "librocksdb-sys"
-version = "0.16.0+8.10.0"
+version = "0.17.3+10.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce3d60bc059831dc1c83903fb45c103f75db65c5a7bf22272764d9cc683e348c"
+checksum = "cef2a00ee60fe526157c9023edab23943fae1ce2ab6f4abb2a807c1746835de9"
 dependencies = [
- "bindgen 0.69.5",
+ "bindgen",
  "bzip2-sys",
  "cc",
- "glob",
  "libc",
  "libz-sys",
  "lz4-sys",
@@ -2980,7 +2944,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f8ce05b56f3cbc65ec7d0908adb308ed91281e022f61c8c3a0c9388b5380b17"
 dependencies = [
- "bindgen 0.72.1",
+ "bindgen",
  "cc",
  "thiserror 2.0.18",
  "tracing",
@@ -3435,7 +3399,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3840,7 +3804,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -3861,7 +3825,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -3930,7 +3894,7 @@ dependencies = [
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "rustls",
  "socket2",
  "thiserror 2.0.18",
@@ -3950,7 +3914,7 @@ dependencies = [
  "lru-slab",
  "rand 0.9.5",
  "ring",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "rustls",
  "rustls-pki-types",
  "slab",
@@ -4322,9 +4286,9 @@ dependencies = [
 
 [[package]]
 name = "rocksdb"
-version = "0.22.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bd13e55d6d7b8cd0ea569161127567cd587676c99f4472f779a0279aa60a7a7"
+checksum = "ddb7af00d2b17dbd07d82c0063e25411959748ff03e8d4f96134c2ff41fce34f"
 dependencies = [
  "libc",
  "librocksdb-sys",
@@ -4435,12 +4399,6 @@ checksum = "b50b8869d9fc858ce7266cce0194bd74df58b9d0e3f6df3a9fc8eb470d95c09d"
 
 [[package]]
 name = "rustc-hash"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
-
-[[package]]
-name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
@@ -4470,7 +4428,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5189,7 +5147,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5787,7 +5745,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb30dbbd9036155e74adad6812e9898d03ec374946234fbcebd5dfc7b9187b90"
 dependencies = [
- "rustc-hash 2.1.3",
+ "rustc-hash",
 ]
 
 [[package]]
@@ -6177,7 +6135,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7021,8 +6979,9 @@ dependencies = [
 
 [[package]]
 name = "zebra-chain"
-version = "11.0.0"
-source = "git+https://github.com/ZcashFoundation/zebra.git?rev=f8ead3f229c29864364873c5267a8db3d6ced4a5#f8ead3f229c29864364873c5267a8db3d6ced4a5"
+version = "11.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "014adde138ea00b1cf6c873aaf56aacb5aa0d55b8e5451a3e3b1b06c461bd107"
 dependencies = [
  "bech32 0.11.1",
  "bitflags",
@@ -7120,7 +7079,7 @@ dependencies = [
  "zcash_script",
  "zcash_transparent 0.9.0",
  "zebra-chain",
- "zebra-node-services 9.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zebra-node-services",
  "zebra-script",
  "zebra-state",
 ]
@@ -7165,25 +7124,15 @@ dependencies = [
 
 [[package]]
 name = "zebra-node-services"
-version = "9.0.0"
+version = "9.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4446db9b576c0de14ff91c7fd7b38a59d340c1969a1604787185a52b8b7f53a6"
+checksum = "006992c62b9c4742a13a306f2e7443646fa0b5b884aac63a6fba5b0be273f864"
 dependencies = [
  "color-eyre",
  "jsonrpsee-types",
  "reqwest",
  "serde",
  "serde_json",
- "tokio",
- "tower 0.4.13",
- "zebra-chain",
-]
-
-[[package]]
-name = "zebra-node-services"
-version = "9.0.0"
-source = "git+https://github.com/ZcashFoundation/zebra.git?rev=f8ead3f229c29864364873c5267a8db3d6ced4a5#f8ead3f229c29864364873c5267a8db3d6ced4a5"
-dependencies = [
  "tokio",
  "tower 0.4.13",
  "zebra-chain",
@@ -7245,7 +7194,7 @@ dependencies = [
  "zebra-chain",
  "zebra-consensus",
  "zebra-network",
- "zebra-node-services 9.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zebra-node-services",
  "zebra-script",
  "zebra-state",
 ]
@@ -7266,8 +7215,9 @@ dependencies = [
 
 [[package]]
 name = "zebra-state"
-version = "10.0.0"
-source = "git+https://github.com/ZcashFoundation/zebra.git?rev=f8ead3f229c29864364873c5267a8db3d6ced4a5#f8ead3f229c29864364873c5267a8db3d6ced4a5"
+version = "10.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39295d344c1cc56ed725646cfc7bb7e16f8edae7518ea5a9e599665f979e9cf6"
 dependencies = [
  "bincode",
  "chrono",
@@ -7299,7 +7249,7 @@ dependencies = [
  "tower 0.4.13",
  "tracing",
  "zebra-chain",
- "zebra-node-services 9.0.0 (git+https://github.com/ZcashFoundation/zebra.git?rev=f8ead3f229c29864364873c5267a8db3d6ced4a5)",
+ "zebra-node-services",
 ]
 
 [[package]]
