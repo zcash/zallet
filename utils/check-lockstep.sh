@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Verify wallet-critical dependency lockstep across the three resolution graphs
-# (root, backends/zebra, backends/zaino).
+# Verify wallet-critical dependency lockstep across all resolution graphs
+# (root plus the zebra, zaino, and zinder backends).
 #
-# The split-workspace design (issue #540) deliberately lets the two backend
+# The split-workspace design (issue #540) deliberately lets the backend
 # lockfiles diverge on the zebra-* and zaino-* dependency trees — that is the
 # point of the split, so a zebra bump touches only backends/zebra and a Zaino
 # bump only backends/zaino. Those crates are intentionally NOT checked here.
 #
-# Everything that touches persisted wallet state must NOT diverge: all three
+# Everything that touches persisted wallet state must NOT diverge: all
 # binaries open the same wallet database, so a drifted zcash_client_sqlite (or
 # rusqlite, or any crate in the librustzcash patch block) could apply different
 # schema migrations depending on which binary ran first. This script fails CI
@@ -16,8 +16,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-LOCKFILES=(Cargo.lock backends/zebra/Cargo.lock backends/zaino/Cargo.lock)
-MANIFESTS=(Cargo.toml backends/zebra/Cargo.toml backends/zaino/Cargo.toml)
+LOCKFILES=(Cargo.lock backends/zebra/Cargo.lock backends/zaino/Cargo.lock backends/zinder/Cargo.lock)
+MANIFESTS=(Cargo.toml backends/zebra/Cargo.toml backends/zaino/Cargo.toml backends/zinder/Cargo.toml)
 
 # Packages whose versions must move in release lockstep.
 PACKAGES=(
@@ -25,10 +25,11 @@ PACKAGES=(
   zallet-core/Cargo.toml
   backends/zebra/Cargo.toml
   backends/zaino/Cargo.toml
+  backends/zinder/Cargo.toml
 )
 
 # The lockstep set: the union of [patch.crates-io] package names across the
-# three workspace manifests (honouring `package = "..."` renames), plus crates
+# workspace manifests (honouring `package = "..."` renames), plus crates
 # that touch the shared wallet database but are not patched.
 EXTRA_CRATES=(rusqlite)
 
@@ -110,7 +111,7 @@ done
 
 if [[ "$fail" -ne 0 ]]; then
   echo "" >&2
-  echo "Wallet-critical dependencies must resolve identically in all three" >&2
+  echo "Wallet-critical dependencies must resolve identically in all" >&2
   echo "lockfiles; re-sync the [patch.crates-io] blocks and run 'cargo update" >&2
   echo "-p <crate>' in the divergent workspace. See utils/check-lockstep.sh." >&2
   exit 1

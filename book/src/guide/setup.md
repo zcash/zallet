@@ -55,8 +55,8 @@ section are:
 
 ### Reading chain state from a local zebrad
 
-Zallet supports two chain backends that determine how it reads chain state: the default
-`zebra` backend and the `zaino` backend. The backend is selected at runtime by the
+Zallet supports three chain backends that determine how it reads chain state: the default
+`zebra` backend, the `zaino` backend, and the `zinder` backend. The backend is selected at runtime by the
 config file's top-level `backend` key, which the `zallet` launcher uses to dispatch to
 the matching backend binary; see
 [Choosing a chain backend](installation/README.md#choosing-a-chain-backend) for the
@@ -75,6 +75,20 @@ the zebra-state backend requires an [indexer.read_state_service] config section
 
 The `zaino` backend uses the section when it is present, and otherwise fetches all
 chain data over JSON-RPC.
+
+The `zinder` backend does not use this section. It connects to a running
+`zinder-query` service instead:
+
+```toml
+backend = "zinder"
+
+[indexer.zinder]
+grpc_address = "127.0.0.1:9067"
+```
+
+Zinder must retain full block and transaction bytes (`raw_blob_policy = "all"`)
+and expose its ingest-control proxy to `zinder-query`; the backend checks those
+capabilities before opening the shared wallet database.
 
 This relies on zebrad's indexer gRPC interface, which is **not** available
 in a default `zebrad` build. You must compile `zebrad` with the `indexer` feature

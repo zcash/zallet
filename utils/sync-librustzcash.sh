@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Sync the librustzcash [patch.crates-io] pin to a single git rev across all
-# three workspace manifests (root, backends/zebra, backends/zaino) and refresh
+# workspace manifests (root plus every backend) and refresh
 # each lockfile so the wallet-critical crates resolve identically.
 #
-# This is the ONLY supported way to move the librustzcash ref. All three
+# This is the ONLY supported way to move the librustzcash ref. All four
 # binaries open the same wallet database, so zcash_client_sqlite (and the rest
 # of the librustzcash stack) MUST resolve to one identical rev in every
 # workspace; utils/check-lockstep.sh enforces that in CI. Hand-editing a single
@@ -22,8 +22,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Workspace dirs and their manifests, index-aligned.
-DIRS=(. backends/zebra backends/zaino)
-MANIFESTS=(Cargo.toml backends/zebra/Cargo.toml backends/zaino/Cargo.toml)
+DIRS=(. backends/zebra backends/zaino backends/zinder)
+MANIFESTS=(Cargo.toml backends/zebra/Cargo.toml backends/zaino/Cargo.toml backends/zinder/Cargo.toml)
 LIBRUSTZCASH_GIT='https://github.com/zcash/librustzcash.git'
 
 # The librustzcash rev currently pinned at the root, used as the default target.
@@ -68,6 +68,6 @@ for d in "${DIRS[@]}"; do
   ( cd "$d" && cargo metadata --format-version 1 >/dev/null )
 done
 
-# 3. Self-verify that the three graphs are back in lockstep.
+# 3. Self-verify that the four graphs are back in lockstep.
 echo
-exec "$(dirname "$0")/check-lockstep.sh"
+exec "$BASH" "$(dirname "$0")/check-lockstep.sh"
