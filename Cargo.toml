@@ -167,19 +167,19 @@ tonic = "0.14"
 # three workspace manifests (root, backends/zebra, backends/zaino) and their
 # lockfiles on one identical rev, which utils/check-lockstep.sh enforces in CI.
 # Do not edit these revs by hand.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
-transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
-zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
+transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
 # NOTE: zcash_history is deliberately NOT patched here: the root graph does not
 # use it (only the backend workspaces do, and their patch blocks carry it).
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "d4f4095de03e1aab3bd72b4c3f83459072ed584e" }
 
 # Temporary pin to rage/main: the keystore uses age APIs (`EncryptedIdentity`,
 # `Send + Sync` bounds on `IdentityFile::into_identities`) that the 0.11.x
