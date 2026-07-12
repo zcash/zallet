@@ -26,18 +26,18 @@ futures = "0.3"
 hex = "0.4"
 i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
 incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
-orchard = "0.15.0-pre.2"
+orchard = "0.15.0"
 sapling = { package = "sapling-crypto", version = "0.7" }
 jsonrpsee = "0.24"
 tokio = { version = "1", features = ["net", "rt-multi-thread"] }
-transparent = { package = "zcash_transparent", version = "0.9.0-pre.0" }
+transparent = { package = "zcash_transparent", version = "0.9.0" }
 zaino-common = "0.2"
 zaino-fetch = "0.2.1"
 zaino-state = "0.3.1"
 zcash_client_backend = "0.23"
-zcash_keys = { version = "0.15.0-pre.0", features = ["unstable"] }
-zcash_primitives = "0.29.0-pre.0"
-zcash_protocol = "0.10.0-pre.0"
+zcash_keys = { version = "0.15.0", features = ["unstable"] }
+zcash_primitives = "0.29.0"
+zcash_protocol = "0.10.0"
 zebra-chain = "11"
 zebra-rpc = "11"
 zebra-state = "10"
@@ -80,30 +80,24 @@ tempfile = "3"
 #
 # Update the librustzcash rev ONLY via utils/sync-librustzcash.sh (which syncs
 # all three manifests and lockfiles at once); do not edit these revs by hand.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_history = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "29c7fb28889a69df15b44fc9465cf4a464f766e9" }
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+zcash_history = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "8080922ec295afffdfb9a44955f57c2dd2b28fec" }
 
-
-# Replicated from librustzcash b43a4237's own [patch.crates-io]: main librustzcash is
-# built against zcash/orchard main (adds the public `Builder::bundle_type()`
-# accessor), which the crates.io 0.15.0-pre.2 release predates. Required for the
-# librustzcash rev above to compile.
-orchard = { git = "https://github.com/zcash/orchard", rev = "475ef0ff77d45aebff93cb039d639250d82518a3" }
-
-age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633bb70c91eef91142fd4" }
-
-zewif = { git = "https://github.com/zcash/zewif.git", rev = "74f1a1694131386515e1733dfb9f414a6284555f" }
-zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "fce12991e11bb543f8a9b60a5af92cfb953f699c" }
+# Temporary pin to rage/main: the keystore uses age APIs (`EncryptedIdentity`,
+# `Send + Sync` bounds on `IdentityFile::into_identities`) that the 0.11.x
+# maintenance releases exclude. Replace with the crates.io release once
+# rage 0.12 ships.
+age = { git = "https://github.com/str4d/rage.git", rev = "d28f10ee776ce7391f7065695997f998631b113a" }
 
 # TEMPORARY: pin the zaino crates to zingolabs/zaino `dev` (currently 8048bf8d),
 # which surfaces the Ironwood (NU6.3) note commitment treestate from

@@ -13,7 +13,7 @@ use zcash_client_sqlite::error::SqliteClientError;
 use zcash_client_sqlite::zewif::{DiscardSecrets, SecretSink, ZewifImportError, ZewifImportReport};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
-use zewif_zcashd::{BDBDump, ZcashdDump, ZcashdParser, ZcashdWallet};
+use zewif_zcashd::{BDBDump, EncryptedKeyPolicy, ZcashdDump, ZcashdParser, ZcashdWallet};
 use zip32::fingerprint::SeedFingerprint;
 
 use crate::{
@@ -149,14 +149,35 @@ impl MigrateZcashdWalletCmd {
                 }
             })?;
 
-        let (zcashd_wallet, _unparsed_keys) =
-            ZcashdParser::parse_dump(&zcashd_dump, !self.allow_warnings).map_err(|e| {
-                MigrateError::Zewif {
-                    error_type: ZewifError::ZcashdDump,
-                    wallet_path,
-                    error: e.into(),
+        let parse_result = match ZcashdParser::parse_dump(&zcashd_dump, !self.allow_warnings) {
+            // The wallet's key material is encrypted; interactively request the wallet
+            // passphrase and retry.
+            Err(zewif_zcashd::Error::EncryptedWalletRequiresPassphrase) => {
+                let mut attempts = 0;
+                loop {
+                    let passphrase =
+                        rpassword::prompt_password(fl!("cmd-migrate-wallet-passphrase-prompt"))
+                            .map_err(|e| ErrorKind::Generic.context(e))?;
+                    attempts += 1;
+                    match ZcashdParser::parse_dump_with_policy(
+                        &zcashd_dump,
+                        !self.allow_warnings,
+                        EncryptedKeyPolicy::Decrypt(SecretVec::new(passphrase.into_bytes())),
+                    ) {
+                        Err(zewif_zcashd::Error::WrongWalletPassphrase) if attempts < 3 => {
+                            eprintln!("{}", fl!("cmd-migrate-wallet-passphrase-wrong"));
+                        }
+                        result => break result,
+                    }
                 }
-            })?;
+            }
+            result => result,
+        };
+        let (zcashd_wallet, _unparsed_keys) = parse_result.map_err(|e| MigrateError::Zewif {
+            error_type: ZewifError::ZcashdDump,
+            wallet_path,
+            error: e.into(),
+        })?;
 
         Ok(zcashd_wallet)
     }
@@ -227,9 +248,12 @@ impl MigrateZcashdWalletCmd {
         // Export the parsed wallet to a ZeWIF document. Everything below operates on
         // the document alone.
         info!("Exporting the zcashd wallet to a ZeWIF document");
+        // Regtest wallets were rejected by `check_network` above, so no regtest
+        // activation schedule is required.
         let document = zewif_zcashd::migrate_to_zewif(
             &wallet,
             zewif::BlockHeight::from_u32(u32::from(export_height)),
+            None,
         )
         .map_err(MigrateError::Export)?;
         drop(wallet);

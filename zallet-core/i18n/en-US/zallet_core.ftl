@@ -55,6 +55,9 @@ cmd-generate-encryption-identity-passphrase-prompt = Enter passphrase to encrypt
 cmd-generate-encryption-identity-passphrase-confirm = Confirm passphrase:
 cmd-generate-encryption-identity-passphrase-mismatch = Passphrases do not match
 
+cmd-migrate-wallet-passphrase-prompt = Enter the passphrase for the encrypted zcashd wallet:
+cmd-migrate-wallet-passphrase-wrong = The passphrase was incorrect; please try again.
+
 ## Startup messages
 
 warn-config-unused = Config option '{$option}' is not yet implemented in {-zallet}; ignoring its value.

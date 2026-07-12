@@ -10,6 +10,10 @@ be considered breaking changes.
 
 ### Added
 
+- `migrate-zcashd-wallet` now supports passphrase-encrypted zcashd wallets:
+  when the wallet's key material is encrypted, the command interactively
+  requests the wallet passphrase and decrypts the key material during the
+  migration.
 - The `zebra` chain backend (and the `zaino` backend's read-state-service mode)
   now support regtest. The read-state service builds a Zebra Regtest network
   whose network-upgrade activation heights mirror the wallet's configured
