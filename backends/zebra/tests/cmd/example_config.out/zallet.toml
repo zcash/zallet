@@ -262,6 +262,21 @@ as_of_version = "0.1.0-alpha.4"
 
 
 #
+# Settings for the Zinder chain-data backend.
+#
+# This section is optional. Uncomment the header and fields below to enable it.
+#
+#[indexer.zinder]
+
+# Address (`host:port`) of the `zinder-query` gRPC interface.
+#
+# The connection is plaintext. Production deployments should use a
+# loopback or trusted-LAN endpoint, or terminate transport security in an
+# operator-managed proxy.
+#grpc_address = "127.0.0.1:9067"
+
+
+#
 # Settings for the key store.
 #
 [keystore]

@@ -10,6 +10,11 @@ be considered breaking changes.
 
 ### Added
 
+- A `zinder` chain backend can now sync wallets through Zinder's native gRPC
+  API. It uses epoch-pinned chain reads, chain and mempool event streams,
+  per-outpoint transparent spend detection, and Zinder's transaction
+  broadcaster; startup rejects incompatible networks, contract revisions, or
+  capability sets before opening the wallet database.
 - `migrate-zcashd-wallet` now supports passphrase-encrypted zcashd wallets:
   when the wallet's key material is encrypted, the command interactively
   requests the wallet passphrase and decrypts the key material during the

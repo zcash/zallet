@@ -1,0 +1,1729 @@
+syntax = "proto3";
+
+package zinder.v1.wallet;
+
+import "zinder/v1/ops/server_info.proto";
+
+// One named chain height with the block hash at that height.
+//
+// Reused for every `{role}_tip` in the chain-view family (`visible_tip`,
+// `settled_tip`, `indexed_tip`) so the height/hash pairing has one shape.
+message BlockTip {
+  // Block height for this tip.
+  uint32 height = 1;
+
+  // Block hash at `height` in RPC byte order (64 lowercase hex characters).
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string hash = 2;
+}
+
+// A visible, internally consistent chain snapshot used to answer a wallet
+// query.
+message ChainEpoch {
+  // Monotonic Zinder chain epoch identifier.
+  uint64 chain_epoch_id = 1;
+
+  // Stable public network name, such as "zcash-regtest".
+  string network_name = 2;
+
+  // Durable artifact schema version used by artifacts in this chain epoch.
+  uint32 artifact_schema_version = 3;
+
+  // Zinder wall-clock creation time for this chain epoch.
+  uint64 created_at_millis = 4;
+
+  // Best visible block in this chain epoch.
+  BlockTip visible_tip = 5;
+
+  // Highest block in this chain epoch for which both compact-block and
+  // commitment-tree artifacts are coherent past the reorg window. The wallet
+  // uses this as its scan ceiling; see ADR-0005 in the zally repo. Carries the
+  // exact reorg-window semantics the prior `safe_tip_*` fields did.
+  BlockTip settled_tip = 6;
+
+  // Sapling note commitment tree size at the visible tip. Wallets use this to
+  // derive completed subtree counts without decoding compact-block payloads.
+  uint32 sapling_commitment_tree_size = 7;
+
+  // Orchard note commitment tree size at the visible tip.
+  uint32 orchard_commitment_tree_size = 8;
+
+  // Ironwood note commitment tree size at the visible tip.
+  uint32 ironwood_commitment_tree_size = 9;
+}
+
+// Highest block the derive projections have fully materialized.
+//
+// Distinct from the canonical chain tip on `ChainEpoch`: the derive plane
+// replays canonical chain events asynchronously and trails the canonical tip
+// while catching up. This is the height every derive-backed read response can
+// actually answer for.
+message IndexedTip {
+  // Materialized block tip.
+  BlockTip tip = 1;
+
+  // Header time of the materialized block; lets consumers show the real age
+  // of the data without a second lookup.
+  int64 block_time_unix_seconds = 2;
+}
+
+// The upstream node's view of the chain.
+//
+// The upstream probe has no single block hash, so this carries heights only.
+// Both fields are optional because the source-plane probe is async; a response
+// that fires before the first probe leaves them unset. Consumers MUST treat an
+// absent value as "unknown", not zero.
+message UpstreamTip {
+  // Highest block height the upstream node has locally committed (Zebra's
+  // `blocks` from `getblockchaininfo`).
+  optional uint32 committed_height = 1;
+
+  // Highest block height the upstream node estimates exists on the network
+  // (Zebra's `estimatedheight`). Always `>= committed_height`. Use this as the
+  // denominator for sync-progress UI.
+  optional uint32 estimated_height = 2;
+}
+
+// Cross-plane chain-state envelope carried at field tag 1 on every
+// `WalletQuery`, `ExplorerQuery`, and `IngestControl` read response.
+//
+// Folds the epoch identity, the reorg-vs-replay tips, the upstream view, and
+// the derive-plane status into one shape so a consumer reads chain state the
+// same way on every surface. See ADR-0011.
+message ChainView {
+  // Chain epoch this response was produced from.
+  ChainEpoch chain_epoch = 1;
+
+  // Derive-replay ceiling. Optional because responses that do not read the
+  // derive store, and cold starts before the first materialized block, leave
+  // it unset. Absent means "unknown", never "at tip".
+  optional IndexedTip indexed_tip = 2;
+
+  // Upstream node's view of the chain at response-construction time. Optional
+  // because the source-plane probe is async; an early response may fire before
+  // the first probe completes.
+  optional UpstreamTip upstream_tip = 3;
+
+  // Derive-plane status. Absent on responses that are not derive-backed.
+  optional DeriveStatus derive = 4;
+}
+
+// Derive-plane lifecycle. Separates a derive plane that is healthily catching
+// up from one that has stalled, which a block-count lag alone cannot express.
+enum DeriveHealth {
+  DERIVE_HEALTH_UNSPECIFIED = 0;
+  // Indexed tip is at the canonical tip; reads reflect the latest block.
+  DERIVE_HEALTH_LIVE = 1;
+  // Replay is advancing but the indexed tip is behind the canonical tip.
+  DERIVE_HEALTH_CATCHING_UP = 2;
+  // Replay is paused (e.g. memory pressure); the indexed tip is frozen and
+  // will not advance until the pause clears. Reads serve historical data.
+  DERIVE_HEALTH_PAUSED = 3;
+}
+
+// Operator-facing derive-plane summary.
+//
+// Written by the ingest plane and surfaced on `ChainView.derive` and
+// `ExplorerServerInfo`. The `observed_at_millis` stamp lets a consumer detect a
+// status record that has itself gone stale (ingest stopped writing it).
+message DeriveStatus {
+  DeriveHealth health = 1;
+  uint32 indexed_height = 2;
+  uint64 lag_blocks = 3;
+  uint64 observed_at_millis = 4;
+}
+
+// Metadata for one block.
+message BlockMetadata {
+  // Height of the block.
+  uint32 height = 1;
+
+  // Canonical block hash in RPC byte order (64 lowercase hex characters).
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string block_hash = 2;
+}
+
+// Latest visible block metadata response bound to one chain epoch.
+message LatestBlockResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Latest visible block in this chain epoch.
+  BlockMetadata latest_block = 2;
+}
+
+// Latest visible block metadata request.
+message LatestBlockRequest {
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 1;
+}
+
+// Settled-tip block metadata response bound to one chain epoch. Returns the
+// block at the chain epoch's settled_tip, which the wallet uses as its scan
+// ceiling.
+message LatestSafeBlockResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Block at chain_view.chain_epoch.settled_tip.height.
+  BlockMetadata safe_tip_block = 2;
+}
+
+// Safe-tip block metadata request.
+message LatestSafeBlockRequest {
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 1;
+}
+
+// Typed selector for a block in the canonical best chain.
+//
+// Hash-only callers pass the `hash` arm; height-only callers pass the
+// `height` arm and receive a normalized response that includes the resolved
+// hash. Non-best-chain `(txid, block_hash)` lookup is a separate operation,
+// not a third oneof arm.
+message BlockSelector {
+  oneof selector {
+    // Address the block at this height in the canonical best chain.
+    uint32 height = 1;
+    // Address the block with this hash in the canonical best chain. The
+    // hash is in RPC byte order (64 lowercase hex characters).
+    // Reference: Zcash protocol spec term `\rpcByteOrder`.
+    string hash = 2;
+  }
+}
+
+// Block-selector resolver request, shared by the block-identity and
+// block-header reads that both resolve a `BlockSelector`.
+message BlockSelectorRequest {
+  // Typed selector for the requested block.
+  BlockSelector selector = 1;
+
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 2;
+}
+
+// Block-identity resolver response bound to one chain epoch.
+message BlockIdResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Resolved block identity in the canonical best chain.
+  BlockMetadata block_id = 2;
+}
+
+// Typed block-header read-model response. The shape is Zinder-native and
+// does not re-export upstream-node JSON-RPC fields.
+message BlockHeaderInfo {
+  // Resolved block identity.
+  BlockMetadata block_id = 1;
+
+  // Previous block hash in RPC byte order (64 lowercase hex characters).
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string previous_block_hash = 2;
+
+  // Merkle root of the transactions in this block, in RPC byte order
+  // (64 lowercase hex characters).
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string merkle_root_hash = 3;
+
+  // Block-commitment bytes (Sapling root or hashChainHistoryRoot, depending
+  // on network and height).
+  bytes commitment_bytes = 4;
+
+  // Block-time as Unix seconds.
+  int64 block_time = 5;
+
+  // Compact representation of the difficulty target.
+  uint32 bits = 6;
+
+  // Block nonce bytes.
+  bytes nonce = 7;
+
+  // Block version field from the header.
+  uint32 version = 8;
+}
+
+// Block-header read response bound to one chain epoch.
+message BlockHeaderResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Block-header read-model value at the resolved selector.
+  BlockHeaderInfo block_header = 2;
+}
+
+// A wallet-facing compact block payload from one chain epoch.
+//
+// Distinct from `cash.z.wallet.sdk.rpc.CompactBlock` in the vendored
+// lightwalletd compat schema; the lightwalletd one keeps its frozen
+// `bytes`-typed `hash` field on the compat plane.
+message CompactBlock {
+  // Height of the source block.
+  uint32 height = 1;
+
+  // Canonical block hash in RPC byte order (64 lowercase hex characters).
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string block_hash = 2;
+
+  // Encoded compact block payload bytes.
+  bytes payload_bytes = 3;
+}
+
+// Inclusive compact block range request.
+message CompactBlocksInRangeRequest {
+  // First requested block height.
+  uint32 start_height = 1;
+
+  // Last requested block height.
+  uint32 end_height = 2;
+
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 3;
+}
+
+// Single compact block request.
+message CompactBlockRequest {
+  // Requested block height.
+  uint32 height = 1;
+
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 2;
+}
+
+// Single compact block response bound to one chain epoch.
+message CompactBlockResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Compact block at the requested height.
+  CompactBlock compact_block = 2;
+}
+
+// A wallet-facing full serialized block payload from one chain epoch.
+//
+// Carries the consensus-serialized block bytes for full-block-scanning
+// wallets that parse whole blocks for inline transparent detection and
+// shielded trial-decryption. The bytes are present only when the writer
+// deployment retains block blobs (`storage.raw_blob_policy = "all"`);
+// reads for unretained heights return gRPC NOT_FOUND.
+message FullBlock {
+  // Height of the source block.
+  uint32 height = 1;
+
+  // Canonical block hash in RPC byte order (64 lowercase hex characters).
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string block_hash = 2;
+
+  // Consensus-serialized full block bytes.
+  bytes payload_bytes = 3;
+
+  // Parent block hash in RPC byte order (64 lowercase hex characters).
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string parent_block_hash = 4;
+}
+
+// Single full block request.
+message FullBlockRequest {
+  // Requested block height.
+  uint32 height = 1;
+
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 2;
+}
+
+// Single full block response bound to one chain epoch.
+message FullBlockResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Full block at the requested height.
+  FullBlock full_block = 2;
+}
+
+// Inclusive full block range request.
+message FullBlocksInRangeRequest {
+  // First requested block height.
+  uint32 start_height = 1;
+
+  // Last requested block height.
+  uint32 end_height = 2;
+
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 3;
+}
+
+// Streamed full block range chunk bound to one chain epoch.
+message FullBlocksInRangeChunk {
+  // Cross-plane chain-state envelope for this chunk (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Full block at the next requested height.
+  FullBlock full_block = 2;
+}
+
+// Single transaction request.
+message TransactionRequest {
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters). Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string transaction_id = 1;
+
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 2;
+}
+
+// Block coordinates of a mined transaction.
+message MinedBlockLocation {
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters). Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string transaction_id = 1;
+
+  // Height of the containing block.
+  uint32 block_height = 2;
+
+  // Canonical block hash in RPC byte order (64 lowercase hex characters).
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string block_hash = 3;
+
+  // Block-local transaction index.
+  uint32 tx_index_in_block = 4;
+}
+
+// Mined-transaction enrichment bound to a response's chain epoch.
+//
+// `MinedDetails` is response-shape, not artifact-shape. `confirmations`
+// MUST be computed from the response's
+// `chain_view.chain_epoch.visible_tip.height` and the transaction's mined
+// height; `consensus_branch_id` and `block_time` are derived from the
+// source-aware layer that owns Zcash consensus parameters and block-header
+// parsing.
+message MinedDetails {
+  // Consensus branch identifier in effect at the mined height.
+  uint32 consensus_branch_id = 1;
+
+  // Block-time as Unix seconds, taken from the mined block header.
+  int64 block_time = 2;
+
+  // Confirmations: visible_tip.height - mined_height + 1, bound to the
+  // response's chain epoch.
+  uint32 confirmations = 3;
+}
+
+// Mined-transaction response carrier: the durable `MinedBlockLocation`
+// plus epoch-bound enrichment.
+message MinedTransaction {
+  // Mined-transaction block coordinates.
+  MinedBlockLocation location = 1;
+
+  // Epoch-bound enrichment fields.
+  MinedDetails details = 2;
+
+  // Serialized consensus transaction bytes. Carries the same value the
+  // mempool arm exposes as `MempoolTransaction.payload_bytes`, so a verbose
+  // mined-transaction read (serialized bytes plus mined location plus
+  // confirmations) is answered by this one response. Absent when the
+  // deployment does not retain raw transaction blobs (ingest `raw_blob_policy`
+  // is `none`); present when the policy is `transactions` or `all`. Gated by
+  // the `wallet.read.transaction_bytes_v1` capability; clients branch on
+  // presence.
+  optional bytes raw_transaction_bytes = 3;
+}
+
+// Mempool-transaction response carrier.
+message MempoolTransaction {
+  // Serialized transaction payload bytes.
+  bytes payload_bytes = 1;
+
+  // Wall-clock time at which the indexer first observed the
+  // transaction in the source mempool.
+  int64 first_seen_unix_seconds = 2;
+}
+
+// Conflicting-chain transaction response carrier (reserved shape).
+message ConflictingChainTransaction {
+  // Reserved for future fields once non-best-chain transaction lookup
+  // ships. Empty today; the conflicting-chain status is its own signal.
+}
+
+// Canonical transaction-location discriminator shared by every read surface.
+//
+// One match shape answers "where does this transaction live": mined in the
+// canonical chain, visible in the live mempool, or conflicting with the
+// visible canonical chain. `NotFound` is never an arm here; the read surface
+// conveys it out of band (gRPC `NOT_FOUND`) so typed errors do not consume
+// oneof slots. `WalletQuery.Transaction` and `ExplorerQuery.TransactionDetail`
+// both embed this message so a consumer writes the match once.
+message TransactionLocation {
+  oneof location {
+    // Transaction is mined in the canonical chain.
+    MinedTransaction mined = 1;
+
+    // Transaction is currently visible in the live mempool.
+    MempoolTransaction in_mempool = 2;
+
+    // Transaction is known to conflict with the visible canonical chain.
+    ConflictingChainTransaction conflicting = 3;
+  }
+}
+
+// Single transaction-status response bound to one chain epoch.
+//
+// `NotFound` is conveyed as gRPC `NOT_FOUND`, not as a location arm,
+// because typed errors do not consume oneof slots.
+message TransactionStatusResponse {
+  // Chain epoch used to answer this response.
+  ChainView chain_view = 1;
+
+  // Canonical transaction-location discriminator.
+  TransactionLocation location = 2;
+}
+
+// Streamed compact block range chunk bound to one chain epoch.
+message CompactBlocksInRangeChunk {
+  // Cross-plane chain-state envelope for this chunk (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Compact block at the next requested height.
+  CompactBlock compact_block = 2;
+}
+
+// Tree-state request for one exact block height.
+message TreeStateAtHeightRequest {
+  // Exact block height to return the tree state for. The response height
+  // always equals this value: the server serves a stored checkpoint when one
+  // exists at this height, otherwise it fills from the configured upstream node.
+  uint32 height = 1;
+
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 2;
+}
+
+// Latest checkpoint tree-state request.
+message LatestTreeStateCheckpointRequest {
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 1;
+}
+
+// Checkpoint tree-state response bound to one chain epoch.
+message TreeStateResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Height this tree state belongs to.
+  uint32 height = 2;
+
+  // Hash of the block this tree state belongs to, in RPC byte order
+  // (64 lowercase hex characters).
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string block_hash = 3;
+
+  // Encoded tree-state payload bytes.
+  bytes payload_bytes = 4;
+}
+
+// One node-advertised network-upgrade activation.
+//
+// Names and activation heights come from the configured node's
+// `getblockchaininfo.upgrades` response. Unknown future branch ids remain
+// representable so wallet clients can fail closed before consensus diverges.
+message NetworkUpgradeActivation {
+  // Consensus branch identifier assigned to this upgrade.
+  uint32 consensus_branch_id = 1;
+
+  // Canonical upgrade name reported by the node.
+  string name = 2;
+
+  // Height at which the node applies this upgrade's consensus rules.
+  uint32 activation_height = 3;
+}
+
+// Node-advertised network-upgrade activation-table request.
+message NetworkUpgradeActivationsRequest {}
+
+// Node-advertised network-upgrade activation table.
+message NetworkUpgradeActivationsResponse {
+  // Entries ordered by ascending activation height.
+  repeated NetworkUpgradeActivation activations = 1;
+}
+
+// Shielded note commitment protocol for subtree roots.
+enum ShieldedProtocol {
+  // Protocol was not specified.
+  SHIELDED_PROTOCOL_UNSPECIFIED = 0;
+
+  // Sapling note commitment tree.
+  SHIELDED_PROTOCOL_SAPLING = 1;
+
+  // Orchard note commitment tree.
+  SHIELDED_PROTOCOL_ORCHARD = 2;
+
+  // Ironwood note commitment tree.
+  SHIELDED_PROTOCOL_IRONWOOD = 3;
+}
+
+// Inclusive-start bounded subtree-root request.
+message SubtreeRootsRequest {
+  // Shielded protocol to read.
+  ShieldedProtocol shielded_protocol = 1;
+
+  // First requested subtree-root index.
+  uint32 start_index = 2;
+
+  // Maximum number of subtree-root entries to return.
+  uint32 max_entries = 3;
+
+  // Optional chain-epoch id that must be used to answer the request. When
+  // absent, the server uses the visible epoch at request time.
+  optional uint64 at_epoch_id = 4;
+}
+
+// A complete shielded subtree root.
+message SubtreeRoot {
+  // Subtree index within the requested shielded protocol.
+  uint32 subtree_index = 1;
+
+  // The 32-byte Merkle root of the subtree. Note: shielded subtree roots
+  // are not displayed in RPC byte order anywhere in the Zcash ecosystem;
+  // this field intentionally stays as raw bytes.
+  bytes root_hash = 2;
+
+  // Hash of the block that completed this subtree, in RPC byte order
+  // (64 lowercase hex characters).
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string completing_block_hash = 3;
+
+  // Height of the block that completed this subtree.
+  uint32 completing_block_height = 4;
+}
+
+// Subtree-root range response bound to one chain epoch.
+message SubtreeRootsResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Shielded protocol returned.
+  ShieldedProtocol shielded_protocol = 2;
+
+  // First requested subtree-root index.
+  uint32 start_index = 3;
+
+  // Subtree roots in ascending index order.
+  repeated SubtreeRoot subtree_roots = 4;
+}
+
+// Raw transaction broadcast request.
+message BroadcastTransactionRequest {
+  // Serialized transaction bytes submitted by the wallet.
+  bytes raw_transaction = 1;
+}
+
+// Accepted transaction broadcast details.
+message BroadcastAccepted {
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters) reported by the node.
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string transaction_id = 1;
+}
+
+// Duplicate transaction broadcast details.
+message BroadcastDuplicate {
+  // Node error code when one was supplied.
+  optional int64 error_code = 1;
+
+  // Operator-facing node message.
+  string message = 2;
+}
+
+// Invalid transaction encoding details.
+message BroadcastInvalidEncoding {
+  // Node error code when one was supplied.
+  optional int64 error_code = 1;
+
+  // Operator-facing node message.
+  string message = 2;
+}
+
+// Typed rejection reason carried by BroadcastRejected. Callers match on
+// this enum instead of substring-checking the operator-facing message.
+enum BroadcastRejectionReason {
+  // Default zero value reserved by proto3; never written by the server.
+  BROADCAST_REJECTION_REASON_UNSPECIFIED = 0;
+
+  // Verifier rejected one or more transaction signatures.
+  BROADCAST_REJECTION_REASON_INVALID_SIGNATURE = 1;
+
+  // Transaction's nExpiryHeight is at or below the visible tip.
+  BROADCAST_REJECTION_REASON_BAD_EXPIRY_HEIGHT = 2;
+
+  // Transaction's consensus branch id does not match the current network upgrade.
+  BROADCAST_REJECTION_REASON_BAD_CONSENSUS_BRANCH = 3;
+
+  // Mempool is at capacity and refused the transaction.
+  BROADCAST_REJECTION_REASON_MEMPOOL_FULL = 4;
+
+  // Node returned a rejection that did not match any known reason.
+  BROADCAST_REJECTION_REASON_UNKNOWN = 5;
+}
+
+// Rejected transaction broadcast details.
+message BroadcastRejected {
+  // Node error code when one was supplied.
+  optional int64 error_code = 1;
+
+  // Operator-facing node message.
+  string message = 2;
+
+  // Typed rejection reason; callers match on this instead of the message.
+  BroadcastRejectionReason kind = 3;
+}
+
+// In-flight broadcast queued for download or verification.
+//
+// Benign duplicate of a transaction the local caller submitted earlier:
+// the node will eventually accept or reject it.
+message BroadcastQueued {
+  // Operator-facing node message describing the queued state.
+  string message = 1;
+}
+
+// Unclassified transaction broadcast details.
+message BroadcastUnknown {
+  // Node error code when one was supplied.
+  optional int64 error_code = 1;
+
+  // Operator-facing node message.
+  string message = 2;
+}
+
+// Typed transaction broadcast outcome.
+message BroadcastTransactionResponse {
+  oneof outcome {
+    BroadcastAccepted accepted = 1;
+    BroadcastDuplicate duplicate = 2;
+    BroadcastInvalidEncoding invalid_encoding = 3;
+    BroadcastRejected rejected = 4;
+    BroadcastUnknown unknown = 5;
+    BroadcastQueued queued = 6;
+  }
+}
+
+// Chain-event stream family. Tip receives every chain event. Safe receives
+// only commits whose entire range is past the reorg window, and never reorg
+// events.
+enum ChainEventStreamFamily {
+  CHAIN_EVENT_STREAM_FAMILY_TIP = 0;
+  CHAIN_EVENT_STREAM_FAMILY_SAFE = 1;
+}
+
+// Marker for the earliest-retained start position of an event stream.
+message EarliestRetained {}
+
+// Marker for the live-tail start position of an event stream.
+message LiveTail {}
+
+// Explicit start position shared by every replayable event-stream request.
+message EventStreamStart {
+  // Required start position; an unset oneof is rejected with
+  // `INVALID_ARGUMENT`.
+  oneof position {
+    // Resumes strictly after this opaque cursor. The cursor's encoded
+    // family is authoritative: the request's family field must be
+    // unset/default or match it, and a mismatch is rejected with
+    // `INVALID_ARGUMENT`.
+    bytes after_cursor = 1;
+
+    // Replays from the earliest retained event, resolved within the
+    // request's family field.
+    EarliestRetained earliest_retained = 2;
+
+    // Resolves once at subscribe time to the current stream head for the
+    // request's family field, delivering only events applied after
+    // subscription.
+    LiveTail live_tail = 3;
+  }
+}
+
+// Replayable chain-event stream request.
+message ChainEventsRequest {
+  // Required start position. `after_cursor` carries the opaque cursor
+  // bytes from a previously delivered envelope.
+  EventStreamStart start = 1;
+
+  // Stream family for the `earliest_retained` and `live_tail` start
+  // positions. With `after_cursor`, the cursor's encoded family is
+  // authoritative and this field must be unset/default or match it.
+  ChainEventStreamFamily family = 2;
+
+  // Address-invalidation filter. Empty disables filtering.
+  // When non-empty, the server narrows envelopes to commits whose block
+  // range touches at least one of these transparent addresses, plus every
+  // reorg (which always passes through regardless of filter). Cursor
+  // semantics are unchanged; clients still re-derive per-address state
+  // from the committed compact block. Addresses are encoded as the same
+  // dotted-canonical strings accepted by transparent-address queries.
+  repeated string address_filter = 3;
+}
+
+// Durable range committed by one chain event.
+message ChainEpochCommitted {
+  // Chain epoch visible after the commit.
+  ChainEpoch chain_epoch = 1;
+
+  // First committed block height.
+  uint32 start_height = 2;
+
+  // Last committed block height.
+  uint32 end_height = 3;
+}
+
+// Durable range reverted by one chain event.
+message ChainRangeReverted {
+  // Chain epoch that contained the reverted range.
+  ChainEpoch chain_epoch = 1;
+
+  // First reverted block height.
+  uint32 start_height = 2;
+
+  // Last reverted block height.
+  uint32 end_height = 3;
+}
+
+// Chain-committed event.
+//
+// Carries a non-reorg commit that advanced the canonical tip or the safe
+// prefix. The architectural-spine name; preferred over "tip-advance"
+// because Zinder commits to either the visible tip or the safe tip under
+// the same event variant.
+message ChainCommitted {
+  ChainEpochCommitted committed = 1;
+}
+
+// Reorg chain event: a range that had not yet reached the safe tip was
+// replaced.
+message ChainReorged {
+  ChainRangeReverted reverted = 1;
+  ChainEpochCommitted committed = 2;
+}
+
+// Cursor-bound chain event envelope.
+message ChainEventEnvelope {
+  // Opaque StreamCursorTokenV1 bytes for resuming strictly after this event.
+  bytes cursor = 1;
+
+  // Monotonic sequence in the chain-event stream.
+  uint64 event_sequence = 2;
+
+  // Cross-plane chain-state envelope visible after this event (ADR-0011,
+  // field tag 3 on this message). `chain_view.chain_epoch` is the epoch
+  // visible after the event; `chain_view.chain_epoch.settled_tip.height`
+  // carries the safe tip height that was true for this event.
+  ChainView chain_view = 3;
+
+  oneof event {
+    ChainCommitted chain_committed = 10;
+    ChainReorged chain_reorged = 11;
+  }
+}
+
+// Wallet-plane server descriptor returned by `WalletQuery.ServerInfo`.
+//
+// `common` carries the cross-service identity and capability set defined
+// in [`zinder.v1.ops.ServerInfo`]. The wallet-specific fields below
+// describe operator configuration that constrains a wallet consumer's
+// behavior (retention windows, reorg depth, upstream-node capability
+// snapshot, vendored lightwalletd protocol commit, canonical artifact
+// schema version).
+message WalletServerInfo {
+  // Cross-service identity and capability descriptor.
+  zinder.v1.ops.ServerInfo common = 1;
+
+  // Vendored lightwalletd protocol commit served by this deployment.
+  string lightwalletd_protocol_commit = 2;
+
+  // Canonical artifact schema version.
+  uint32 schema_version = 3;
+
+  // Configured reorg window depth, in blocks. A block becomes part of the
+  // safe prefix (safe_tip_height) once it is buried at least this deep.
+  uint32 reorg_window_blocks = 4;
+
+  // Chain-event retention window in seconds. 0 indicates unbounded retention
+  // (development mode; rejected by --print-config in production).
+  uint64 chain_event_retention_seconds = 5;
+
+  // Mempool retention windows in seconds. 0 indicates the corresponding event
+  // family is not retained on this deployment.
+  uint64 mempool_mined_retention_seconds = 6;
+  uint64 mempool_invalidated_retention_seconds = 7;
+
+  // Upstream node capabilities detected by zinder-source.
+  NodeCapabilitiesDescriptor node = 8;
+}
+
+// Upstream node capability descriptor. Storage-only query deployments may
+// leave this empty when the query service has no source probe snapshot.
+message NodeCapabilitiesDescriptor {
+  // Node-reported semantic version, when available.
+  optional string version = 1;
+
+  // Source capability strings captured from the source-owning process.
+  repeated string capabilities = 2;
+}
+
+// Server descriptor request.
+message ServerInfoRequest {}
+
+// Server descriptor response.
+message ServerInfoResponse {
+  WalletServerInfo info = 1;
+}
+
+// Reason a mempool transaction was removed without being mined.
+enum MempoolEvictionReason {
+  MEMPOOL_EVICTION_REASON_UNSPECIFIED = 0;
+  MEMPOOL_EVICTION_REASON_CONFLICT = 1;
+  MEMPOOL_EVICTION_REASON_EXPIRED = 2;
+  MEMPOOL_EVICTION_REASON_LOW_FEE = 3;
+  MEMPOOL_EVICTION_REASON_NODE_REJECTED = 4;
+  MEMPOOL_EVICTION_REASON_UNKNOWN = 5;
+}
+
+// Reference to a transparent transaction output. Used by every wallet-plane
+// RPC keyed by `(transaction_id, output_index)`.
+message OutPoint {
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters) of the transaction that contains the referenced output.
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string transaction_id = 1;
+
+  // Output index within that transaction.
+  uint32 output_index = 2;
+}
+
+// Transparent output visible in the live mempool index.
+message TransparentMempoolOutput {
+  // SHA-256 of the transparent address scriptPubKey.
+  bytes address_script_hash = 1;
+
+  // Raw scriptPubKey bytes.
+  bytes script_pub_key = 2;
+
+  // Outpoint of the new output, in the mempool transaction that creates it.
+  OutPoint outpoint = 3;
+
+  // Output value in zatoshis.
+  uint64 value_zat = 4;
+}
+
+// Transparent input visible in the live mempool index.
+message TransparentMempoolSpend {
+  // Outpoint of the previously-known output that this mempool input spends.
+  OutPoint spent_outpoint = 1;
+
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters) of the mempool transaction that consumes the outpoint.
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string spending_transaction_id = 2;
+}
+
+// Hydrated record describing a mempool transaction observed by the indexer.
+message MempoolEntry {
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters). Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string transaction_id = 1;
+
+  // ZIP-244 authorization digest in RPC byte order (64 lowercase hex
+  // characters) for v5+ transactions. Empty for v1-v4 transactions.
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string auth_digest = 2;
+
+  // Raw serialized transaction bytes hydrated from the source.
+  bytes raw_transaction_bytes = 3;
+
+  // Lightwalletd-compatible compact transaction bytes derived from the raw
+  // transaction. Pre-built so the lightwalletd compatibility adapter does
+  // not parse raw bytes on the read path.
+  bytes compact_transaction_bytes = 4;
+
+  // Wall-clock time when the indexer first observed this entry.
+  uint64 first_seen_unix_millis = 5;
+
+  // Chain epoch visible to ingest when this entry was first observed.
+  ChainEpoch first_seen_chain_epoch = 6;
+
+  // Transparent outputs created by this mempool transaction.
+  repeated TransparentMempoolOutput transparent_outputs = 7;
+
+  // Transparent inputs that spend previously-known outpoints.
+  repeated TransparentMempoolSpend transparent_spends = 8;
+}
+
+// Bounded request for a snapshot of the live mempool.
+message MempoolSnapshotRequest {
+  // Server-enforced maximum number of entries the response may carry. The
+  // server may further bound this; an unbounded "return the whole mempool"
+  // request is forbidden.
+  uint32 max_entries = 1;
+
+  // Optional next-page cursor returned by a previous paged request.
+  bytes from_cursor = 2;
+}
+
+// Snapshot response bound to one chain epoch.
+message MempoolSnapshotResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Opaque `MempoolEvents` `after_cursor` value anchored at the moment the
+  // snapshot walk began. Identical on every page of one paged walk.
+  // Replaying from it yields at-least-once delivery; consumers apply
+  // events idempotently.
+  bytes events_resume_cursor = 2;
+
+  // Snapshot age in milliseconds when the response was constructed.
+  uint64 snapshot_age_millis = 3;
+
+  // Hydrated mempool entries.
+  repeated MempoolEntry entries = 4;
+
+  // Next-page cursor when the response was truncated.
+  bytes next_cursor = 5;
+}
+
+// Bounded request for unmined transparent outputs at one transparent address.
+//
+// The mempool live state is in-memory and not chain-epoch-pinnable; the
+// response binds the answer to the chain epoch visible at lookup time.
+message TransparentMempoolOutputsByAddressRequest {
+  // Selector for the transparent address being queried.
+  AddressLookup address = 1;
+
+  // Maximum number of outputs returned. Absent means use the server default;
+  // values larger than the server's configured cap are silently clamped.
+  optional uint32 max_entries = 2;
+}
+
+// Response for [`TransparentMempoolOutputsByAddress`] bound to the chain
+// epoch visible at lookup time.
+message TransparentMempoolOutputsByAddressResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Unmined transparent outputs that fund the queried address, in
+  // canonical `(transaction_id, output_index)` order.
+  repeated TransparentMempoolOutput outputs = 2;
+}
+
+// Batched lookup request for unmined spends of transparent outpoints.
+message TransparentMempoolSpendsByOutpointRequest {
+  // Outpoints whose unmined spends are being looked up. Bounded
+  // server-side to a hard cap; requests above the cap are silently
+  // truncated to the first N entries.
+  repeated OutPoint outpoints = 1;
+}
+
+// Response for [`TransparentMempoolSpendsByOutpoint`] bound to the chain
+// epoch visible at lookup time.
+message TransparentMempoolSpendsByOutpointResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Mempool spends found for the requested outpoints. Outpoints with no
+  // unmined spend emit no entry; consumers key results by
+  // `spent_outpoint`.
+  repeated TransparentMempoolSpend spends = 2;
+}
+
+// Canonical-chain spend of a transparent outpoint.
+//
+// Carries where the outpoint was spent on the canonical chain: the spending
+// transaction, the input index within it, and the block that mined the spend.
+// The intrinsic value and owning script of the spent output stay on the
+// canonical output resolver `TransparentOutputsByOutpoint`; this message is the
+// reverse-spend half of the getspentinfo-equivalent surface.
+message TransparentSpend {
+  // Outpoint that was spent. Mirrors the request entry so consumers key
+  // results by `spent_outpoint`.
+  OutPoint spent_outpoint = 1;
+
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters) of the transaction that spends the outpoint.
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string spending_transaction_id = 2;
+
+  // Transparent input index of the spend within the spending transaction.
+  uint32 input_index = 3;
+
+  // Block that mined the spending transaction (height plus RPC-form hash).
+  BlockTip spending_block = 4;
+}
+
+// Batched request for canonical-chain reverse-spend resolution.
+//
+// Given transparent outpoints, return where each was spent on the canonical
+// chain. The unmined half is the separate `TransparentMempoolSpendsByOutpoint`
+// RPC; a full getspentinfo-equivalent composes both.
+message TransparentSpendsByOutpointRequest {
+  // Outpoints whose canonical spend is being looked up. Bounded server-side
+  // to a hard cap; requests above the cap are silently truncated to the
+  // first N entries. The coinbase sentinel
+  // `(transaction_id = [0u8; 32], output_index = 0xFFFFFFFF)` is rejected
+  // with `INVALID_ARGUMENT`; coinbase inputs spend no prevout and never
+  // appear in the canonical spend-fact index.
+  repeated OutPoint outpoints = 1;
+
+  // Optional chain-epoch id pin. Absent resolves against the visible tip;
+  // present pins the read to a specific epoch.
+  optional uint64 at_epoch_id = 2;
+}
+
+// Response for [`TransparentSpendsByOutpoint`] bound to one chain epoch.
+message TransparentSpendsByOutpointResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  // Every entry's spend is visible at this epoch.
+  ChainView chain_view = 1;
+
+  // Canonical spends found for the requested outpoints. Outpoints unspent on
+  // the canonical chain at this epoch emit no entry; consumers key results by
+  // `spent_outpoint`.
+  repeated TransparentSpend spends = 2;
+}
+
+// Resolved transparent output referenced by an outpoint.
+//
+// Carries the intrinsic fields a consumer needs to compute input value and
+// derive the owning address; identifying fields like `transaction_id` stay on
+// the owning [`TransparentOutputEntry.outpoint`].
+message TransparentOutput {
+  // Output value in zatoshis.
+  uint64 value_zat = 1;
+
+  // Raw scriptPubKey bytes.
+  bytes script_pub_key = 2;
+}
+
+// One entry in a [`TransparentOutputsByOutpoint`] response, in input-order.
+message TransparentOutputEntry {
+  // Outpoint requested by the caller.
+  OutPoint outpoint = 1;
+
+  // Resolved output, when the outpoint was found at the response's
+  // [`TransparentOutputsByOutpointResponse.chain_epoch`]. Absent means the
+  // canonical chain at that epoch did not have the referenced output
+  // (transaction unknown, output index out of bounds, or reorged out).
+  optional TransparentOutput output = 2;
+}
+
+// Batched request for canonical-chain transparent prevout resolution.
+message TransparentOutputsByOutpointRequest {
+  // Outpoints to resolve. Bounded server-side to a hard cap; requests
+  // above the cap are silently truncated to the first N entries. The
+  // coinbase sentinel `(transaction_id = [0u8; 32], output_index =
+  // 0xFFFFFFFF)` is rejected with `INVALID_ARGUMENT`; consumers filter
+  // coinbase inputs at construction time.
+  repeated OutPoint outpoints = 1;
+
+  // Optional chain-epoch id pin. Absent resolves against the visible tip;
+  // present pins the read to a specific epoch.
+  optional uint64 at_epoch_id = 2;
+}
+
+// Response for [`TransparentOutputsByOutpoint`] bound to one chain epoch.
+message TransparentOutputsByOutpointResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  // Every entry's `prevout` (when present) is visible at this epoch.
+  ChainView chain_view = 1;
+
+  // Per-outpoint resolution result, in input order. Length matches the
+  // request's `outpoints` length after server-side truncation.
+  repeated TransparentOutputEntry entries = 2;
+}
+
+// Batched request for canonical-chain unspent-output resolution.
+//
+// Given transparent outpoints, return each output only while it is unspent on
+// the canonical chain at the response epoch. This is the gettxout-equivalent
+// surface: it composes the canonical output resolver with the canonical
+// reverse-spend reader server-side, so a consumer needs one round-trip rather
+// than an output lookup plus a spend lookup plus a client-side join. The read
+// is canonical-only; mempool-aware unspent-ness composes with the separate
+// `TransparentMempoolSpendsByOutpoint` RPC (subtract those spends).
+message TransparentUnspentOutputsByOutpointRequest {
+  // Outpoints to probe. Bounded server-side to a hard cap; requests above
+  // the cap are silently truncated to the first N entries. The coinbase
+  // sentinel `(transaction_id = [0u8; 32], output_index = 0xFFFFFFFF)` is
+  // rejected with `INVALID_ARGUMENT`; coinbase inputs spend no prevout.
+  repeated OutPoint outpoints = 1;
+
+  // Optional chain-epoch id pin. Absent resolves against the visible tip;
+  // present pins both the output and the spend read to one epoch.
+  optional uint64 at_epoch_id = 2;
+}
+
+// Response for [`TransparentUnspentOutputsByOutpoint`] bound to one chain
+// epoch.
+message TransparentUnspentOutputsByOutpointResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  // Every entry is present and unspent at this epoch.
+  ChainView chain_view = 1;
+
+  // Unspent outputs found for the requested outpoints. An outpoint emits an
+  // entry only when the canonical chain at this epoch has the referenced
+  // output and it carries no canonical spend; spent or never-existed
+  // outpoints emit no entry (null-if-spent). Each entry's `output` is always
+  // populated. Consumers key results by `outpoint`. Duplicate request
+  // outpoints collapse to one entry.
+  repeated TransparentOutputEntry entries = 2;
+}
+
+// Batched request for live mempool transparent prevout resolution.
+//
+// Mempool reads are not chain-epoch-pinnable; the request omits
+// `at_epoch_id` and the response binds to the chain epoch visible at
+// lookup time. The reply uses the same [`TransparentOutputsByOutpointResponse`]
+// shape as the canonical surface so consumers share one decoder.
+message TransparentMempoolOutputsByOutpointRequest {
+  // Outpoints to resolve against the live mempool index. Bounded
+  // server-side to a hard cap; requests above the cap are silently
+  // truncated to the first N entries. The coinbase sentinel is
+  // rejected with `INVALID_ARGUMENT`.
+  repeated OutPoint outpoints = 1;
+}
+
+// Mempool-event stream family. Reserved for future extensions; today only
+// MEMPOOL_EVENT_STREAM_FAMILY_MEMPOOL is populated.
+enum MempoolEventStreamFamily {
+  MEMPOOL_EVENT_STREAM_FAMILY_UNSPECIFIED = 0;
+  MEMPOOL_EVENT_STREAM_FAMILY_MEMPOOL = 1;
+}
+
+// Replayable mempool-event stream request.
+message MempoolEventsRequest {
+  // Required start position. `after_cursor` carries the opaque cursor
+  // bytes from a previously delivered envelope.
+  EventStreamStart start = 1;
+
+  // Stream family for the `earliest_retained` and `live_tail` start
+  // positions. With `after_cursor`, the cursor's encoded family is
+  // authoritative and this field must be unset/default or match it.
+  MempoolEventStreamFamily family = 2;
+}
+
+// New mempool transaction observed.
+message MempoolAddedEvent {
+  // Hydrated entry observed by the indexer.
+  MempoolEntry entry = 1;
+}
+
+// Mempool transaction removed without being mined.
+message MempoolInvalidatedEvent {
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters). Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string transaction_id = 1;
+
+  // Source-classified eviction reason.
+  MempoolEvictionReason reason = 2;
+}
+
+// Mempool transaction observed mined into a block.
+message MempoolMinedEvent {
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters). Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string transaction_id = 1;
+
+  // Height of the block that mined the transaction, as reported by the
+  // upstream node.
+  uint32 mined_height = 2;
+
+  // Canonical block hash in RPC byte order (64 lowercase hex characters)
+  // of the block that mined the transaction, as reported by the upstream
+  // node. Source-driven enrichment: lifecycle consumers can resolve the
+  // mined block identity without a follow-up tip read.
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string block_hash = 3;
+}
+
+// Mempool-admission suppression observed by Zinder.
+//
+// Emitted when the upstream node refuses to admit a transaction that Zinder
+// would otherwise publish as an `Added` event. The documented cause is
+// ZIP-401 RecentlyEvicted: the node remembers a recently evicted txid and
+// drops re-broadcast attempts silently. Suppression differs from
+// invalidation: the transaction never entered the live index.
+//
+// Source-side emission is reserved. The wire surface and store-side event
+// log accept this variant today so external integrators can subscribe; the
+// upstream node must expose pre-admission rejects before Zinder populates
+// the event. See docs/architecture/wallet-data-plane.md.
+message MempoolSuppressedEvent {
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters). Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string transaction_id = 1;
+}
+
+// Cursor-bound mempool event envelope.
+message MempoolEventEnvelope {
+  // Opaque StreamCursorTokenV1 bytes for resuming strictly after this event.
+  bytes cursor = 1;
+
+  // Monotonic sequence in the mempool-event stream. Independent of the
+  // chain-event sequence space.
+  uint64 event_sequence = 2;
+
+  // Wall-clock time when the indexer observed the source change.
+  uint64 source_observed_unix_millis = 3;
+
+  oneof event {
+    MempoolAddedEvent added = 10;
+    MempoolInvalidatedEvent invalidated = 11;
+    MempoolMinedEvent mined = 12;
+    MempoolSuppressedEvent suppressed = 13;
+  }
+}
+
+// Address selector accepted by every transparent-address request.
+//
+// Typed clients use script_hash for the high-throughput path; CLI, tests,
+// and debug callers use the string form. The native adapter parses string
+// addresses through ZebraTransparentAddress and SHA-256-hashes them; the
+// in-process WalletQueryApi only sees the typed script hash.
+message AddressLookup {
+  oneof selector {
+    // SHA-256 of the transparent address scriptPubKey, in canonical 32-byte
+    // form.
+    bytes script_hash = 1;
+
+    // P2PKH or P2SH transparent address in its base58check string form.
+    string address = 2;
+  }
+}
+
+// Request for the complete unspent transparent output set at one address.
+//
+// The server walks the address-output projection once at a single pinned
+// chain epoch and streams every unspent output. The response stream is
+// always complete: there is no cursor and no entry cap, so a client cannot
+// silently truncate the set by ignoring pagination.
+message TransparentAddressUnspentOutputsRequest {
+  // Selector for the transparent address being queried.
+  AddressLookup address = 1;
+
+  // Wallet-birthday floor: minimum mined height to include. 0 means
+  // scan from genesis.
+  uint32 start_height = 2;
+
+  // Optional chain-epoch id that pins the read to a specific `ChainEpoch`.
+  // Absent resolves against the live visible tip.
+  optional uint64 at_epoch_id = 3;
+}
+
+// One unspent transparent output streamed by
+// [`TransparentAddressUnspentOutputs`].
+message TransparentUnspentOutput {
+  // SHA-256 of the transparent address scriptPubKey.
+  bytes address_script_hash = 1;
+
+  // Raw scriptPubKey bytes.
+  bytes script_pub_key = 2;
+
+  // Outpoint of the unspent output, in the transaction that created it.
+  OutPoint outpoint = 3;
+
+  // Output value in zatoshis.
+  uint64 value_zat = 4;
+
+  // Height of the block that mined the creating transaction.
+  uint32 block_height = 5;
+
+  // Canonical block hash in RPC byte order (64 lowercase hex characters)
+  // of the block that mined the creating transaction.
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string block_hash = 6;
+}
+
+// One message in the [`TransparentAddressUnspentOutputs`] server stream.
+//
+// The server sends exactly one `header` message first, then one `item`
+// message per unspent output. The header carries the single pinned chain
+// epoch for the whole stream; payload items carry no per-element epoch. This
+// makes the stream-wide single-epoch guarantee structural: a consumer reads
+// the epoch once from the leading header and never reconciles it across items.
+message TransparentUnspentOutputsChunk {
+  oneof body {
+    // Leading header carrying the chain epoch pinned for the entire stream
+    // (ADR-0011). Sent once, before any item.
+    ChainView header = 1;
+
+    // One unspent transparent output. Sent after the header.
+    TransparentUnspentOutput item = 2;
+  }
+}
+
+// Bounded transparent-address balance request computed in the wallet plane.
+//
+// The confirmed total is summed from the complete canonical unspent output
+// set at the requested addresses; the live mempool overlay produces the
+// signed `unconfirmed_delta_zat`. `at_epoch_id` pins the canonical confirmed
+// read. Mempool live state is not chain-epoch-pinnable, so the response binds
+// to the chain epoch the confirmed read answered against. An empty
+// `addresses` list is rejected with `INVALID_ARGUMENT`; an `addresses` list
+// over the per-request cap is rejected with `INVALID_ARGUMENT` carrying
+// `TRANSPARENT_BALANCE_ADDRESS_COUNT_EXCEEDED`.
+message TransparentAddressBalanceRequest {
+  // Transparent addresses summed into one balance response.
+  repeated AddressLookup addresses = 1;
+
+  // Optional chain-epoch id pin for the canonical confirmed read. Absent
+  // resolves against the visible tip; present pins the confirmed read to a
+  // specific epoch. The mempool overlay always reads live state.
+  optional uint64 at_epoch_id = 2;
+}
+
+// Transparent-address balance response computed in the wallet plane.
+//
+// Splits the canonical confirmed total from the signed mempool delta so
+// explorer-shaped clients can render `confirmed`/`unconfirmed` separately;
+// lightwalletd-compatible clients project this into a single `value_zat` at
+// the compatibility boundary. Named `*Response` to match the rest of
+// `wallet.proto` and avoid a name collision with the same-named RPC.
+message TransparentAddressBalanceResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Sum of unspent canonical outputs at the requested addresses.
+  uint64 confirmed_zat = 2;
+
+  // Signed mempool delta: pending inflows minus pending outflows. Negative
+  // when pending outflows exceed pending inflows.
+  int64 unconfirmed_delta_zat = 3;
+
+  // Number of transparent addresses summarized by this response.
+  uint32 address_count = 4;
+}
+
+// One upstream `getblockchaininfo.valuePools` entry.
+message ChainValuePool {
+  // Stable upstream pool identifier, such as "transparent", "sapling",
+  // "orchard", or a future consensus pool id.
+  string id = 1;
+
+  // Whether the upstream node monitors this pool's value.
+  bool monitored = 2;
+
+  // Chain-wide pool total at the observed tip, in zatoshi. Absent when the
+  // upstream node reports the pool id without exposing its value.
+  optional int64 chain_value_zat = 3;
+}
+
+// Wallet-plane request for chain-wide value-pool totals at the upstream
+// node's current tip.
+message ChainValuePoolsAtTipRequest {}
+
+// Wallet-plane response for chain-wide value-pool totals.
+message ChainValuePoolsAtTipResponse {
+  reserved 3;
+  reserved "tip_height";
+
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  // Visible to Zinder when the upstream value-pool read was answered.
+  ChainView chain_view = 1;
+
+  // Upstream value-pool entries, preserved in upstream order so unknown
+  // future pools can flow through without a wire-shape change.
+  repeated ChainValuePool pools = 2;
+
+  // Source tip returned by the same upstream `getblockchaininfo` response as
+  // `pools`. Successful responses populate this field so consumers can verify
+  // both height and hash against a canonical chain identity.
+  BlockTip source_tip = 4;
+}
+
+// Snapshot scheme a TransparentUtxoSetCommitment was built under.
+//
+// The scheme id is self-describing: comparing two commitments is meaningful
+// only when their schemes match. A zcashd-comparable membership rule would be
+// a new value, never a reinterpretation of an existing one.
+enum UtxoSetCommitmentScheme {
+  // Scheme not stated. The absence sentinel; never emitted by a server that
+  // populated the commitment.
+  UTXO_SET_COMMITMENT_SCHEME_UNSPECIFIED = 0;
+
+  // Componentwise u16-lane homomorphic hash (LtHash16) over the full
+  // transparent unspent set, each element BLAKE2X-expanded to 1024 lanes and
+  // summed modulo 2^16. The 2048-byte accumulator is the commitment.
+  UTXO_SET_COMMITMENT_SCHEME_LTHASH16 = 1;
+}
+
+// Homomorphic commitment to the full transparent unspent set at one settled
+// tip.
+//
+// Order-independent and reproducible: two deployments at the same settled tip
+// produce identical `commitment` bytes under the same `scheme`. The height the
+// commitment was taken at is the enclosing ChainView's `chain_epoch.settled_tip`
+// for request-time comparison; a `committed_height` field is added later when a
+// snapshot manifest detaches this message from the response.
+message TransparentUtxoSetCommitment {
+  // Scheme the commitment was built under. Comparison is only meaningful
+  // across equal schemes.
+  UtxoSetCommitmentScheme scheme = 1;
+
+  // Raw accumulator bytes (2048 bytes for LTHASH16). Opaque; compare for
+  // equality, do not interpret field-by-field.
+  bytes commitment = 2;
+}
+
+// Wallet-plane request for the chain-wide transparent UTXO-set summary.
+//
+// `at_epoch_id` pins the canonical read. Absent resolves against the visible
+// tip. The aggregate is always taken at the resolved epoch's settled tip,
+// where the current-UTXO projection is the irreversible unspent set.
+message TransparentUtxoSetSummaryRequest {
+  // Optional chain-epoch id pin for the canonical read. Absent resolves
+  // against the visible tip; present pins the read to a specific epoch.
+  optional uint64 at_epoch_id = 1;
+}
+
+// Wallet-plane response for the chain-wide transparent UTXO-set summary.
+//
+// A request-time full scan of the current-UTXO projection: rarely called and
+// linear in the unspent-set size. `hash_serialized` and `bytes_serialized`
+// (gettxoutsetinfo's serialized-set digest and byte size) are intentionally
+// omitted: both depend on a defined UTXO-set serialization ordering that
+// Zinder does not commit to. Only the order-independent count and value totals
+// are reported.
+message TransparentUtxoSetSummaryResponse {
+  // Cross-plane chain-state envelope for this response (ADR-0011, field tag 1).
+  ChainView chain_view = 1;
+
+  // Number of unspent transparent outputs at the summarized settled tip.
+  uint64 utxo_count = 2;
+
+  // Sum of the values of every unspent transparent output, in zatoshi.
+  uint64 total_value_zat = 3;
+
+  // Settled tip height the aggregate was taken at. Below this height the
+  // projection is the irreversible unspent set.
+  uint32 summarized_height = 4;
+
+  // Homomorphic commitment to the full unspent set. Present only when the
+  // operator opted into the request-time fold and the server advertises
+  // `wallet.read.transparent_utxo_set_commitment_v1`; absent otherwise.
+  optional TransparentUtxoSetCommitment commitment = 5;
+}
+
+// Transparent-address tx-history range request, server-streamed.
+message TransparentAddressTxIdsInRangeRequest {
+  // Selector for the transparent address being queried.
+  AddressLookup address = 1;
+
+  // Inclusive minimum block height. 0 means start from genesis.
+  uint32 start_height = 2;
+
+  // Inclusive maximum block height.
+  uint32 end_height = 3;
+
+  // Server-bounded maximum entries per page. 0 means use the server
+  // default; values larger than the server's configured cap are silently
+  // clamped.
+  uint32 max_entries = 4;
+
+  // Empty starts at start_height (in the requested direction). Non-empty
+  // resumes strictly after the supplied opaque cursor; the cursor's
+  // encoded direction is authoritative.
+  bytes from_cursor = 5;
+
+  // Iterate newest-first when true. The cursor body encodes the direction
+  // so resume continues in the same order.
+  bool descending = 6;
+}
+
+// One indexed transparent-address tx-history entry.
+message TransparentAddressTxId {
+  // Canonical transaction id in RPC byte order (64 lowercase hex
+  // characters). Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string transaction_id = 1;
+
+  // Height of the block that mined the indexed transaction.
+  uint32 block_height = 2;
+
+  // Position of the indexed transaction inside its block.
+  uint32 tx_index_in_block = 3;
+
+  // Canonical block hash in RPC byte order (64 lowercase hex characters)
+  // of the block that mined the indexed transaction.
+  // Reference: Zcash protocol spec term `\rpcByteOrder`.
+  string block_hash = 4;
+
+  // Cursor for resuming strictly after this entry. Empty on every entry
+  // except the last one when more entries may be available.
+  bytes cursor = 5;
+}
+
+// One message in the [`TransparentAddressTxIdsInRange`] server stream.
+//
+// The server sends exactly one `header` message first, then one `item`
+// message per indexed transaction. The header carries the single pinned chain
+// epoch for the whole stream; payload items carry no per-element epoch. This
+// makes the stream-wide single-epoch guarantee structural rather than a
+// per-item repetition.
+message TransparentAddressTxIdsChunk {
+  oneof body {
+    // Leading header carrying the chain epoch pinned for the entire stream
+    // (ADR-0011). Sent once, before any item.
+    ChainView header = 1;
+
+    // One indexed transparent-address tx-history entry. Sent after the header.
+    TransparentAddressTxId item = 2;
+  }
+}
+
+// Native Zinder wallet and wallet-like application query service.
+service WalletQuery {
+  // Return latest visible block metadata.
+  rpc LatestBlock(LatestBlockRequest) returns (LatestBlockResponse);
+
+  // Return the block at the safe tip height: the highest height at which
+  // both compact blocks and a coherent tree-state checkpoint are
+  // guaranteed available. The wallet uses this as its scan ceiling.
+  rpc LatestSafeBlock(LatestSafeBlockRequest) returns (LatestSafeBlockResponse);
+
+  // Resolve a typed block selector against the canonical best chain.
+  rpc BlockIdBySelector(BlockSelectorRequest) returns (BlockIdResponse);
+
+  // Return the typed block-header read model at a typed block selector.
+  rpc BlockHeaderBySelector(BlockSelectorRequest) returns (BlockHeaderResponse);
+
+  // Return one compact block at a given height.
+  rpc CompactBlock(CompactBlockRequest) returns (CompactBlockResponse);
+
+  // Stream compact blocks for an inclusive height range.
+  rpc CompactBlocksInRange(CompactBlocksInRangeRequest) returns (stream CompactBlocksInRangeChunk);
+
+  // Return one full serialized block at a given height. Served from the
+  // stored block blob, present only when the writer deployment retains
+  // block blobs (`storage.raw_blob_policy = "all"`); otherwise NOT_FOUND.
+  rpc FullBlock(FullBlockRequest) returns (FullBlockResponse);
+
+  // Stream full serialized blocks for an inclusive height range. Each chunk
+  // carries its own ChainView. Served from stored block blobs; reads for
+  // unretained heights return NOT_FOUND.
+  rpc FullBlocksInRange(FullBlocksInRangeRequest) returns (stream FullBlocksInRangeChunk);
+
+  // Return the typed status of one transaction by transaction id. NotFound
+  // maps to gRPC NOT_FOUND; mempool, mined, and conflicting-chain states
+  // are typed in the response location oneof.
+  rpc Transaction(TransactionRequest) returns (TransactionStatusResponse);
+
+  // Return the tree state at one exact block height. Served from a stored
+  // checkpoint when present, otherwise filled from the configured upstream node.
+  rpc TreeStateAtHeight(TreeStateAtHeightRequest) returns (TreeStateResponse);
+
+  // Return the latest checkpoint tree state visible to the selected epoch.
+  rpc LatestTreeStateCheckpoint(LatestTreeStateCheckpointRequest) returns (TreeStateResponse);
+
+  // Return shielded subtree roots.
+  rpc SubtreeRoots(SubtreeRootsRequest) returns (SubtreeRootsResponse);
+
+  // Broadcast a raw transaction.
+  rpc BroadcastTransaction(BroadcastTransactionRequest) returns (BroadcastTransactionResponse);
+
+  // Stream replayable chain events.
+  rpc ChainEvents(ChainEventsRequest) returns (stream ChainEventEnvelope);
+
+  // Return a bounded snapshot of the live mempool index.
+  rpc MempoolSnapshot(MempoolSnapshotRequest) returns (MempoolSnapshotResponse);
+
+  // Stream replayable mempool events.
+  rpc MempoolEvents(MempoolEventsRequest) returns (stream MempoolEventEnvelope);
+
+  // Return unmined transparent outputs that fund a transparent address. Mirrors
+  // the typed Rust `transparent_mempool_outputs_by_address` so non-Rust clients
+  // do not have to scan the full mempool snapshot.
+  rpc TransparentMempoolOutputsByAddress(TransparentMempoolOutputsByAddressRequest)
+      returns (TransparentMempoolOutputsByAddressResponse);
+
+  // Return the unmined spends of a batch of transparent outpoints, when
+  // any are visible in the live mempool index.
+  rpc TransparentMempoolSpendsByOutpoint(TransparentMempoolSpendsByOutpointRequest)
+      returns (TransparentMempoolSpendsByOutpointResponse);
+
+  // Resolve a batch of canonical-chain transparent outpoints to their
+  // referenced outputs. Closes the prevout-resolution gap that forced
+  // consumers to fetch one full transaction per input.
+  rpc TransparentOutputsByOutpoint(TransparentOutputsByOutpointRequest)
+      returns (TransparentOutputsByOutpointResponse);
+
+  // Resolve a batch of canonical-chain transparent outpoints to where each was
+  // spent: the spending transaction, input index, and block that mined the
+  // spend. The canonical (confirmed) half of the getspentinfo-equivalent
+  // surface; the unmined half is `TransparentMempoolSpendsByOutpoint`.
+  rpc TransparentSpendsByOutpoint(TransparentSpendsByOutpointRequest)
+      returns (TransparentSpendsByOutpointResponse);
+
+  // Resolve a batch of canonical-chain transparent outpoints to their
+  // referenced output, returning each only while it is unspent on the
+  // canonical chain at the response epoch (null-if-spent, gettxout-equivalent).
+  // Composes the output resolver and the canonical reverse-spend reader
+  // server-side. Canonical-only: a mempool-aware caller subtracts the spends
+  // from `TransparentMempoolSpendsByOutpoint`.
+  rpc TransparentUnspentOutputsByOutpoint(TransparentUnspentOutputsByOutpointRequest)
+      returns (TransparentUnspentOutputsByOutpointResponse);
+
+  // Resolve a batch of live-mempool transparent outpoints to their
+  // referenced outputs. Used by chained-mempool-tx flows where the
+  // creating transaction has not yet confirmed.
+  rpc TransparentMempoolOutputsByOutpoint(TransparentMempoolOutputsByOutpointRequest)
+      returns (TransparentOutputsByOutpointResponse);
+
+  // Stream the complete unspent transparent output set for one transparent
+  // address at a single pinned chain epoch. The stream is always complete:
+  // no cursor, no entry cap.
+  rpc TransparentAddressUnspentOutputs(TransparentAddressUnspentOutputsRequest)
+      returns (stream TransparentUnspentOutputsChunk);
+
+  // Stream the transparent-address tx-history index for an inclusive
+  // height range, in ascending or descending mined order.
+  rpc TransparentAddressTxIdsInRange(TransparentAddressTxIdsInRangeRequest)
+      returns (stream TransparentAddressTxIdsChunk);
+
+  // Return the transparent-address balance summed across the requested
+  // addresses. The confirmed total is summed in-process from the canonical
+  // unspent-output index; the signed `unconfirmed_delta_zat` overlays the
+  // live mempool when an ingest-control endpoint is wired and is zero
+  // otherwise. Capability: `wallet.address.transparent_balance_v1`.
+  rpc TransparentAddressBalance(TransparentAddressBalanceRequest)
+      returns (TransparentAddressBalanceResponse);
+
+  // Return chain-wide value-pool totals at the upstream node's current tip.
+  // The response binds the source snapshot to the upstream tip's height and
+  // hash. Capability: `wallet.read.chain_value_pools_at_tip_v1`. Storage-only
+  // query deployments reject this call unless they are configured with the
+  // writer's ingest-control endpoint.
+  rpc ChainValuePoolsAtTip(ChainValuePoolsAtTipRequest)
+      returns (ChainValuePoolsAtTipResponse);
+
+  // Return the chain-wide transparent UTXO-set summary: the count and total
+  // value of unspent transparent outputs at the settled tip. A request-time
+  // full scan of the canonical current-UTXO projection (gettxoutsetinfo-
+  // equivalent, minus the format-dependent serialized hash and byte size).
+  // Capability: `wallet.read.transparent_utxo_set_summary_v1`.
+  rpc TransparentUtxoSetSummary(TransparentUtxoSetSummaryRequest)
+      returns (TransparentUtxoSetSummaryResponse);
+
+  // Return the server capability descriptor.
+  rpc ServerInfo(ServerInfoRequest) returns (ServerInfoResponse);
+
+  // Return the configured node's advertised consensus-upgrade schedule.
+  // Capability: `wallet.read.network_upgrade_activations_v1`.
+  rpc NetworkUpgradeActivations(NetworkUpgradeActivationsRequest)
+      returns (NetworkUpgradeActivationsResponse);
+}

@@ -580,6 +580,9 @@ pub struct IndexerSection {
     /// required: they are used for mempool access, transaction submission, and any
     /// non-best-chain block reads.
     pub read_state_service: Option<ReadStateServiceSection>,
+
+    /// Settings for the Zinder chain-data backend.
+    pub zinder: Option<ZinderSection>,
 }
 
 impl IndexerSection {
@@ -615,6 +618,18 @@ pub struct ReadStateServiceSection {
     ///
     /// This can be either an absolute path, or a path relative to the data directory.
     pub zebra_state_path: PathBuf,
+}
+
+/// Settings for the Zinder chain-data backend.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Documented, DocumentedFields)]
+#[serde(deny_unknown_fields)]
+pub struct ZinderSection {
+    /// Address (`host:port`) of the `zinder-query` gRPC interface.
+    ///
+    /// The connection is plaintext. Production deployments should use a
+    /// loopback or trusted-LAN endpoint, or terminate transport security in an
+    /// operator-managed proxy.
+    pub grpc_address: String,
 }
 
 /// Settings for the key store.
@@ -839,6 +854,7 @@ impl ZalletConfig {
             indexer("db_path", conf.indexer.db_path()),
             read_state_service("grpc_address", "127.0.0.1:8230"),
             read_state_service("zebra_state_path", "/home/<username>/.cache/zebra"),
+            zinder("grpc_address", "127.0.0.1:9067"),
             #[cfg(zallet_build = "wallet")]
             keystore("encryption_identity", conf.keystore.encryption_identity()),
             #[cfg(zallet_build = "wallet")]
@@ -873,6 +889,7 @@ impl ZalletConfig {
         const FEATURES_EXPERIMENTAL: &str = "features.experimental";
         const INDEXER: &str = "indexer";
         const READ_STATE_SERVICE: &str = "indexer.read_state_service";
+        const ZINDER: &str = "indexer.zinder";
         #[cfg(zallet_build = "wallet")]
         const KEYSTORE: &str = "keystore";
         #[cfg(zallet_build = "wallet")]
@@ -933,6 +950,12 @@ impl ZalletConfig {
             d: T,
         ) -> ((&'static str, &'static str), Option<toml::Value>) {
             field(READ_STATE_SERVICE, f, d)
+        }
+        fn zinder<T: Serialize>(
+            f: &'static str,
+            d: T,
+        ) -> ((&'static str, &'static str), Option<toml::Value>) {
+            field(ZINDER, f, d)
         }
         #[cfg(zallet_build = "wallet")]
         fn keystore<T: Serialize>(
@@ -1097,6 +1120,9 @@ impl ZalletConfig {
                     >(
                         config, READ_STATE_SERVICE, sec_def
                     ),
+                    (INDEXER, "zinder") => {
+                        write_optional_section::<ZinderSection>(config, ZINDER, sec_def)
+                    }
                     // Ignore flattened fields (present to support parsing old configs).
                     (FEATURES_DEPRECATED, "other") | (FEATURES_EXPERIMENTAL, "other") => (),
                     // Render section field.
@@ -1227,7 +1253,7 @@ mod tests {
         }
     }
 
-    use super::ReadStateServiceSection;
+    use super::{ReadStateServiceSection, ZinderSection};
 
     #[test]
     fn read_state_service_section_parses() {
@@ -1247,6 +1273,17 @@ zebra_state_path = "/home/user/.cache/zebra"
     fn read_state_service_section_requires_all_fields() {
         let toml = r#"grpc_address = "127.0.0.1:8231""#;
         assert!(toml::from_str::<ReadStateServiceSection>(toml).is_err());
+    }
+
+    #[test]
+    fn zinder_section_parses() {
+        let section: ZinderSection = toml::from_str(r#"grpc_address = "127.0.0.1:9067""#).unwrap();
+        assert_eq!(section.grpc_address, "127.0.0.1:9067");
+    }
+
+    #[test]
+    fn zinder_section_requires_grpc_address() {
+        assert!(toml::from_str::<ZinderSection>("").is_err());
     }
 
     #[test]

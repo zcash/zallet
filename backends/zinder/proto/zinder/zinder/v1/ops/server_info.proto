@@ -1,0 +1,43 @@
+// Cross-service ServerInfo message shared by every Zinder gRPC surface.
+//
+// Per-service descriptors (WalletQuery.WalletServerInfo,
+// ExplorerQuery.ExplorerServerInfo) layer service-specific fields on top;
+// the message defined here is the common contract that orchestrators,
+// SDK generators, and CLI tooling consume.
+//
+// Future Zinder gRPC services (IngestControl ops surface, any v2 plane)
+// return this message directly through their `ServerInfo` rpc.
+
+syntax = "proto3";
+
+package zinder.v1.ops;
+
+// Cross-service identity and capability descriptor.
+//
+// Every Zinder gRPC service that wants to advertise its identity and
+// capability set returns this message from a `ServerInfo` rpc. Some
+// services wrap it inside a richer descriptor (WalletQuery layers
+// retention windows and reorg-window depth on top); new services should
+// return it directly until they accumulate service-specific fields.
+message ServerInfo {
+  // Network identifier: `zcash-mainnet`, `zcash-testnet`, or `zcash-regtest`.
+  string network = 1;
+
+  // Service name. Stable diagnostic identifier such as `zinder-ingest`,
+  // `zinder-query`, `zinder-compat-lightwalletd`, `zinder-explorer`.
+  string service_name = 2;
+
+  // Service semantic version sourced from `CARGO_PKG_VERSION`.
+  string service_version = 3;
+
+  // Active capability strings advertised by this service. Exact-match.
+  // Order is not significant. Clients gate features on these strings;
+  // additions land as new capability identifiers (the `_v1` suffix is
+  // part of the identity), not as version bumps.
+  repeated string capabilities = 4;
+
+  // Monotonically increasing marker, incremented whenever the semantics of
+  // an existing wire surface are revised in place. Consumers assert a
+  // minimum.
+  uint32 contract_revision = 5;
+}
