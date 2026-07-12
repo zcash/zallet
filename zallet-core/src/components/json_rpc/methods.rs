@@ -587,9 +587,16 @@ pub(crate) trait WalletRpc {
     ///
     /// - `fromaddress` (string, required) The transparent or shielded address to send the
     ///   funds from. The following special strings are also accepted:
-    ///   - `"ANY_TADDR"`: Select non-coinbase UTXOs from any transparent addresses
-    ///     belonging to the wallet. Use `z_shieldcoinbase` to shield coinbase UTXOs from
-    ///     multiple transparent addresses.
+    ///   - `"ANY_TADDR"`: Select non-coinbase UTXOs from any transparent address in the
+    ///     legacy `zcashd` pool of funds. This requires
+    ///     `features.legacy_pool_seed_fingerprint` to be set in the Zallet config file to
+    ///     the seed fingerprint of the `zcashd` wallet that was migrated into this wallet;
+    ///     without it there is no legacy pool to spend from and the call is rejected.
+    ///     Covering the payment from more than one of the pool's addresses links them
+    ///     on-chain, so such a call requires a privacy policy of
+    ///     `AllowLinkingAccountAddresses` (or of `NoPrivacy`, if it also has a transparent
+    ///     recipient or transparent change). Use `z_shieldcoinbase` to shield coinbase
+    ///     UTXOs from multiple transparent addresses.
     ///   If a unified address is provided for this argument, the TXOs to be spent will be
     ///   selected from those associated with the account corresponding to that unified
     ///   address, from value pools corresponding to the receivers included in the UA.

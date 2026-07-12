@@ -38,11 +38,6 @@ impl StartCmd {
         if config.builder.tx_expiry_delta.is_some() {
             warn_unused("builder.tx_expiry_delta");
         }
-        // TODO: https://github.com/zcash/zallet/issues/138
-        #[cfg(zallet_build = "wallet")]
-        if config.features.legacy_pool_seed_fingerprint.is_some() {
-            warn_unused("features.legacy_pool_seed_fingerprint");
-        }
         // TODO: https://github.com/zcash/zallet/issues/201
         #[cfg(zallet_build = "wallet")]
         if config.keystore.require_backup.is_some() {

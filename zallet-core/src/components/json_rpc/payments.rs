@@ -7,13 +7,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
-    data_api::WalletRead,
+    data_api::{Account as _, WalletRead},
     proposal::Proposal,
     zip321::{Payment, TransactionRequest},
 };
 use zcash_client_sqlite::wallet::Account;
 use zcash_keys::address::Address;
 use zcash_protocol::{PoolType, TxId, memo::MemoBytes, value::Zatoshis};
+use zip32::{AccountId, fingerprint::SeedFingerprint};
 
 use crate::{
     components::{chain::Chain, database::DbConnection},
@@ -21,7 +22,10 @@ use crate::{
     prelude::APP,
 };
 
-use super::{server::LegacyCode, utils::zatoshis_from_value};
+use super::{
+    server::LegacyCode,
+    utils::{ZCASH_LEGACY_ACCOUNT, zatoshis_from_value},
+};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub(crate) struct AmountParameter {
@@ -624,6 +628,44 @@ mod parse_memo_tests {
     }
 }
 
+#[cfg(test)]
+mod legacy_pool_tests {
+    use zip32::{AccountId, fingerprint::SeedFingerprint};
+
+    use super::{ZCASH_LEGACY_ACCOUNT, is_legacy_pool_account};
+
+    /// The legacy pool is one account of one seed: the account at the legacy ZIP 32 index,
+    /// derived from the seed the operator named. Nothing else may be spent as `ANY_TADDR`,
+    /// since every other account is a separate pool of funds under Zallet's semantics.
+    #[test]
+    fn legacy_pool_is_only_the_named_seeds_legacy_account() {
+        let legacy_seed_fp = SeedFingerprint::from_bytes([1; 32]);
+        let other_seed_fp = SeedFingerprint::from_bytes([2; 32]);
+        let legacy_index = AccountId::try_from(ZCASH_LEGACY_ACCOUNT)
+            .expect("the legacy account index is a valid ZIP 32 account index");
+
+        assert!(is_legacy_pool_account(
+            &legacy_seed_fp,
+            legacy_index,
+            &legacy_seed_fp,
+        ));
+
+        // A regular account of the legacy seed is a pool of funds in its own right.
+        assert!(!is_legacy_pool_account(
+            &legacy_seed_fp,
+            AccountId::ZERO,
+            &legacy_seed_fp,
+        ));
+
+        // Another `zcashd` wallet's legacy account is not this wallet's legacy pool.
+        assert!(!is_legacy_pool_account(
+            &other_seed_fp,
+            legacy_index,
+            &legacy_seed_fp,
+        ));
+    }
+}
+
 pub(super) fn get_account_for_address(
     wallet: &DbConnection,
     address: &Address,
@@ -666,6 +708,78 @@ pub(super) fn get_account_for_address(
 
     Err(LegacyCode::InvalidAddressOrKey
         .with_static("Invalid from address, no payment source found for address."))
+}
+
+/// Whether an account with this ZIP 32 derivation holds the legacy `zcashd` pool of funds
+/// belonging to the wallet identified by `legacy_seed_fp`.
+///
+/// From v4.7.0 onwards, `zcashd` derived every address handed out by the legacy
+/// `getnewaddress` and `z_getnewaddress` methods from the wallet's mnemonic at ZIP 32
+/// account index [`ZCASH_LEGACY_ACCOUNT`], so the pool is exactly that one account of that
+/// one seed. `zallet migrate-zcashd-wallet` preserves it: it re-points a pre-v4.7.0 wallet's
+/// legacy account at the mnemonic `zcashd` would have grown on upgrade, and imports the
+/// wallet's standalone (`importprivkey`) transparent keys into the same account.
+///
+/// A regular account of the legacy seed is therefore not the legacy pool, and neither is
+/// another seed's legacy account: both would spend funds the caller did not name.
+fn is_legacy_pool_account(
+    seed_fingerprint: &SeedFingerprint,
+    account_index: AccountId,
+    legacy_seed_fp: &SeedFingerprint,
+) -> bool {
+    seed_fingerprint == legacy_seed_fp && u32::from(account_index) == ZCASH_LEGACY_ACCOUNT
+}
+
+/// Returns the account holding the legacy `zcashd` pool of funds.
+///
+/// Which of the wallet's seeds is the legacy one cannot be inferred: a Zallet wallet may hold
+/// accounts derived from several seeds, while `zcashd`'s legacy semantics were defined for a
+/// single wallet. The operator names it with the `features.legacy_pool_seed_fingerprint`
+/// config option (whose value `zallet migrate-zcashd-wallet` prints on import). With the
+/// option unset, this wallet has no legacy pool and callers that ask to spend from it are
+/// rejected.
+pub(super) fn get_legacy_pool_account(wallet: &DbConnection) -> RpcResult<Account> {
+    let legacy_seed_fp = APP
+        .config()
+        .features
+        .legacy_pool_seed_fingerprint
+        .ok_or_else(|| {
+            LegacyCode::WalletAccountsUnsupported.with_static(
+                "The legacy pool of funds is disabled. To enable it, set \
+                 `features.legacy_pool_seed_fingerprint` in the Zallet config file to the \
+                 seed fingerprint of the `zcashd` wallet migrated into this wallet.",
+            )
+        })?;
+
+    // TODO: Make this more efficient with a `WalletRead` method.
+    //       https://github.com/zcash/librustzcash/issues/1944
+    for account_id in wallet
+        .get_account_ids()
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+    {
+        let account = wallet
+            .get_account(account_id)
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+            // This would be a race condition between this and account deletion.
+            .ok_or_else(|| LegacyCode::Database.with_static("Account vanished mid-call"))?;
+
+        // Accounts imported from a UFVK have no ZIP 32 derivation, and cannot be the legacy
+        // pool: `zcashd` derived the pool from the wallet's seed.
+        if account.source().key_derivation().is_some_and(|derivation| {
+            is_legacy_pool_account(
+                derivation.seed_fingerprint(),
+                derivation.account_index(),
+                &legacy_seed_fp,
+            )
+        }) {
+            return Ok(account);
+        }
+    }
+
+    Err(LegacyCode::Wallet.with_message(format!(
+        "This wallet holds no legacy account for seed fingerprint {legacy_seed_fp}. Check that \
+         `features.legacy_pool_seed_fingerprint` names a `zcashd` wallet migrated into it.",
+    )))
 }
 
 /// Broadcasts the specified transactions to the network, if configured to do so.

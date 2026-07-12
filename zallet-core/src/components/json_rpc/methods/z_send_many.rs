@@ -40,7 +40,7 @@ use crate::{
             payments::{
                 AmountParameter, IncompatiblePrivacyPolicy, PrivacyPolicy, SendResult,
                 broadcast_transactions, build_request, enforce_privacy_policy,
-                get_account_for_address,
+                get_account_for_address, get_legacy_pool_account,
             },
             server::LegacyCode,
         },
@@ -89,6 +89,27 @@ fn spend_policy_for(source: &Address) -> SpendPolicy {
     }
 }
 
+/// The sources of funds a transfer from `ANY_TADDR` may draw upon.
+///
+/// `zcashd` treated the transparent addresses of a wallet as a single pool of funds, and
+/// `ANY_TADDR` drew on any of them. Zallet holds that pool in one account (see
+/// [`get_legacy_pool_account`]), and [`TransparentSpendPolicy::any_account_addr`] reproduces
+/// the selection within it: the proposer spends whichever of the account's transparent
+/// receivers cover the request, linking them on-chain when one address does not suffice.
+///
+/// That linkage is bounded by the caller's privacy policy rather than here: a proposal
+/// spending more than one transparent address is rejected by `enforce_privacy_policy` unless
+/// the caller permitted `AllowLinkingAccountAddresses` (or `NoPrivacy`, when the transaction
+/// also has a transparent output or transparent change).
+///
+/// Like a bare transparent source, this permits no shielded pool: `ANY_TADDR` names
+/// transparent funds, so it must not become a way to spend the account's notes. Coinbase is
+/// likewise excluded (`CoinbasePolicy::NonCoinbase`), matching `zcashd`, which sent callers
+/// to `z_shieldcoinbase` for coinbase funds.
+fn legacy_pool_spend_policy() -> SpendPolicy {
+    SpendPolicy::shielded_pools([]).with_transparent(TransparentSpendPolicy::any_account_addr())
+}
+
 /// Whether change may be returned to the transparent pool.
 ///
 /// Permitted exactly when `spend_policy` can spend transparent funds in the first place, which
@@ -131,10 +152,12 @@ pub(crate) async fn call<C: Chain>(
     let request = build_request(&amounts)?;
 
     let (account, spend_policy) = match fromaddress.as_str() {
-        // Select from the legacy transparent address pool.
-        // TODO: Support this if we're going to. https://github.com/zcash/zallet/issues/138
-        "ANY_TADDR" => Err(LegacyCode::WalletAccountsUnsupported
-            .with_static("The legacy account is currently unsupported for spending from")),
+        // Select from the legacy transparent address pool, which this wallet holds in a
+        // single account. Enabled by `features.legacy_pool_seed_fingerprint`.
+        "ANY_TADDR" => (
+            get_legacy_pool_account(wallet.as_ref())?,
+            legacy_pool_spend_policy(),
+        ),
         // Select the account corresponding to the given address.
         _ => {
             let address = Address::decode(wallet.params(), &fromaddress).ok_or_else(|| {
@@ -145,9 +168,9 @@ pub(crate) async fn call<C: Chain>(
 
             let account = get_account_for_address(wallet.as_ref(), &address)?;
 
-            Ok((account, spend_policy_for(&address)))
+            (account, spend_policy_for(&address))
         }
-    }?;
+    };
 
     let privacy_policy = match privacy_policy.as_deref() {
         Some("LegacyCompat") => Err(LegacyCode::InvalidParameter
@@ -442,7 +465,46 @@ mod tests {
     use zcash_protocol::consensus::Network;
     use zip32::AccountId;
 
-    use super::{SpendPolicy, spend_policy_for, transparent_change_policy_for};
+    use super::{
+        SpendPolicy, legacy_pool_spend_policy, spend_policy_for, transparent_change_policy_for,
+    };
+
+    /// `ANY_TADDR` draws on the legacy pool's transparent funds, on any address within it, and
+    /// on nothing else.
+    #[test]
+    fn legacy_pool_source_spends_any_account_taddr_and_no_shielded_pool() {
+        let policy = legacy_pool_spend_policy();
+
+        // As for a bare transparent source, the empty permitted-pool set says exhaustively
+        // that no shielded note can be spent, including from pools added after this was
+        // written.
+        assert!(
+            policy.shielded().is_empty(),
+            "the legacy pool holds transparent funds, so no shielded pool may be spent, got {:?}",
+            policy.shielded(),
+        );
+
+        let transparent = policy
+            .transparent()
+            .expect("the legacy pool permits transparent spending");
+
+        // The whole point of `ANY_TADDR`: the proposer picks the addresses, rather than the
+        // caller naming one.
+        assert!(
+            matches!(transparent.source(), TransparentSource::AnyAccountAddr),
+            "`ANY_TADDR` must draw on any of the account's transparent receivers, got {:?}",
+            transparent.source(),
+        );
+
+        // Coinbase is `z_shieldcoinbase`'s job, in Zallet as in `zcashd`.
+        assert_eq!(transparent.coinbase(), CoinbasePolicy::NonCoinbase);
+
+        // A fully transparent send keeps its change transparent.
+        assert_eq!(
+            transparent_change_policy_for(&policy),
+            TransparentChangePolicy::TransparentChangeAllowed,
+        );
+    }
 
     /// A unified address carrying every receiver type, derived from `seed` and `account`.
     ///

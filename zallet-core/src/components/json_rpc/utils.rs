@@ -46,7 +46,7 @@ use {
 /// The account identifier used for HD derivation of transparent and Sapling addresses via
 /// the legacy `getnewaddress` and `z_getnewaddress` code paths.
 #[cfg(zallet_build = "wallet")]
-const ZCASH_LEGACY_ACCOUNT: u32 = 0x7fff_ffff;
+pub(super) const ZCASH_LEGACY_ACCOUNT: u32 = 0x7fff_ffff;
 
 #[cfg(zallet_build = "wallet")]
 pub(super) async fn ensure_wallet_is_unlocked(keystore: &KeyStore) -> RpcResult<()> {
