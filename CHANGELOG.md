@@ -19,11 +19,21 @@ be considered breaking changes.
   proposal builder, so no transparent input could ever be selected, and the
   `AllowFullyTransparent` privacy policy was unreachable.
   - Transparent funds are spendable only when `fromaddress` names a transparent
-    address. Input selection then draws on that address's UTXOs alone, so a
-    shielded send can never silently reach into transparent funds, and the named
-    address is not linked to the account's other transparent receivers. Every
-    other source remains shielded-only, unchanged. (`ANY_TADDR` as a source is
-    still unsupported.)
+    address, or is `ANY_TADDR` (see below). A named transparent address draws on
+    that address's UTXOs alone, so a shielded send can never silently reach into
+    transparent funds, and the named address is not linked to the account's other
+    transparent receivers. Every other source remains shielded-only, unchanged.
+  - `ANY_TADDR` is now supported as a `fromaddress`, spending non-coinbase UTXOs
+    from any transparent address in the legacy `zcashd` pool of funds, as it did
+    in `zcashd`. The pool is the account that `migrate-zcashd-wallet` creates for
+    the migrated wallet's mnemonic, so it must be named:
+    `features.legacy_pool_seed_fingerprint` must be set to that wallet's seed
+    fingerprint (the value the migration prints), otherwise the wallet has no
+    legacy pool and the call is rejected. Setting the option no longer logs an
+    "unused config option" warning at startup. Covering the payment from more
+    than one of the pool's addresses links them on-chain, so it requires the
+    `AllowLinkingAccountAddresses` privacy policy (or `NoPrivacy`, when the
+    transaction also has a transparent recipient or transparent change).
   - Coinbase outputs are not spendable this way: consensus requires them to be
     spent to a single shielded output, which remains `z_shieldcoinbase`'s job. A
     transparent spend therefore requires a non-coinbase UTXO.
