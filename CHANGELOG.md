@@ -51,6 +51,16 @@ be considered breaking changes.
   longer leave the spending key stored (and exportable via `z_exportkey`) while
   the wallet has no account to scan for it.
 
+### Fixed
+
+- A failure to service a single transaction data request (for example when the
+  requested transaction was reorged away and the validator answers
+  `RPC -5: No such mempool or main chain transaction`) no longer shuts the
+  wallet down. The request is logged and retried on a later sync iteration.
+  Previously the failing request was regenerated from the wallet database on
+  every startup, so one stale request could put the wallet into a permanent
+  crash-loop.
+
 ## [0.1.0-beta.1] - 2026-07-12
 
 ### Added
