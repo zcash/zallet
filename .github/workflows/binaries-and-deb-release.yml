@@ -307,22 +307,29 @@ jobs:
             "debian:${SMOKE_TEST_DISTRO}-slim" \
             /usr/local/bin/zallet-zaino -h
 
-      - name: Prepare standalone binary artifact
+      - name: Prepare standalone release tarball
         env:
           PLATFORM_KEY: ${{ matrix.platform_key }}
           BINARY_SUFFIX: ${{ matrix.binary_suffix }}
         run: |
           set -euo pipefail
+          # Ship all three binaries (launcher + both real backends) in ONE
+          # self-sufficient tarball per platform, mirroring the .deb's layout
+          # (zcash/zallet#540) instead of three loose files. Preserves relative
+          # perms/paths so `tar -xzf ... && ./zallet -h` works out of the box.
+          STAGE="tarball/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}"
+          mkdir -p "$STAGE"
+          cp "build/${PLATFORM_KEY}/zallet"        "$STAGE/zallet"
+          cp "build/${PLATFORM_KEY}/zallet-zebra"  "$STAGE/zallet-zebra"
+          cp "build/${PLATFORM_KEY}/zallet-zaino"  "$STAGE/zallet-zaino"
+          chmod 0755 "$STAGE"/zallet*
           mkdir -p standalone
-          # The plain suffixed name stays the zebra-state BACKEND binary:
-          # standalone consumers expect a single self-sufficient file, and that
-          # is what this artifact has always been (its CLI name is `zallet`).
-          # The launcher — what the .deb installs as /usr/bin/zallet — needs a
-          # backend binary installed next to it, so it ships as an additive
-          # `-launcher` artifact rather than replacing the plain name.
-          cp "build/${PLATFORM_KEY}/zallet-zebra" "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}"
-          cp "build/${PLATFORM_KEY}/zallet-zaino"       "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}-zaino"
-          cp "build/${PLATFORM_KEY}/zallet"             "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}-launcher"
+          # Deterministic tarball: fixed mtime/owner so the .tar.gz digest
+          # doesn't depend on filesystem timestamps from this runner.
+          tar -C tarball --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime='@0' \
+            -czf "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.tar.gz" \
+            "zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}"
 
       - name: Generate provenance chain metadata
         env:
@@ -333,15 +340,16 @@ jobs:
           GH_RUNNER_OS: ${{ runner.os }}
         run: |
           set -euo pipefail
-          BINARY_PATH="standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}"
-          BINARY_SHA256=$(sha256sum "$BINARY_PATH" | cut -d' ' -f1)
+          TARBALL_PATH="standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.tar.gz"
+          TARBALL_SHA256=$(sha256sum "$TARBALL_PATH" | cut -d' ' -f1)
           TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          cat > "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.provenance.json" <<EOF
+          cat > "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.tar.gz.provenance.json" <<EOF
           {
             "version": "1.0",
             "subject": {
-              "name": "zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}",
-              "sha256": "${BINARY_SHA256}"
+              "name": "zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.tar.gz",
+              "sha256": "${TARBALL_SHA256}",
+              "contains": ["zallet", "zallet-zebra", "zallet-zaino"]
             },
             "source": {
               "image_ref": "${SOURCE_IMAGE_REF}",
@@ -358,22 +366,20 @@ jobs:
             },
             "verification": {
               "docker_image_attestation": "${SOURCE_IMAGE_REF}@${SOURCE_IMAGE_DIGEST}",
-              "note": "This binary was extracted from the Docker image above. Verify the image attestation for full build provenance."
+              "note": "This tarball's binaries were extracted from the Docker image above. Verify the image attestation for full build provenance."
             }
           }
           EOF
 
-      - name: GPG sign standalone binaries
+      - name: GPG sign standalone tarball
         env:
           BINARY_SUFFIX: ${{ matrix.binary_suffix }}
         run: |
           set -euo pipefail
-          for b in "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}" \
-                   "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}-zaino"; do
-            gpg -u sysadmin@zodl.com --armor --digest-algo SHA256 --detach-sign "$b"
-          done
+          gpg -u sysadmin@zodl.com --armor --digest-algo SHA256 --detach-sign \
+            "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.tar.gz"
 
-      - name: Generate SPDX SBOM for standalone binary
+      - name: Generate SPDX SBOM for standalone tarball
         env:
           BINARY_SUFFIX: ${{ matrix.binary_suffix }}
         run: |
@@ -382,48 +388,39 @@ jobs:
           import os
           from pathlib import Path
 
-          base = f"standalone/zallet-{os.environ['RELEASE_VERSION']}-{os.environ['BINARY_SUFFIX']}"
-          # SBOM for both backend binaries (default zebra-state + additive zaino).
-          for binary_path in (Path(base), Path(f"{base}-zaino")):
-              if not binary_path.exists():
-                  raise SystemExit(f"Missing binary at {binary_path}")
-              checksum = hashlib.sha256(binary_path.read_bytes()).hexdigest()
-              output = binary_path.parent / f"{binary_path.name}.sbom.spdx"
-              doc = f"""SPDXVersion: SPDX-2.3
+          tarball_path = Path(f"standalone/zallet-{os.environ['RELEASE_VERSION']}-{os.environ['BINARY_SUFFIX']}.tar.gz")
+          if not tarball_path.exists():
+              raise SystemExit(f"Missing tarball at {tarball_path}")
+          checksum = hashlib.sha256(tarball_path.read_bytes()).hexdigest()
+          output = tarball_path.parent / f"{tarball_path.name}.sbom.spdx"
+          doc = f"""SPDXVersion: SPDX-2.3
           DataLicense: CC0-1.0
           SPDXID: SPDXRef-DOCUMENT
-          DocumentName: {binary_path.name}
-          DocumentNamespace: https://github.com/{os.environ['GITHUB_REPOSITORY']}/sbom/{binary_path.name}-{checksum}
+          DocumentName: {tarball_path.name}
+          DocumentNamespace: https://github.com/{os.environ['GITHUB_REPOSITORY']}/sbom/{tarball_path.name}-{checksum}
           Creator: Tool: zallet-ci-spdx-1.0
           Created: 1970-01-01T00:00:00Z
-          PackageName: {binary_path.name}
+          PackageName: {tarball_path.name}
           PackageSPDXID: SPDXRef-Package-{checksum[:12]}
           PackageDownloadLocation: NOASSERTION
           FilesAnalyzed: false
           PackageChecksum: SHA256: {checksum}
+          # Contains: zallet (launcher), zallet-zebra, zallet-zaino
           """
-              output.write_text(doc, encoding="utf-8")
+          output.write_text(doc, encoding="utf-8")
           PY
 
-      - name: Generate build provenance attestation for binaries
+      - name: Generate build provenance attestation for tarball
         id: binary-attest
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
-          # Attest all standalone binaries in one call (multi-line subject-path).
-          subject-path: |
-            standalone/zallet-${{ env.RELEASE_VERSION }}-${{ matrix.binary_suffix }}
-            standalone/zallet-${{ env.RELEASE_VERSION }}-${{ matrix.binary_suffix }}-zaino
-            standalone/zallet-${{ env.RELEASE_VERSION }}-${{ matrix.binary_suffix }}-launcher
+          subject-path: standalone/zallet-${{ env.RELEASE_VERSION }}-${{ matrix.binary_suffix }}.tar.gz
 
-      - name: Save binary attestation bundle
+      - name: Save tarball attestation bundle
         env:
           BUNDLE_PATH: ${{ steps.binary-attest.outputs['bundle-path'] }}
         run: |
-          # One bundle covers all subjects; publish it under each name so every
-          # binary has a co-located .intoto.jsonl next to it in the Release.
-          cp -- "$BUNDLE_PATH" "standalone/zallet-${RELEASE_VERSION}-${{ matrix.binary_suffix }}.intoto.jsonl"
-          cp -- "$BUNDLE_PATH" "standalone/zallet-${RELEASE_VERSION}-${{ matrix.binary_suffix }}-zaino.intoto.jsonl"
-          cp -- "$BUNDLE_PATH" "standalone/zallet-${RELEASE_VERSION}-${{ matrix.binary_suffix }}-launcher.intoto.jsonl"
+          cp -- "$BUNDLE_PATH" "standalone/zallet-${RELEASE_VERSION}-${{ matrix.binary_suffix }}.tar.gz.intoto.jsonl"
 
       - name: Seed cargo target tree with the imported artifacts
         run: |

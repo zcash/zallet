@@ -178,12 +178,19 @@ jobs:
         run: |
           set -Eeuo pipefail
           REPO="docker.io/${NS}/${IMG}"
-          # Minimal scratch image around the static musl binary, matching the
-          # amd64 StageX runtime stage (USER 1000, ENTRYPOINT zallet).
-          mkdir -p ctx && cp build/runtime/linux-arm64/zallet ctx/zallet
+          # Minimal scratch image around the static musl binaries, matching the
+          # amd64 StageX runtime stage exactly: the launcher plus both real
+          # backend binaries it dispatches to (zcash/zallet#540).
+          mkdir -p ctx
+          cp build/runtime/linux-arm64/zallet        ctx/zallet
+          cp build/runtime/linux-arm64/zallet-zebra   ctx/zallet-zebra
+          cp build/runtime/linux-arm64/zallet-zaino   ctx/zallet-zaino
           cat > ctx/Dockerfile <<'DF'
           FROM scratch
           COPY zallet /usr/local/bin/zallet
+          COPY zallet-zebra /usr/local/bin/zallet-zebra
+          COPY zallet-zaino /usr/local/bin/zallet-zaino
+          WORKDIR /var/lib/zallet
           USER 1000:1000
           ENTRYPOINT ["zallet"]
           DF

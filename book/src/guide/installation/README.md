@@ -52,12 +52,10 @@ The official Docker image and Debian package ship the launcher and **both** back
 All three share the same CLI surface, config format, and subcommands; only the chain-data
 backend differs, and you can bypass the launcher by running a backend binary directly (it
 will refuse to run against a config whose `backend` key names the other backend). The
-pre-compiled standalone binaries on the GitHub Releases page are:
-`zallet-<version>-linux-<arch>` (the self-sufficient zebra-state backend),
-`zallet-<version>-linux-<arch>-zaino` (the zaino backend), and
-`zallet-<version>-linux-<arch>-launcher` (the launcher; it needs a backend binary
-installed next to it or on the `PATH`, so most single-binary deployments want one of the
-backend binaries instead).
+GitHub Releases page ships one signed tarball per platform,
+`zallet-<version>-linux-<arch>.tar.gz`, containing all three binaries (`zallet`,
+`zallet-zebra`, `zallet-zaino`) side by side — extract it and run whichever one you need
+directly, or run `zallet` for config-driven dispatch.
 
 ### Building from source with a chosen backend
 
