@@ -56,10 +56,12 @@ be considered breaking changes.
 - A failure to service a single transaction data request (for example when the
   requested transaction was reorged away and the validator answers
   `RPC -5: No such mempool or main chain transaction`) no longer shuts the
-  wallet down. The request is logged and retried on a later sync iteration.
-  Previously the failing request was regenerated from the wallet database on
-  every startup, so one stale request could put the wallet into a permanent
-  crash-loop.
+  wallet down. The request is logged and retried on a later sync iteration,
+  unless the chain source reported invalid data, which still aborts (it
+  indicates a bug, corruption, or a version mismatch that retrying cannot
+  resolve). Previously the failing request was regenerated from the wallet
+  database on every startup, so one stale request could put the wallet into a
+  permanent crash-loop.
 
 ## [0.1.0-beta.1] - 2026-07-12
 

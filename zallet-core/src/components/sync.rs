@@ -888,6 +888,9 @@ async fn data_requests<C: Chain>(
                     info!("Getting status of {txid}");
                     match chain_view.get_transaction_status(txid).await {
                         Ok(status) => db_data.set_transaction_status(txid, status)?,
+                        // Invalid data from the chain source indicates a bug, corruption,
+                        // or a version mismatch; retrying cannot help.
+                        Err(e @ ChainError::InvalidData(_)) => return Err(SyncError::Chain(e)),
                         Err(e) => warn!("Failed to get status of {txid} (will retry): {e}"),
                     }
                 }
@@ -915,6 +918,9 @@ async fn data_requests<C: Chain>(
                                 TransactionStatus::TxidNotRecognized,
                             )?;
                         }
+                        // Invalid data from the chain source indicates a bug, corruption,
+                        // or a version mismatch; retrying cannot help.
+                        Err(e @ ChainError::InvalidData(_)) => return Err(SyncError::Chain(e)),
                         Err(e) => warn!("Failed to enhance {txid} (will retry): {e}"),
                     }
                 }
