@@ -16,7 +16,11 @@ pub(crate) struct ResultType(String);
 pub(super) const PARAM_COMMAND_DESC: &str = "The command to get help on.";
 
 pub(crate) fn call(command: Option<&str>) -> Response {
-    Ok(ResultType(if let Some(command) = command {
+    Ok(ResultType(text(command)))
+}
+
+pub(crate) fn text(command: Option<&str>) -> String {
+    if let Some(command) = command {
         match METHODS.get(command) {
             None => format!("help: unknown command: {command}\n"),
             Some(method) => format!("{command}\n\n{}", method.description),
@@ -31,5 +35,5 @@ pub(crate) fn call(command: Option<&str>) -> Response {
             ret.push('\n');
         }
         ret
-    }))
+    }
 }
