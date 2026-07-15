@@ -63,7 +63,8 @@ you need.
 
 7. **Update your RPC clients.** Zallet implements a subset of the `zcashd` wallet
    JSON-RPC methods, some with [altered semantics](json_rpc.md), and some `zcashd`
-   methods are [intentionally omitted](json_rpc.md#omitted-rpc-methods). The
+   methods are [intentionally omitted](json_rpc.md#omitted-rpc-methods). Check
+   every method you use against the [method status matrix](rpc_status.md). The
    [`zallet rpc`](../cli/rpc.md) command replaces `zcash-cli`.
 
 ## What is migrated
