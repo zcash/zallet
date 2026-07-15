@@ -20,21 +20,22 @@ Statuses:
 
 | `zcashd` method | Status | Notes |
 |---|---|---|
-| `addmultisigaddress` | Not yet implemented | [#48](https://github.com/zcash/zallet/issues/48) |
+| `addmultisigaddress` | Not yet implemented | Blocked on P2SH support in `zcash_client_sqlite` ([#48](https://github.com/zcash/zallet/issues/48), [librustzcash#1370](https://github.com/zcash/librustzcash/issues/1370)) |
 | `backupwallet` | Not planned | Not planned as an RPC; may become a CLI command ([#49](https://github.com/zcash/zallet/issues/49)); robust backup is tracked in [#195](https://github.com/zcash/zallet/issues/195) |
 | `dumpprivkey` | Not planned | [#50](https://github.com/zcash/zallet/issues/50) |
+| `dumpwallet` | Not planned | Already removed from `zcashd` itself ([zcash#5513](https://github.com/zcash/zcash/issues/5513)); a [ZeWIF](https://github.com/zcash/zewif) export is planned instead ([#71](https://github.com/zcash/zallet/issues/71)) |
 | `encryptwallet` | Omitted | [Note](json_rpc.md#encryptwallet): key material is always encrypted |
 | `getbalance` | Not planned | Use `z_getbalanceforaccount` ([#51](https://github.com/zcash/zallet/issues/51)) |
 | `getnewaddress` | Omitted | Use `z_getnewaccount` + `z_getaddressforaccount` |
 | `getrawchangeaddress` | Omitted | [Note](json_rpc.md#getrawchangeaddress): change is handled internally |
 | `getreceivedbyaddress` | Not yet implemented | [#52](https://github.com/zcash/zallet/issues/52) |
-| `gettransaction` | Not planned | Superseded by `z_viewtransaction`, which now includes its top-level fields ([altered semantics](json_rpc.md#z_viewtransaction)) |
+| `gettransaction` | Not planned | Superseded by `z_viewtransaction`, which now includes its top-level fields ([altered semantics](json_rpc.md#z_viewtransaction)); `gettransaction` cannot represent partially-shielded transactions correctly |
 | `getunconfirmedbalance` | Not yet implemented | [#54](https://github.com/zcash/zallet/issues/54) |
-| `getwalletinfo` | Implemented | |
-| `importaddress` | Not yet implemented | [#56](https://github.com/zcash/zallet/issues/56); if you have the public key or redeem script, `z_importaddress` covers this today |
+| `getwalletinfo` | Implemented (partial) | Balance fields will not be populated — use dedicated balance methods ([#55](https://github.com/zcash/zallet/issues/55)); most other fields are currently placeholders, and only `unlocked_until` is meaningful |
+| `importaddress` | Not yet implemented | Planned to import into the legacy transparent account ([#56](https://github.com/zcash/zallet/issues/56)); if you have the public key or redeem script, `z_importaddress` covers this today |
 | `importprivkey` | Not yet implemented | [#57](https://github.com/zcash/zallet/issues/57) |
 | `importpubkey` | Omitted | Use `z_importaddress` |
-| `importwallet` | Omitted | Use `z_importkey` per key, or [`zallet migrate-zcashd-wallet`](../cli/migrate-zcashd-wallet.md) |
+| `importwallet` | Omitted | Use `z_importkey` per key, or [`zallet migrate-zcashd-wallet`](../cli/migrate-zcashd-wallet.md); a CLI import may be considered ([#81](https://github.com/zcash/zallet/issues/81)) |
 | `keypoolrefill` | Omitted | [Note](json_rpc.md#keypoolrefill): no key pool exists |
 | `listaddresses` | Implemented (altered) | [Changes](json_rpc.md#listaddresses) |
 | `listaddressgroupings` | Not planned | [#59](https://github.com/zcash/zallet/issues/59) |
@@ -51,21 +52,21 @@ Statuses:
 | `walletconfirmbackup` | Not planned | Internal `zcashd` method not intended to be called directly (related: [#201](https://github.com/zcash/zallet/issues/201)) |
 | `z_converttex` | Implemented | |
 | `z_exportkey` | Implemented | |
-| `z_exportviewingkey` | Not yet implemented | [#70](https://github.com/zcash/zallet/issues/70) |
+| `z_exportviewingkey` | Not yet implemented | Planned as UFVK/UIVK export ([#70](https://github.com/zcash/zallet/issues/70)) |
 | `z_exportwallet` | Not yet implemented | Planned as a [ZeWIF](https://github.com/zcash/zewif) export, likely a CLI operation rather than an RPC ([#71](https://github.com/zcash/zallet/issues/71)) |
 | `z_getaddressforaccount` | Implemented (altered) | [Changes](json_rpc.md#z_getaddressforaccount) |
 | `z_getbalance` | Omitted | Use `z_getbalanceforaccount` |
 | `z_getbalanceforaccount` | Implemented | |
-| `z_getbalanceforviewingkey` | Not planned | Use `z_getbalanceforaccount` ([#74](https://github.com/zcash/zallet/issues/74)) |
+| `z_getbalanceforviewingkey` | Not planned | Imported viewing keys get accounts with UUIDs, so `z_getbalanceforaccount` covers them ([#74](https://github.com/zcash/zallet/issues/74)) |
 | `z_getmigrationstatus` | Omitted | [Note](json_rpc.md#z_getmigrationstatus-and-z_setmigration): no Sprout support; may be revisited for a future pool migration ([#481](https://github.com/zcash/zallet/issues/481)) |
 | `z_getnewaccount` | Implemented (altered) | [Changes](json_rpc.md#z_getnewaccount) |
 | `z_getnewaddress` | Omitted | Use `z_getnewaccount` + `z_getaddressforaccount` |
 | `z_getnotescount` | Implemented | |
 | `z_getoperationresult` | Implemented | |
 | `z_getoperationstatus` | Implemented | |
-| `z_gettotalbalance` | Implemented (deprecated) | Use the account-scoped `z_getbalanceforaccount` / `z_getbalances` instead ([#324](https://github.com/zcash/zallet/issues/324)) |
+| `z_gettotalbalance` | Implemented (deprecated) | `include_watchonly = false` is not yet honored; use the account-scoped `z_getbalanceforaccount` / `z_getbalances` instead ([#324](https://github.com/zcash/zallet/issues/324)) |
 | `z_importkey` | Implemented (altered) | Sapling extended spending keys only |
-| `z_importviewingkey` | Not yet implemented | [#80](https://github.com/zcash/zallet/issues/80) |
+| `z_importviewingkey` | Not yet implemented | Planned for Sapling keys, UFVKs, and UIVKs ([#80](https://github.com/zcash/zallet/issues/80)) |
 | `z_importwallet` | Omitted | Use `z_importkey` per key, or [`zallet migrate-zcashd-wallet`](../cli/migrate-zcashd-wallet.md); reconsideration tracked in [#81](https://github.com/zcash/zallet/issues/81) |
 | `z_listaccounts` | Implemented (altered) | [Changes](json_rpc.md#z_listaccounts) |
 | `z_listaddresses` | Omitted | Use `listaddresses` |
