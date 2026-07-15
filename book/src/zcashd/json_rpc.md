@@ -156,7 +156,7 @@ methods have been updated to replace them.
 | `settxfee`             | Nothing; [ZIP 317] fees are always used |
 | `signrawtransaction`   | [To-be-implemented methods for working with PCZTs][pczts] |
 | `z_importwallet`       | `z_importkey` per key, or the [`zallet migrate-zcashd-wallet`](../cli/migrate-zcashd-wallet.md) command for a whole `zcashd` wallet |
-| `z_getbalance`         | `z_getbalanceforaccount`, `z_getbalanceforviewingkey`, `getbalance` |
+| `z_getbalance`         | `z_getbalanceforaccount` |
 | `z_getmigrationstatus` | Nothing; see [note](#z_getmigrationstatus-and-z_setmigration) |
 | `z_getnewaddress`      | `z_getnewaccount`, `z_getaddressforaccount` |
 | `z_listaddresses`      | `listaddresses` |
