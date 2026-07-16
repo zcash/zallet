@@ -123,6 +123,7 @@ use tokio::{
     task::JoinHandle,
     time,
 };
+use zcash_client_sqlite::ExtensionTransaction;
 use zip32::fingerprint::SeedFingerprint;
 
 use crate::network::Network;
@@ -609,10 +610,16 @@ impl KeyStore {
         Ok(legacy_seed_fp)
     }
 
-    pub(crate) async fn encrypt_and_store_standalone_sapling_key(
+    /// Encrypts a standalone Sapling spending key without touching the database.
+    ///
+    /// This is the fallible half of storing a standalone Sapling key: it needs the keystore
+    /// encryptor (unavailable while the wallet is locked), and it is async. Persist the
+    /// result with [`EncryptedStandaloneSaplingKey::insert`] to write it inside a wallet
+    /// transaction, or with `Self::store_standalone_sapling_key`.
+    pub(crate) async fn encrypt_standalone_sapling_key(
         &self,
         sapling_key: &ExtendedSpendingKey,
-    ) -> Result<DiversifiableFullViewingKey, Error> {
+    ) -> Result<EncryptedStandaloneSaplingKey, Error> {
         let encryptor = self.encryptor().await?;
 
         let dfvk = sapling_key.to_diversifiable_full_viewing_key();
@@ -620,22 +627,37 @@ impl KeyStore {
             .encrypt_standalone_sapling_key(sapling_key)
             .map_err(|e| ErrorKind::Generic.context(e))?;
 
+        Ok(EncryptedStandaloneSaplingKey {
+            dfvk,
+            encrypted_sapling_extsk,
+        })
+    }
+
+    /// Stores a pre-encrypted standalone Sapling key over a pooled connection.
+    ///
+    /// The upsert is idempotent; re-storing a key replaces any ciphertext already stored for it.
+    #[cfg(feature = "zcashd-import")]
+    pub(crate) async fn store_standalone_sapling_key(
+        &self,
+        encrypted: &EncryptedStandaloneSaplingKey,
+    ) -> Result<(), Error> {
         self.with_db_mut(|conn, _| {
-            conn.execute(
-                "INSERT INTO ext_zallet_keystore_standalone_sapling_keys
-                VALUES (:dfvk, :encrypted_sapling_extsk)
-                ON CONFLICT (dfvk) DO NOTHING ",
-                named_params! {
-                    ":dfvk": &dfvk.to_bytes(),
-                    ":encrypted_sapling_extsk": encrypted_sapling_extsk,
-                },
-            )
-            .map_err(|e| ErrorKind::Generic.context(e))?;
+            encrypted
+                .store_with(|sql, params| conn.execute(sql, params))
+                .map_err(|e| ErrorKind::Generic.context(e))?;
             Ok(())
         })
-        .await?;
+        .await
+    }
 
-        Ok(dfvk)
+    #[cfg(feature = "zcashd-import")]
+    pub(crate) async fn encrypt_and_store_standalone_sapling_key(
+        &self,
+        sapling_key: &ExtendedSpendingKey,
+    ) -> Result<DiversifiableFullViewingKey, Error> {
+        let encrypted = self.encrypt_standalone_sapling_key(sapling_key).await?;
+        self.store_standalone_sapling_key(&encrypted).await?;
+        Ok(encrypted.dfvk)
     }
 
     #[cfg(feature = "zcashd-import")]
@@ -967,6 +989,48 @@ impl Encryptor {
     ) -> Result<Vec<u8>, age::EncryptError> {
         let secret = SecretVec::new(key.secret_bytes().to_vec());
         encrypt_secret(&self.recipients, &secret)
+    }
+}
+
+/// Idempotent upsert for an encrypted standalone Sapling key, shared by the pooled-connection
+/// and in-transaction write paths so the SQL and table layout live in one place. The `dfvk`
+/// key uniquely identifies the plaintext, so re-storing a key replaces the stored ciphertext,
+/// refreshing it to the current encryption recipients.
+const INSERT_STANDALONE_SAPLING_KEY_SQL: &str =
+    "INSERT INTO ext_zallet_keystore_standalone_sapling_keys
+    VALUES (:dfvk, :encrypted_sapling_extsk)
+    ON CONFLICT (dfvk) DO UPDATE SET encrypted_sapling_extsk = :encrypted_sapling_extsk ";
+
+/// An age-encrypted standalone Sapling spending key, ready to be persisted.
+///
+/// Produced by [`KeyStore::encrypt_standalone_sapling_key`]; holds only ciphertext and the
+/// derived (public) full viewing key used as the table's key, so it carries no plaintext.
+pub(crate) struct EncryptedStandaloneSaplingKey {
+    dfvk: DiversifiableFullViewingKey,
+    encrypted_sapling_extsk: Vec<u8>,
+}
+
+impl EncryptedStandaloneSaplingKey {
+    /// Runs the upsert against the given executor (a pooled connection or an extension
+    /// transaction), replacing any ciphertext already stored for this key.
+    fn store_with(
+        &self,
+        execute: impl FnOnce(&str, &[(&str, &dyn rusqlite::ToSql)]) -> rusqlite::Result<usize>,
+    ) -> rusqlite::Result<()> {
+        execute(
+            INSERT_STANDALONE_SAPLING_KEY_SQL,
+            named_params! {
+                ":dfvk": &self.dfvk.to_bytes(),
+                ":encrypted_sapling_extsk": self.encrypted_sapling_extsk,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Writes this key into the keystore table using the given wallet-database extension
+    /// transaction, so the write commits atomically with the caller's other wallet writes.
+    pub(crate) fn insert(&self, ext: &ExtensionTransaction<'_>) -> rusqlite::Result<()> {
+        self.store_with(|sql, params| ext.execute(sql, params))
     }
 }
 
