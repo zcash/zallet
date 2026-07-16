@@ -65,6 +65,8 @@ mod openrpc;
 #[cfg(zallet_build = "wallet")]
 mod pool_migration;
 #[cfg(zallet_build = "wallet")]
+mod preview_pool_migration;
+#[cfg(zallet_build = "wallet")]
 mod recover_accounts;
 #[cfg(zallet_build = "wallet")]
 mod start_pool_migration;
@@ -773,6 +775,36 @@ pub(crate) trait WalletRpc {
         to_pool: String,
     ) -> start_pool_migration::Response;
 
+    /// Previews the note-split plan for migrating an account's balance between two value
+    /// pools, without scheduling or broadcasting anything.
+    ///
+    /// Reads the account's spendable balance in `from_pool` and runs the note-split
+    /// planner to show how it would be decomposed into the self-funding notes that cross
+    /// the turnstile (the crossing denominations, the residual left behind, and the
+    /// reserved prep fee). This is a read-only planning preview: unlike the rest of the
+    /// migration surface it is fully wired, because it only plans and does not build,
+    /// prove, or broadcast any transaction.
+    ///
+    /// # Arguments
+    /// - `account` (string or numeric, required): Either the UUID or the ZIP 32 account
+    ///   index of the account, as returned by `z_getnewaccount`.
+    /// - `from_pool` (string, required): The value pool to migrate funds from
+    ///   ("sapling", "orchard", or "ironwood").
+    /// - `to_pool` (string, required): The value pool to migrate funds to.
+    /// - `minconf` (numeric, optional, default=1): Only include outputs in transactions
+    ///   confirmed at least this many times.
+    /// - `strategy` (string, optional, default="randomized"): The denomination strategy
+    ///   to preview ("randomized" or "canonical").
+    #[method(name = "z_previewpoolmigration")]
+    async fn preview_pool_migration(
+        &self,
+        account: JsonValue,
+        from_pool: String,
+        to_pool: String,
+        minconf: Option<u32>,
+        strategy: Option<String>,
+    ) -> preview_pool_migration::Response;
+
     /// Returns the status of a previously-scheduled pool migration.
     ///
     /// NOTE: This is currently a scaffold. The identifier is validated, but the migration
@@ -1246,6 +1278,26 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         to_pool: String,
     ) -> start_pool_migration::Response {
         start_pool_migration::call(self.wallet().await?.as_ref(), &from_pool, &to_pool)
+    }
+
+    async fn preview_pool_migration(
+        &self,
+        account: JsonValue,
+        from_pool: String,
+        to_pool: String,
+        minconf: Option<u32>,
+        strategy: Option<String>,
+    ) -> preview_pool_migration::Response {
+        preview_pool_migration::call(
+            self.wallet().await?.as_ref(),
+            &self.keystore,
+            account,
+            &from_pool,
+            &to_pool,
+            minconf,
+            strategy,
+        )
+        .await
     }
 
     async fn get_pool_migration_status(
