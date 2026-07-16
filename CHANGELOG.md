@@ -8,6 +8,14 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- `zallet rpc help` is now answered locally instead of being sent to the
+  wallet's JSON-RPC server, so it no longer requires a config file, an
+  initialized wallet, or a running `zallet start`. The command argument may
+  now be passed bare (`zallet rpc help getwalletinfo`) in addition to the
+  JSON-quoted form.
+
 ## [0.1.0-beta.1] - 2026-07-12
 
 ### Added

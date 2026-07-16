@@ -41,6 +41,26 @@ macro_rules! wlnfl {
 
 impl AsyncRunnable for RpcCliCmd {
     async fn run(&self) -> Result<(), Error> {
+        // `help` is generated from static method metadata, so answer it locally
+        // instead of requiring a wallet with a running JSON-RPC server.
+        #[cfg(zallet_build = "wallet")]
+        if self.command == "help" {
+            let command = match self.params.as_slice() {
+                [] => None,
+                [command] => Some(
+                    serde_json::from_str::<String>(command).unwrap_or_else(|_| command.clone()),
+                ),
+                [_, param, ..] => {
+                    return Err(RpcCliError::InvalidParameter(param.clone()).into());
+                }
+            };
+            print!(
+                "{}",
+                crate::components::json_rpc::methods::help::text(command.as_deref())
+            );
+            return Ok(());
+        }
+
         let config = APP.config();
 
         let timeout = Duration::from_secs(match self.timeout {
