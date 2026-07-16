@@ -39,7 +39,7 @@ mod get_raw_transaction;
 mod get_wallet_info;
 mod get_wallet_status;
 #[cfg(zallet_build = "wallet")]
-mod help;
+pub(crate) mod help;
 #[cfg(zallet_build = "wallet")]
 mod import_key;
 mod list_accounts;
