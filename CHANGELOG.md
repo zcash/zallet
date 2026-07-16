@@ -20,6 +20,11 @@ be considered breaking changes.
   indicating coinbase origin (mirroring `zcashd`'s `listunspent`), so
   integrators no longer need a `getrawtransaction` round-trip per UTXO to
   distinguish coinbase from spendable-to-transparent funds.
+- `zallet_core::migrate`, an integration point that wires in the
+  backend-agnostic Orchard-to-Ironwood value-pool migration engine
+  (`zcash_ironwood_migration_backend`). The engine is still evolving upstream
+  and is pinned to a librustzcash feature branch, so this is currently a
+  scaffold that re-exports the engine and adds no migration behaviour yet.
 
 ### Removed
 

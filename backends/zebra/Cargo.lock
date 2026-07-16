@@ -1438,6 +1438,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "equihash"
+version = "0.3.0"
+source = "git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations#8e017849573f45890623bd2a41bff2b634c3f835"
+dependencies = [
+ "blake2b_simd",
+ "corez",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1467,6 +1476,14 @@ dependencies = [
 name = "f4jumble"
 version = "0.1.1"
 source = "git+https://github.com/zcash/librustzcash.git?rev=0531f9d89450d5def16d4c320972e4ce960f9175#0531f9d89450d5def16d4c320972e4ce960f9175"
+dependencies = [
+ "blake2b_simd",
+]
+
+[[package]]
+name = "f4jumble"
+version = "0.1.1"
+source = "git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations#8e017849573f45890623bd2a41bff2b634c3f835"
 dependencies = [
  "blake2b_simd",
 ]
@@ -6527,18 +6544,19 @@ dependencies = [
  "which",
  "x25519-dalek",
  "xdg 2.5.2",
- "zcash_address 0.13.0",
+ "zcash_address 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_client_backend",
  "zcash_client_sqlite",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_ironwood_migration_backend",
  "zcash_keys 0.15.0",
  "zcash_note_encryption",
- "zcash_primitives 0.29.0",
+ "zcash_primitives 0.29.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_proofs",
- "zcash_protocol 0.10.0",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_script",
  "zcash_spec",
- "zcash_transparent 0.9.0",
+ "zcash_transparent 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zewif",
  "zewif-zcashd",
  "zip32",
@@ -6568,9 +6586,9 @@ dependencies = [
  "trycmd",
  "zallet-core",
  "zcash_client_backend",
- "zcash_primitives 0.29.0",
- "zcash_protocol 0.10.0",
- "zcash_transparent 0.9.0",
+ "zcash_primitives 0.29.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_transparent 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zebra-chain",
  "zebra-rpc",
  "zebra-state",
@@ -6585,8 +6603,8 @@ dependencies = [
  "bech32 0.11.1",
  "bs58",
  "corez",
- "f4jumble",
- "zcash_encoding",
+ "f4jumble 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_protocol 0.9.0",
 ]
 
@@ -6598,9 +6616,22 @@ dependencies = [
  "bech32 0.11.1",
  "bs58",
  "corez",
- "f4jumble",
- "zcash_encoding",
- "zcash_protocol 0.10.0",
+ "f4jumble 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "zcash_address"
+version = "0.13.0"
+source = "git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations#8e017849573f45890623bd2a41bff2b634c3f835"
+dependencies = [
+ "bech32 0.11.1",
+ "bs58",
+ "corez",
+ "f4jumble 0.1.1 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
+ "zcash_protocol 0.10.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
 ]
 
 [[package]]
@@ -6641,14 +6672,14 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "which",
- "zcash_address 0.13.0",
- "zcash_encoding",
+ "zcash_address 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_keys 0.15.0",
  "zcash_note_encryption",
- "zcash_primitives 0.29.0",
- "zcash_protocol 0.10.0",
+ "zcash_primitives 0.29.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_script",
- "zcash_transparent 0.9.0",
+ "zcash_transparent 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zip32",
  "zip321",
 ]
@@ -6689,14 +6720,14 @@ dependencies = [
  "time",
  "tracing",
  "uuid",
- "zcash_address 0.13.0",
+ "zcash_address 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_client_backend",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_keys 0.15.0",
- "zcash_primitives 0.29.0",
- "zcash_protocol 0.10.0",
+ "zcash_primitives 0.29.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_script",
- "zcash_transparent 0.9.0",
+ "zcash_transparent 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zewif",
  "zip32",
 ]
@@ -6712,6 +6743,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zcash_encoding"
+version = "0.4.0"
+source = "git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations#8e017849573f45890623bd2a41bff2b634c3f835"
+dependencies = [
+ "corez",
+ "hex",
+ "nonempty",
+]
+
+[[package]]
 name = "zcash_history"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6720,6 +6761,16 @@ dependencies = [
  "blake2b_simd",
  "byteorder",
  "primitive-types",
+]
+
+[[package]]
+name = "zcash_ironwood_migration_backend"
+version = "0.1.0"
+source = "git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations#8e017849573f45890623bd2a41bff2b634c3f835"
+dependencies = [
+ "rand_core 0.6.4",
+ "zcash_primitives 0.29.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
+ "zcash_protocol 0.10.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
 ]
 
 [[package]]
@@ -6747,7 +6798,7 @@ dependencies = [
  "subtle",
  "tracing",
  "zcash_address 0.12.0",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_protocol 0.9.0",
  "zcash_transparent 0.8.0",
  "zip32",
@@ -6778,10 +6829,10 @@ dependencies = [
  "secrecy 0.8.0",
  "subtle",
  "tracing",
- "zcash_address 0.13.0",
- "zcash_encoding",
- "zcash_protocol 0.10.0",
- "zcash_transparent 0.9.0",
+ "zcash_address 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_transparent 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zeroize",
  "zip32",
 ]
@@ -6810,7 +6861,7 @@ dependencies = [
  "corez",
  "crypto-common 0.2.0-rc.1",
  "document-features",
- "equihash",
+ "equihash 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ff",
  "hex",
  "incrementalmerkletree",
@@ -6822,7 +6873,7 @@ dependencies = [
  "redjubjub",
  "sapling-crypto",
  "sha2 0.10.9",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_note_encryption",
  "zcash_protocol 0.9.0",
  "zcash_script",
@@ -6839,7 +6890,7 @@ dependencies = [
  "corez",
  "crypto-common 0.2.0-rc.1",
  "document-features",
- "equihash",
+ "equihash 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ff",
  "hex",
  "incrementalmerkletree",
@@ -6852,11 +6903,39 @@ dependencies = [
  "sapling-crypto",
  "secp256k1",
  "sha2 0.10.9",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_note_encryption",
- "zcash_protocol 0.10.0",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_script",
- "zcash_transparent 0.9.0",
+ "zcash_transparent 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "zcash_primitives"
+version = "0.29.0"
+source = "git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations#8e017849573f45890623bd2a41bff2b634c3f835"
+dependencies = [
+ "blake2b_simd",
+ "block-buffer 0.11.0-rc.3",
+ "corez",
+ "crypto-common 0.2.0-rc.1",
+ "equihash 0.3.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
+ "ff",
+ "hex",
+ "incrementalmerkletree",
+ "jubjub",
+ "memuse",
+ "nonempty",
+ "orchard 0.15.0",
+ "rand_core 0.6.4",
+ "redjubjub",
+ "sapling-crypto",
+ "sha2 0.10.9",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
+ "zcash_note_encryption",
+ "zcash_protocol 0.10.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
+ "zcash_script",
+ "zcash_transparent 0.9.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
 ]
 
 [[package]]
@@ -6878,7 +6957,7 @@ dependencies = [
  "tracing",
  "wagyu-zcash-parameters",
  "xdg 3.0.0",
- "zcash_primitives 0.29.0",
+ "zcash_primitives 0.29.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -6891,7 +6970,7 @@ dependencies = [
  "document-features",
  "hex",
  "memuse",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -6903,7 +6982,17 @@ dependencies = [
  "document-features",
  "hex",
  "memuse",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "zcash_protocol"
+version = "0.10.0"
+source = "git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations#8e017849573f45890623bd2a41bff2b634c3f835"
+dependencies = [
+ "corez",
+ "hex",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
 ]
 
 [[package]]
@@ -6950,7 +7039,7 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "zcash_address 0.12.0",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_protocol 0.9.0",
  "zcash_script",
  "zcash_spec",
@@ -6973,9 +7062,31 @@ dependencies = [
  "secp256k1",
  "sha2 0.10.9",
  "subtle",
- "zcash_address 0.13.0",
- "zcash_encoding",
- "zcash_protocol 0.10.0",
+ "zcash_address 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_script",
+ "zcash_spec",
+ "zip32",
+]
+
+[[package]]
+name = "zcash_transparent"
+version = "0.9.0"
+source = "git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations#8e017849573f45890623bd2a41bff2b634c3f835"
+dependencies = [
+ "bip32",
+ "bs58",
+ "corez",
+ "getset",
+ "hex",
+ "nonempty",
+ "ripemd 0.1.3",
+ "sha2 0.10.9",
+ "subtle",
+ "zcash_address 0.13.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
+ "zcash_encoding 0.4.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
+ "zcash_protocol 0.10.0 (git+https://github.com/zcash/librustzcash?branch=feat%2Fironwood-denominations)",
  "zcash_script",
  "zcash_spec",
  "zip32",
@@ -7000,7 +7111,7 @@ dependencies = [
  "derive-getters",
  "dirs",
  "ed25519-zebra",
- "equihash",
+ "equihash 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures",
  "group",
  "halo2_proofs",
@@ -7035,14 +7146,14 @@ dependencies = [
  "tracing",
  "uint 0.10.0",
  "x25519-dalek",
- "zcash_address 0.13.0",
- "zcash_encoding",
+ "zcash_address 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_history",
  "zcash_note_encryption",
- "zcash_primitives 0.29.0",
- "zcash_protocol 0.10.0",
+ "zcash_primitives 0.29.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_script",
- "zcash_transparent 0.9.0",
+ "zcash_transparent 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -7077,11 +7188,11 @@ dependencies = [
  "tower-fallback",
  "tracing",
  "tracing-futures",
- "zcash_primitives 0.29.0",
+ "zcash_primitives 0.29.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_proofs",
- "zcash_protocol 0.10.0",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_script",
- "zcash_transparent 0.9.0",
+ "zcash_transparent 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zebra-chain",
  "zebra-node-services",
  "zebra-script",
@@ -7188,13 +7299,13 @@ dependencies = [
  "tower 0.4.13",
  "tracing",
  "which",
- "zcash_address 0.13.0",
+ "zcash_address 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_keys 0.15.0",
- "zcash_primitives 0.29.0",
+ "zcash_primitives 0.29.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_proofs",
- "zcash_protocol 0.10.0",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_script",
- "zcash_transparent 0.9.0",
+ "zcash_transparent 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zebra-chain",
  "zebra-consensus",
  "zebra-network",
@@ -7212,7 +7323,7 @@ dependencies = [
  "libzcash_script",
  "rand 0.8.7",
  "thiserror 2.0.18",
- "zcash_primitives 0.29.0",
+ "zcash_primitives 0.29.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_script",
  "zebra-chain",
 ]
@@ -7388,7 +7499,7 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "zcash_address 0.12.0",
- "zcash_encoding",
+ "zcash_encoding 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "zcash_keys 0.14.0",
  "zcash_primitives 0.28.0",
  "zcash_protocol 0.9.0",
@@ -7419,8 +7530,8 @@ dependencies = [
  "base64 0.22.1",
  "nom 7.1.3",
  "percent-encoding",
- "zcash_address 0.13.0",
- "zcash_protocol 0.10.0",
+ "zcash_address 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zcash_protocol 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

@@ -154,6 +154,13 @@ zcash_note_encryption = "0.4"
 zip32 = "0.2"
 bip32 = "0.2"
 
+# Orchard -> Ironwood value-pool migration engine. This crate is not yet
+# published to crates.io; it lives only on the `feat/ironwood-denominations`
+# branch of librustzcash while its API is still evolving, so it is pinned to
+# that branch rather than to a released version like the crates above. Repoint
+# at a released crates.io version once one is published.
+zcash_ironwood_migration_backend = { git = "https://github.com/zcash/librustzcash", branch = "feat/ironwood-denominations" }
+
 # Zcashd wallet migration
 zewif = { version = "1.0.0-rc.3" }
 zewif-zcashd = { version = "0.1.0-rc.3" }
