@@ -25,6 +25,15 @@ be considered breaking changes.
   (`zcash_ironwood_migration_backend`). The engine is still evolving upstream
   and is pinned to a librustzcash feature branch, so this is currently a
   scaffold that re-exports the engine and adds no migration behaviour yet.
+- A generic pool-to-pool migration JSON-RPC surface (wallet build): the
+  `z_startpoolmigration`, `z_getpoolmigrationstatus`, `z_advancepoolmigration`,
+  `z_cancelpoolmigration`, and `z_listpoolmigrations` methods. The surface is
+  parameterised by a `from_pool`/`to_pool` pair rather than hardcoding a
+  specific migration; a single supported-migrations table maps each pool pair to
+  the network upgrade that enables it (Orchard to Ironwood requires NU6.3). These
+  methods are currently a scaffold: they validate their inputs (pool parsing, the
+  supported-pair table, and network-upgrade activation) but the migration engine
+  is not yet wired in, so they return a "not implemented yet" error.
 
 ### Removed
 

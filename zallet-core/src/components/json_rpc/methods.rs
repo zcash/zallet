@@ -19,6 +19,10 @@ use {
     tokio::sync::RwLock,
 };
 
+#[cfg(zallet_build = "wallet")]
+mod advance_pool_migration;
+#[cfg(zallet_build = "wallet")]
+mod cancel_pool_migration;
 mod convert_tex;
 mod decode_raw_transaction;
 mod decode_script;
@@ -34,6 +38,8 @@ mod get_new_account;
 mod get_notes_count;
 #[cfg(zallet_build = "wallet")]
 mod get_operation;
+#[cfg(zallet_build = "wallet")]
+mod get_pool_migration_status;
 mod get_raw_transaction;
 #[cfg(zallet_build = "wallet")]
 mod get_wallet_info;
@@ -46,6 +52,8 @@ mod list_accounts;
 mod list_addresses;
 #[cfg(zallet_build = "wallet")]
 mod list_operation_ids;
+#[cfg(zallet_build = "wallet")]
+mod list_pool_migrations;
 mod list_transactions;
 mod list_unified_receivers;
 #[cfg(zallet_build = "wallet")]
@@ -55,7 +63,11 @@ mod lock_wallet;
 #[cfg(zallet_build = "wallet")]
 mod openrpc;
 #[cfg(zallet_build = "wallet")]
+mod pool_migration;
+#[cfg(zallet_build = "wallet")]
 mod recover_accounts;
+#[cfg(zallet_build = "wallet")]
+mod start_pool_migration;
 mod stop;
 #[cfg(zallet_build = "wallet")]
 mod unlock_wallet;
@@ -739,6 +751,73 @@ pub(crate) trait WalletRpc {
         zaddr: &str,
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response;
+
+    /// Schedules a migration of shielded funds from one value pool to another.
+    ///
+    /// The migration is generic pool-to-pool: the supported pool pairs, and the network
+    /// upgrade that enables each one, are declared in a single table (migrating from the
+    /// Orchard pool to the Ironwood pool requires NU6.3). The pool pair is validated
+    /// against that table and the enabling upgrade is required to be active.
+    ///
+    /// NOTE: This is currently a scaffold. Inputs are validated, but the migration engine
+    /// is not yet wired in, so the call returns a "not implemented yet" error.
+    ///
+    /// # Arguments
+    /// - `from_pool` (string, required): The value pool to migrate funds from
+    ///   ("sapling", "orchard", or "ironwood").
+    /// - `to_pool` (string, required): The value pool to migrate funds to.
+    #[method(name = "z_startpoolmigration")]
+    async fn start_pool_migration(
+        &self,
+        from_pool: String,
+        to_pool: String,
+    ) -> start_pool_migration::Response;
+
+    /// Returns the status of a previously-scheduled pool migration.
+    ///
+    /// NOTE: This is currently a scaffold. The identifier is validated, but the migration
+    /// engine is not yet wired in, so the call returns a "not implemented yet" error.
+    ///
+    /// # Arguments
+    /// - `migration_id` (string, required): The identifier returned by
+    ///   `z_startpoolmigration`.
+    #[method(name = "z_getpoolmigrationstatus")]
+    async fn get_pool_migration_status(
+        &self,
+        migration_id: String,
+    ) -> get_pool_migration_status::Response;
+
+    /// Advances a previously-scheduled pool migration by one step.
+    ///
+    /// NOTE: This is currently a scaffold. The identifier is validated, but the migration
+    /// engine is not yet wired in, so the call returns a "not implemented yet" error.
+    ///
+    /// # Arguments
+    /// - `migration_id` (string, required): The identifier returned by
+    ///   `z_startpoolmigration`.
+    #[method(name = "z_advancepoolmigration")]
+    async fn advance_pool_migration(
+        &self,
+        migration_id: String,
+    ) -> advance_pool_migration::Response;
+
+    /// Cancels a previously-scheduled pool migration.
+    ///
+    /// NOTE: This is currently a scaffold. The identifier is validated, but the migration
+    /// engine is not yet wired in, so the call returns a "not implemented yet" error.
+    ///
+    /// # Arguments
+    /// - `migration_id` (string, required): The identifier returned by
+    ///   `z_startpoolmigration`.
+    #[method(name = "z_cancelpoolmigration")]
+    async fn cancel_pool_migration(&self, migration_id: String) -> cancel_pool_migration::Response;
+
+    /// Lists the pool migrations known to the wallet.
+    ///
+    /// NOTE: This is currently a scaffold. The migration engine is not yet wired in, so
+    /// the call returns a "not implemented yet" error.
+    #[method(name = "z_listpoolmigrations")]
+    async fn list_pool_migrations(&self) -> list_pool_migrations::Response;
 }
 
 pub(crate) struct RpcImpl<C: Chain> {
@@ -1159,5 +1238,35 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response {
         z_export_viewing_key::call(self.wallet().await?.as_ref(), &self.keystore, zaddr, ivk).await
+    }
+
+    async fn start_pool_migration(
+        &self,
+        from_pool: String,
+        to_pool: String,
+    ) -> start_pool_migration::Response {
+        start_pool_migration::call(self.wallet().await?.as_ref(), &from_pool, &to_pool)
+    }
+
+    async fn get_pool_migration_status(
+        &self,
+        migration_id: String,
+    ) -> get_pool_migration_status::Response {
+        get_pool_migration_status::call(&migration_id)
+    }
+
+    async fn advance_pool_migration(
+        &self,
+        migration_id: String,
+    ) -> advance_pool_migration::Response {
+        advance_pool_migration::call(&migration_id)
+    }
+
+    async fn cancel_pool_migration(&self, migration_id: String) -> cancel_pool_migration::Response {
+        cancel_pool_migration::call(&migration_id)
+    }
+
+    async fn list_pool_migrations(&self) -> list_pool_migrations::Response {
+        list_pool_migrations::call()
     }
 }
