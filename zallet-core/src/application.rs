@@ -1,4 +1,12 @@
-//! Zallet Abscissa Application
+//! Zallet Abscissa Application.
+//!
+//! Each backend binary calls [`boot`] with its [`ChainRuntime`] factory; `boot` records
+//! the backend in a process-wide slot (consumed by commands via `chain_runtime`) and
+//! hands control to Abscissa, which parses the CLI and runs the selected command. Config
+//! loading validates that a config file's `backend` key names the registered backend,
+//! since every backend binary operates on the same wallet database.
+//!
+//! [`ChainRuntime`]: crate::components::chain::ChainRuntime
 
 use std::path::Path;
 use std::sync::OnceLock;
