@@ -7,6 +7,7 @@
 - [Installation](guide/installation/README.md)
   - [Debian packages](guide/installation/debian.md)
 - [Wallet setup](guide/setup.md)
+- [Backup and restore](guide/backup.md)
 
 # Reference guide
 
