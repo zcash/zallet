@@ -6,6 +6,7 @@
 
 - [Installation](guide/installation/README.md)
   - [Debian packages](guide/installation/debian.md)
+  - [Docker](guide/installation/docker.md)
 - [Wallet setup](guide/setup.md)
 
 # Reference guide
