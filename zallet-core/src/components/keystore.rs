@@ -410,31 +410,51 @@ impl KeyStore {
         &self,
         recipient_strings: Vec<String>,
     ) -> Result<(), Error> {
-        // If the wallet has any existing recipients, fail (we would instead need to
-        // re-encrypt the wallet).
-        if !self.maybe_encryptor().await?.is_empty() {
-            return Err(ErrorKind::Generic
-                .context(fl!("err-keystore-already-initialized"))
-                .into());
-        }
-
         let now = ::time::OffsetDateTime::now_utc();
 
         self.with_db_mut(|conn, _| {
-            let mut stmt = conn
-                .prepare(
-                    "INSERT INTO ext_zallet_keystore_age_recipients
-                    VALUES (:recipient, :added)",
-                )
+            // Use an explicit transaction so the emptiness check and the inserts are
+            // atomic: either every recipient is committed or none are. This prevents a
+            // partial write (e.g. from a disk-full or I/O error mid-loop) from committing
+            // an incomplete recipient set that the one-shot guard below would then refuse
+            // to ever repair.
+            let tx = conn
+                .transaction()
                 .map_err(|e| ErrorKind::Generic.context(e))?;
 
-            for recipient in recipient_strings {
-                stmt.execute(named_params! {
-                    ":recipient": recipient,
-                    ":added": now,
-                })
+            // If the wallet has any existing recipients, fail (we would instead need to
+            // re-encrypt the wallet).
+            let existing_recipients: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM ext_zallet_keystore_age_recipients",
+                    [],
+                    |row| row.get(0),
+                )
                 .map_err(|e| ErrorKind::Generic.context(e))?;
+            if existing_recipients != 0 {
+                return Err(ErrorKind::Generic
+                    .context(fl!("err-keystore-already-initialized"))
+                    .into());
             }
+
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "INSERT INTO ext_zallet_keystore_age_recipients
+                        VALUES (:recipient, :added)",
+                    )
+                    .map_err(|e| ErrorKind::Generic.context(e))?;
+
+                for recipient in recipient_strings {
+                    stmt.execute(named_params! {
+                        ":recipient": recipient,
+                        ":added": now,
+                    })
+                    .map_err(|e| ErrorKind::Generic.context(e))?;
+                }
+            }
+
+            tx.commit().map_err(|e| ErrorKind::Generic.context(e))?;
 
             Ok(())
         })
