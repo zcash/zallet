@@ -18,7 +18,8 @@ use crate::network::{Network, RegTestNuParam};
 
 #[cfg(zallet_build = "wallet")]
 use {
-    std::num::NonZeroU16, zcash_client_backend::fees::SplitPolicy, zcash_protocol::value::Zatoshis,
+    std::num::NonZeroU16, zcash_client_backend::fees::SplitPolicy,
+    zcash_keys::keys::transparent::gap_limits::GapLimits, zcash_protocol::value::Zatoshis,
     zip32::fingerprint::SeedFingerprint,
 };
 
@@ -677,6 +678,41 @@ pub struct NoteManagementSection {
     /// If an account contains fewer such notes, Zallet will split larger notes (in change
     /// outputs of other transactions) to achieve the target.
     pub target_note_count: Option<NonZeroU16>,
+
+    /// The gap limit for external-scoped transparent addresses, i.e. addresses shared
+    /// with external parties.
+    ///
+    /// Default is 10.
+    pub transparent_external_gap_limit: Option<u32>,
+
+    /// The gap limit for internal-scoped (change) transparent addresses.
+    ///
+    /// Default is 5.
+    ///
+    /// `migrate-zcashd-wallet` may need this raised *before* it is run: `zcashd` does
+    /// not distinguish transparent addresses that were actually handed out from
+    /// unused keypool reserve addresses, so migration can mark far more than the
+    /// default gap limit's worth of internal-scope addresses as already exposed. This
+    /// permanently blocks reservation of new change addresses until each blocking
+    /// address individually appears in a mined transaction, causing `z_sendmany` to
+    /// fail with "The proposal cannot be constructed until a transaction with outputs
+    /// to a previously reserved transparent change address has been mined".
+    ///
+    /// Set this to (at least) the size of the `zcashd` wallet's keypool before running
+    /// `migrate-zcashd-wallet`. A wallet's transparent addresses for a given key scope
+    /// are pre-generated once, up to the gap limit in effect when the account is
+    /// created; raising this value afterwards does not affect accounts that already
+    /// exist, so it will not unstick a wallet that has already hit this error. If that
+    /// has already happened, set this first and then redo the migration into a fresh
+    /// data directory (the migration warns that beta imports may need to be redone
+    /// regardless, so keep the original `wallet.dat` until this is resolved upstream).
+    pub transparent_internal_gap_limit: Option<u32>,
+
+    /// The gap limit for ephemeral transparent addresses, used for ZIP 320
+    /// transparent-address-only (TEX) recipients.
+    ///
+    /// Default is 10.
+    pub transparent_ephemeral_gap_limit: Option<u32>,
 }
 
 #[cfg(zallet_build = "wallet")]
@@ -702,6 +738,23 @@ impl NoteManagementSection {
 
     pub(crate) fn split_policy(&self) -> SplitPolicy {
         SplitPolicy::with_min_output_value(self.target_note_count().into(), self.min_note_value())
+    }
+
+    /// The gap limits Zallet uses for transparent address generation.
+    ///
+    /// Defaults match [`GapLimits::default`]; each scope can be overridden
+    /// independently via `transparent_external_gap_limit`,
+    /// `transparent_internal_gap_limit`, and `transparent_ephemeral_gap_limit`.
+    pub(crate) fn transparent_gap_limits(&self) -> GapLimits {
+        let defaults = GapLimits::default();
+        GapLimits::new(
+            self.transparent_external_gap_limit
+                .unwrap_or(defaults.external()),
+            self.transparent_internal_gap_limit
+                .unwrap_or(defaults.internal()),
+            self.transparent_ephemeral_gap_limit
+                .unwrap_or(defaults.ephemeral()),
+        )
     }
 }
 
@@ -852,6 +905,21 @@ impl ZalletConfig {
             note_management(
                 "target_note_count",
                 conf.note_management.target_note_count(),
+            ),
+            #[cfg(zallet_build = "wallet")]
+            note_management(
+                "transparent_external_gap_limit",
+                conf.note_management.transparent_gap_limits().external(),
+            ),
+            #[cfg(zallet_build = "wallet")]
+            note_management(
+                "transparent_internal_gap_limit",
+                conf.note_management.transparent_gap_limits().internal(),
+            ),
+            #[cfg(zallet_build = "wallet")]
+            note_management(
+                "transparent_ephemeral_gap_limit",
+                conf.note_management.transparent_gap_limits().ephemeral(),
             ),
             rpc("bind", &conf.rpc.bind),
             rpc("timeout", conf.rpc.timeout().as_secs()),

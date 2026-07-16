@@ -69,7 +69,12 @@ impl Database {
             .await
             .map_err(|e| ErrorKind::Init.context(e))?;
 
-        let db_data_pool = connection::pool(&path, config.consensus.network())?;
+        #[cfg(zallet_build = "wallet")]
+        let gap_limits = config.note_management.transparent_gap_limits();
+        #[cfg(not(zallet_build = "wallet"))]
+        let gap_limits = zcash_keys::keys::transparent::gap_limits::GapLimits::default();
+
+        let db_data_pool = connection::pool(&path, config.consensus.network(), gap_limits)?;
 
         let database = Self { db_data_pool };
 

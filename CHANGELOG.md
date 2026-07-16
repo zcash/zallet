@@ -8,6 +8,29 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- New `note_management.transparent_external_gap_limit`,
+  `note_management.transparent_internal_gap_limit`, and
+  `note_management.transparent_ephemeral_gap_limit` config options, to override
+  the wallet's transparent address gap limits. This is primarily a workaround
+  for wallets imported via `migrate-zcashd-wallet`: `zcashd` does not
+  distinguish transparent addresses that were actually handed out from unused
+  keypool reserve addresses, so migration can mark far more than the default
+  gap limit's worth of internal-scope (change) addresses as already exposed.
+  This blocks `z_sendmany` with "The proposal cannot be constructed until a
+  transaction with outputs to a previously reserved transparent change address
+  has been mined" on essentially any migrated wallet with transparent
+  activity, because the default internal gap limit (5) is smaller than the
+  number of change addresses most `zcashd` wallets accumulate.
+  `transparent_internal_gap_limit` must be raised *before* running
+  `migrate-zcashd-wallet`, to (at least) the size of the imported wallet's
+  `zcashd` keypool: a wallet's transparent addresses for a given key scope are
+  pre-generated once, at account-creation time, so this cannot unstick a
+  wallet that has already hit the lockout -- that wallet must be re-migrated
+  into a fresh data directory with the option already set. See
+  zcash/zallet#637.
+
 ## [0.1.0-beta.1] - 2026-07-12
 
 ### Added

@@ -295,6 +295,41 @@ as_of_version = "0.1.0-beta.1"
 # outputs of other transactions) to achieve the target.
 #target_note_count = 4
 
+# The gap limit for external-scoped transparent addresses, i.e. addresses shared
+# with external parties.
+#
+# Default is 10.
+#transparent_external_gap_limit = 10
+
+# The gap limit for internal-scoped (change) transparent addresses.
+#
+# Default is 5.
+#
+# `migrate-zcashd-wallet` may need this raised *before* it is run: `zcashd` does
+# not distinguish transparent addresses that were actually handed out from
+# unused keypool reserve addresses, so migration can mark far more than the
+# default gap limit's worth of internal-scope addresses as already exposed. This
+# permanently blocks reservation of new change addresses until each blocking
+# address individually appears in a mined transaction, causing `z_sendmany` to
+# fail with "The proposal cannot be constructed until a transaction with outputs
+# to a previously reserved transparent change address has been mined".
+#
+# Set this to (at least) the size of the `zcashd` wallet's keypool before running
+# `migrate-zcashd-wallet`. A wallet's transparent addresses for a given key scope
+# are pre-generated once, up to the gap limit in effect when the account is
+# created; raising this value afterwards does not affect accounts that already
+# exist, so it will not unstick a wallet that has already hit this error. If that
+# has already happened, set this first and then redo the migration into a fresh
+# data directory (the migration warns that beta imports may need to be redone
+# regardless, so keep the original `wallet.dat` until this is resolved upstream).
+#transparent_internal_gap_limit = 5
+
+# The gap limit for ephemeral transparent addresses, used for ZIP 320
+# transparent-address-only (TEX) recipients.
+#
+# Default is 10.
+#transparent_ephemeral_gap_limit = 10
+
 
 #
 # Settings for the JSON-RPC interface.

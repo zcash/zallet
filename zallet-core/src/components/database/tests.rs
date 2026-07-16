@@ -9,6 +9,14 @@ use zcash_protocol::consensus::{self, NetworkType, Parameters};
 use crate::{components::database, config::ZalletConfig, network::Network};
 
 #[cfg(zallet_build = "wallet")]
+use {
+    secrecy::SecretVec,
+    zcash_client_backend::data_api::{AccountBirthday, WalletWrite, chain::ChainState},
+    zcash_primitives::block::BlockHash,
+    zcash_protocol::consensus::NetworkUpgrade,
+};
+
+#[cfg(zallet_build = "wallet")]
 use crate::components::keystore;
 
 #[test]
@@ -283,6 +291,99 @@ fn db_connection_forwards_ironwood_reads_and_tree_ops() {
                 "with_ironwood_tree_mut must reach WalletDb's Ironwood tree, not the no-op default",
             );
         });
+}
+
+/// Reproduces the transparent change-address gap-limit lockout reported against
+/// `migrate-zcashd-wallet`: once as many internal-scope (change) addresses have been
+/// exposed as the configured gap limit allows, with none of them appearing in a mined
+/// transaction, no further change address can ever be reserved.
+/// `migrate-zcashd-wallet` triggers this by importing every change address `zcashd`
+/// ever derived (used or not, via its keypool) as already "exposed" at the wallet
+/// birthday, which routinely exceeds the default internal gap limit of 5.
+///
+/// A wallet's transparent address rows for a given key scope are pre-generated once,
+/// up to the gap limit *in effect at account-creation time*; later reservations only
+/// select among those existing rows; and `note_management.transparent_internal_gap_limit`
+/// only takes effect for accounts created after it is set (see the "Note" on that
+/// config field). So this test does not simply reopen one wallet under two configs --
+/// each scenario creates its own account, with the relevant gap limit already in
+/// effect at creation time, exactly as `transparent_internal_gap_limit` must be set
+/// *before* running `migrate-zcashd-wallet` for it to help:
+/// - under the crate's default internal gap limit (5), exposing that many change
+///   addresses with no mined transaction exactly reproduces the reported lockout when
+///   one more is reserved; and
+/// - with `transparent_internal_gap_limit` raised before account creation, exposing a
+///   `zcashd`-sized backlog of change addresses (still comfortably more than the
+///   default limit) leaves room to reserve further ones.
+#[cfg(zallet_build = "wallet")]
+#[test]
+fn transparent_internal_gap_limit_workaround() {
+    crate::i18n::load_languages(&[]);
+
+    // Creates a fresh account (with the given config's gap limits already in effect),
+    // reserves `addresses_to_expose` internal-scope (change) addresses without ever
+    // mining a transaction to any of them, then attempts to reserve one more -- as
+    // `z_sendmany` does when it needs a transparent change address -- and returns that
+    // final reservation's result.
+    let expose_then_reserve_one_more = |config: &ZalletConfig, addresses_to_expose: usize| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let db = database::Database::open(config).await.unwrap();
+                let mut handle = db.handle().await.unwrap();
+
+                let activation = handle
+                    .params()
+                    .activation_height(NetworkUpgrade::Sapling)
+                    .unwrap();
+                let birthday = AccountBirthday::from_parts(
+                    ChainState::empty(activation - 1, BlockHash([0; 32])),
+                    None,
+                );
+                let (account_id, _usk) = handle
+                    .create_account("test", &SecretVec::new(vec![7u8; 32]), &birthday, None)
+                    .unwrap();
+                handle.update_chain_tip(activation).unwrap();
+
+                let reserved = handle
+                    .reserve_next_n_internal_addresses(account_id, addresses_to_expose)
+                    .unwrap();
+                assert_eq!(reserved.len(), addresses_to_expose);
+
+                handle.reserve_next_n_internal_addresses(account_id, 1)
+            })
+    };
+
+    // Under the default gap limit, exposing exactly that many change addresses (as a
+    // `zcashd` wallet with only a handful of historical change addresses would import)
+    // already exhausts it: reserving one more reproduces the miner's `z_sendmany`
+    // failure.
+    let datadir = tempdir().unwrap();
+    let default_config = test_config(datadir.path(), NetworkType::Test);
+    let default_internal_gap_limit = default_config
+        .note_management
+        .transparent_gap_limits()
+        .internal();
+    let err = expose_then_reserve_one_more(&default_config, default_internal_gap_limit as usize)
+        .expect_err("the default internal gap limit must already be exhausted");
+    assert!(
+        err.to_string()
+            .contains("previously reserved transparent change address"),
+        "unexpected error: {err}",
+    );
+
+    // With the internal gap limit raised *before* account creation -- as it must be
+    // configured before running `migrate-zcashd-wallet` -- exposing a `zcashd`-keypool-
+    // sized backlog of change addresses (comfortably more than the default limit, but
+    // less than the configured one) leaves room to reserve further ones.
+    let datadir = tempdir().unwrap();
+    let mut raised_config = test_config(datadir.path(), NetworkType::Test);
+    raised_config.note_management.transparent_internal_gap_limit = Some(100);
+    expose_then_reserve_one_more(&raised_config, 60).expect(
+        "raising the configured internal gap limit before account creation avoids the lockout",
+    );
 }
 
 fn test_config(datadir: &std::path::Path, network_type: NetworkType) -> ZalletConfig {

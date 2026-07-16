@@ -23,6 +23,7 @@ use zcash_client_backend::{
     wallet::{Note, ReceivedNote, TransparentAddressMetadata, WalletTransparentOutput},
 };
 use zcash_client_sqlite::{WalletDb, util::SystemClock};
+use zcash_keys::keys::transparent::gap_limits::GapLimits;
 use zcash_primitives::{block::BlockHash, transaction::Transaction};
 use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
 use zip32::DiversifierIndex;
@@ -35,9 +36,13 @@ use crate::{
     network::Network,
 };
 
-pub(super) fn pool(path: impl AsRef<Path>, params: Network) -> Result<WalletPool, Error> {
+pub(super) fn pool(
+    path: impl AsRef<Path>,
+    params: Network,
+    gap_limits: GapLimits,
+) -> Result<WalletPool, Error> {
     let config = deadpool_sqlite::Config::new(path.as_ref());
-    let manager = WalletManager::from_config(&config, params);
+    let manager = WalletManager::from_config(&config, params, gap_limits);
     WalletPool::builder(manager)
         .config(deadpool::managed::PoolConfig::default())
         .build()
@@ -53,17 +58,23 @@ pub(crate) struct WalletManager {
     /// against SQLite `DatabaseBusy` errors.
     lock: Arc<RwLock<()>>,
     params: Network,
+    gap_limits: GapLimits,
 }
 
 impl WalletManager {
     /// Creates a new [`WalletManager`] using the given [`deadpool_sqlite::Config`] backed
     /// by the specified [`deadpool_sqlite::Runtime`].
     #[must_use]
-    pub fn from_config(config: &deadpool_sqlite::Config, params: Network) -> Self {
+    pub fn from_config(
+        config: &deadpool_sqlite::Config,
+        params: Network,
+        gap_limits: GapLimits,
+    ) -> Self {
         Self {
             inner: deadpool_sqlite::Manager::from_config(config, deadpool_sqlite::Runtime::Tokio1),
             lock: Arc::new(RwLock::new(())),
             params,
+            gap_limits,
         }
     }
 }
@@ -82,6 +93,7 @@ impl deadpool::managed::Manager for WalletManager {
             inner,
             lock: self.lock.clone(),
             params: self.params,
+            gap_limits: self.gap_limits,
         })
     }
 
@@ -98,6 +110,7 @@ pub(crate) struct DbConnection {
     inner: deadpool_sync::SyncWrapper<rusqlite::Connection>,
     lock: Arc<RwLock<()>>,
     params: Network,
+    gap_limits: GapLimits,
 }
 
 impl DbConnection {
@@ -116,7 +129,8 @@ impl DbConnection {
                 self.params,
                 SystemClock,
                 OsRng,
-            ))
+            )
+            .with_gap_limits(self.gap_limits))
         })
     }
 
@@ -131,7 +145,8 @@ impl DbConnection {
                 self.params,
                 SystemClock,
                 OsRng,
-            ))
+            )
+            .with_gap_limits(self.gap_limits))
         })
     }
 
