@@ -27,6 +27,10 @@
 - [Migrating from `zcashd`](zcashd/README.md)
   - [JSON-RPC altered semantics](zcashd/json_rpc.md)
 
+# Troubleshooting
+
+- [Troubleshooting](troubleshooting.md)
+
 # Security
 
 - [Supply Chain Security (SLSA)](slsa/slsa.md)
