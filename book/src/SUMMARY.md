@@ -20,6 +20,7 @@
 
 # Reference guide
 
+- [Configuration](config/README.md)
 - [Command-line tool](cli/README.md)
   - [start](cli/start.md)
   - [example-config](cli/example-config.md)
