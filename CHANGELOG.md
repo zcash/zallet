@@ -21,10 +21,12 @@ be considered breaking changes.
   integrators no longer need a `getrawtransaction` round-trip per UTXO to
   distinguish coinbase from spendable-to-transparent funds.
 - `zallet_core::migrate`, an integration point that wires in the
-  backend-agnostic Orchard-to-Ironwood value-pool migration engine
-  (`zcash_ironwood_migration_backend`). The engine is still evolving upstream
-  and is pinned to a librustzcash feature branch, so this is currently a
-  scaffold that re-exports the engine and adds no migration behaviour yet.
+  backend-agnostic value-pool migration engine (`zcash_pool_migration_backend`).
+  It re-exports the engine and provides `SpendableSnapshot`, Zallet's
+  implementation of the engine's `MigrationBackend` trait for the planning
+  slice. The engine is still evolving upstream and is pinned to a librustzcash
+  feature branch, so only the planning path is wired; committing a migration
+  (building, signing, and persisting the PCZTs) awaits later engine slices.
 - A generic pool-to-pool migration JSON-RPC surface (wallet build): the
   `z_startpoolmigration`, `z_getpoolmigrationstatus`, `z_advancepoolmigration`,
   `z_cancelpoolmigration`, and `z_listpoolmigrations` methods. The surface is
@@ -34,6 +36,13 @@ be considered breaking changes.
   methods are currently a scaffold: they validate their inputs (pool parsing, the
   supported-pair table, and network-upgrade activation) but the migration engine
   is not yet wired in, so they return a "not implemented yet" error.
+- `z_previewpoolmigration` (wallet build), the fully-wired planning preview of
+  the pool-migration surface. It enumerates the account's spendable source-pool
+  notes and runs the engine's `plan_migration` to return the proposed plan for
+  user consent (ZIP 318): the funding notes and their crossing denominations,
+  each note's transfer broadcast height and expiry, the note-preparation
+  transaction summary, and the residual left in the source pool. It is
+  read-only; nothing is built, proved, or broadcast.
 
 ### Removed
 
