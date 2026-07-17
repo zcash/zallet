@@ -28,6 +28,11 @@ macro_rules! wlnfl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum KeystoreError {
     MissingRecipients,
+    /// The provided passphrase did not decrypt the keystore's age identities.
+    IncorrectPassphrase,
+    /// The requested unlock timeout is large enough that the re-lock deadline would
+    /// overflow [`std::time::SystemTime`].
+    TimeoutTooLarge,
 }
 
 impl fmt::Display for KeystoreError {
@@ -44,6 +49,8 @@ impl fmt::Display for KeystoreError {
                     )
                 )
             }
+            Self::IncorrectPassphrase => wfl!(f, "err-keystore-incorrect-passphrase"),
+            Self::TimeoutTooLarge => wfl!(f, "err-keystore-timeout-too-large"),
         }
     }
 }
