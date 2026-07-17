@@ -45,7 +45,7 @@ ripemd = "0.1"
 sha2 = "0.10"
 
 # Key storage
-age = { version = "0.11", features = ["armor", "cli-common", "plugin"] }
+age = { version = "0.12", features = ["armor", "cli-common", "plugin"] }
 bech32 = "0.11"
 bip0039 = "0.12"
 
@@ -160,12 +160,6 @@ anyhow = "1.0"
 tonic = "0.14"
 
 [patch.crates-io]
-# Temporary pin to rage/main: the keystore uses age APIs (`EncryptedIdentity`,
-# `Send + Sync` bounds on `IdentityFile::into_identities`) that the 0.11.x
-# maintenance releases exclude. Replace with the crates.io release once
-# rage 0.12 ships.
-age = { git = "https://github.com/str4d/rage.git", rev = "d28f10ee776ce7391f7065695997f998631b113a" }
-
 # Temporary patch for `WalletDb::transactionally_with_extension` (adds atomic
 # z_importkey account+key writes), merged upstream but not yet released. The API
 # lives in zcash_client_sqlite, but the repo is a workspace: pinning only that
