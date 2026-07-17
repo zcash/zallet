@@ -527,6 +527,7 @@ async fn run<C: Chain>(
             &spending_keys,
             OvkPolicy::Sender,
             &proposal,
+            // No expiry-height override; the transaction keeps its builder-derived expiry.
             None,
         )
         .map(|txids| (wallet, proposal, txids))
