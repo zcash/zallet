@@ -2,13 +2,21 @@
 
 ## Notes
 
-Shielded funds are held as **notes**: discrete, encrypted outputs in the
-Orchard or Sapling pools, analogous to transparent UTXOs but visible only to
-holders of the right viewing key. A wallet's shielded balance is the sum of
-its unspent notes; spending selects specific notes, and any excess value
-returns to the account as a new **change** note. Change handling is entirely
-internal — Zallet derives change addresses itself and never exposes them
-(there is no `getrawchangeaddress`).
+Shielded funds are held as **notes**: discrete, encrypted outputs in a shielded
+pool — Sapling or Orchard today, and the forthcoming Ironwood pool — analogous
+to transparent UTXOs but visible only to holders of the right viewing key. A
+wallet's shielded balance is the sum of its unspent notes; spending selects
+specific notes, and any excess value returns to the account as a new **change**
+note. Change handling is entirely internal — Zallet derives change addresses
+itself and never exposes them (there is no `getrawchangeaddress`).
+
+Ironwood ([ZIP 2005], introduced in NU 6.3) is a new Orchard-shaped pool that
+adds a post-quantum recovery path for shielded funds. Zallet already tracks
+Ironwood notes as a pool distinct from Orchard — for example, `z_getnotescount`
+reports an `ironwood` count and `z_listunspent` uses `"ironwood"` as a `pool`
+value — so wallet balances and outputs distinguish the three shielded pools.
+
+[ZIP 2005]: https://zips.z.cash/zip-2005
 
 ## Confirmations and spendability
 
