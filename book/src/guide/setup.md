@@ -49,9 +49,18 @@ In particular, you currently need to configure the `[indexer]` section to point
 at your full node's JSON-RPC endpoint. The relevant config options in that
 section are:
 - `validator_address` (if not running on localhost at the default port)
-- `validator_cookie_auth = true` and `validator_cookie_path` (if using cookie
-  auth)
+- `validator_cookie_path` (if using cookie authentication): set it to your
+  full node's cookie file. Setting this path is what enables cookie auth;
+  there is no separate on/off flag.
 - `validator_user` and `validator_password` (if using basic auth)
+
+Both the default `zebra` backend and the `zaino` backend use these `[indexer]`
+settings to reach the full node over JSON-RPC. The `zebra` backend reads chain
+state directly from a co-located `zebrad` (see below) — including non-best-chain
+(side-chain) blocks and transactions, which `zebrad`'s local state tracks — so
+it uses JSON-RPC only for the mempool and transaction submission. The `zaino`
+backend uses JSON-RPC for **all** chain data, unless you also configure
+[`[indexer.read_state_service]`](#reading-chain-state-from-a-local-zebrad).
 
 ### Reading chain state from a local zebrad
 
@@ -101,7 +110,7 @@ zebra_state_path = "/home/<username>/.cache/zebra"
 
 Notes:
 - The JSON-RPC `[indexer]` settings above are still required: they are used for the
-  mempool, transaction submission, and non-best-chain block reads.
+  mempool and transaction submission.
 - `zebrad` must be running on the **same machine** (Zallet reads its state files
   directly), built with the `indexer` feature, and configured with an
   `indexer_listen_addr`.
