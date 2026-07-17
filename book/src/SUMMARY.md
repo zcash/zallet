@@ -8,6 +8,7 @@
   - [Debian packages](guide/installation/debian.md)
   - [Docker](guide/installation/docker.md)
 - [Wallet setup](guide/setup.md)
+- [Backup and restore](guide/backup.md)
 
 # Reference guide
 
