@@ -3,6 +3,7 @@ use jsonrpsee::core::RpcResult;
 use schemars::JsonSchema;
 use serde::Serialize;
 use zcash_client_backend::data_api::{AccountPurpose, WalletRead, WalletWrite};
+use zcash_client_sqlite::error::SqliteClientError;
 use zcash_keys::{encoding::decode_extended_spending_key, keys::UnifiedFullViewingKey};
 use zcash_protocol::consensus::{BlockHeight, NetworkConstants};
 
@@ -65,6 +66,22 @@ fn decode_key_and_address(
     Ok((extsk, address))
 }
 
+/// Error from the atomic import transaction, tracking which store failed so each failure keeps
+/// its distinct RPC error code: wallet-database problems map to `Database`, and a failure to
+/// persist the encrypted spending key maps to `Wallet`.
+enum ImportError {
+    Database(SqliteClientError),
+    Keystore(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for ImportError {
+    fn from(e: rusqlite::Error) -> Self {
+        // `transactionally_with_extension` surfaces begin/commit failures as `rusqlite::Error`;
+        // treat those as wallet-database failures.
+        ImportError::Database(e.into())
+    }
+}
+
 pub(crate) async fn call<C: Chain>(
     wallet: &mut DbConnection,
     keystore: &KeyStore,
@@ -99,14 +116,15 @@ pub(crate) async fn call<C: Chain>(
     let hrp_addr = wallet.params().hrp_sapling_payment_address();
     let (extsk, address) = decode_key_and_address(hrp, hrp_addr, key)?;
 
-    // Store the encrypted spending key in the keystore.
-    keystore
-        .encrypt_and_store_standalone_sapling_key(&extsk)
+    // Encrypt the spending key up front. Encryption is the only step needing the keystore
+    // encryptor (unavailable while the wallet is locked) and is async, so it happens before
+    // and outside the wallet transaction; the ciphertext is persisted inside it below.
+    let encrypted_key = keystore
+        .encrypt_standalone_sapling_key(&extsk)
         .await
         .map_err(|e| LegacyCode::Wallet.with_message(e.to_string()))?;
 
-    // Import the UFVK derived from the spending key into the wallet database so the
-    // wallet can track transactions to/from this key's addresses.
+    // Derive the UFVK from the spending key so the wallet can track its addresses.
     #[allow(deprecated)]
     let extfvk = extsk.to_extended_full_viewing_key();
     let ufvk = UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
@@ -118,7 +136,9 @@ pub(crate) async fn call<C: Chain>(
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
         .is_none();
 
-    if is_new_key {
+    // For a new key, resolve its birthday before opening the transaction, since the birthday
+    // fetch is async and may query the chain.
+    let birthday = if is_new_key {
         // Determine the birthday height based on the rescan parameter:
         // - "yes" or "whenkeyisnew" → use start_height so the sync engine scans
         //   historical blocks from that point.
@@ -141,26 +161,53 @@ pub(crate) async fn call<C: Chain>(
             _ => unreachable!(),
         };
 
-        let birthday = fetch_account_birthday(&chain, effective_height).await?;
+        Some(fetch_account_birthday(&chain, effective_height).await?)
+    } else {
+        None
+    };
 
-        wallet
-            .import_account_ufvk(
-                &format!("Imported Sapling key {}", &address[..16]),
-                &ufvk,
-                &birthday,
-                AccountPurpose::Spending { derivation: None },
-                None,
-            )
-            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+    // Import the account (for a new key) and store its encrypted spending key in a single
+    // wallet-database transaction: the account and its key commit together or not at all, so
+    // the wallet can never track an account whose key is missing, nor hold a key for an
+    // account it doesn't scan.
+    wallet
+        .with_mut(|mut db_data| {
+            db_data.transactionally_with_extension(|wdb, ext| -> Result<(), ImportError> {
+                if let Some(birthday) = &birthday {
+                    // Re-check existence inside the transaction: a concurrent import of the same
+                    // new key may have created the account since the outer check. If so, skip the
+                    // import and just (re)store the key — the same idempotent result as a
+                    // re-import.
+                    if wdb
+                        .get_account_for_ufvk(&ufvk)
+                        .map_err(ImportError::Database)?
+                        .is_none()
+                    {
+                        wdb.import_account_ufvk(
+                            &format!("Imported Sapling key {}", &address[..16]),
+                            &ufvk,
+                            birthday,
+                            AccountPurpose::Spending { derivation: None },
+                            None,
+                        )
+                        .map_err(ImportError::Database)?;
+                    }
+                }
+                encrypted_key.insert(ext).map_err(ImportError::Keystore)?;
+                Ok(())
+            })
+        })
+        .map_err(|e| match e {
+            ImportError::Database(e) => LegacyCode::Database.with_message(e.to_string()),
+            ImportError::Keystore(e) => LegacyCode::Wallet.with_message(e.to_string()),
+        })?;
 
-        // Reload viewing keys so the imported key is scanned without a restart. Don't wait
-        // for the reload to be processed: the marker is queued behind any blocks already in
-        // the decryptor, so awaiting it could block this call for a long time during sync.
-        if decryptor.reload_keys().await.is_none() {
-            tracing::warn!(
-                "sync engine has shut down; imported key won't be scanned until restart"
-            );
-        }
+    // Reload viewing keys so the key is scanned without a restart. Run this unconditionally:
+    // a re-import must be able to repair an account the sync engine never loaded. Don't wait
+    // for the reload to be processed; the marker is queued behind any blocks already in the
+    // decryptor, so awaiting it could block this call for a long time during sync.
+    if decryptor.reload_keys().await.is_none() {
+        tracing::warn!("sync engine has shut down; imported key won't be scanned until restart");
     }
 
     Ok(ResultType {

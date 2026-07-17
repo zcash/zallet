@@ -78,6 +78,25 @@ tempfile = "3"
 # rage 0.12 ships.
 age = { git = "https://github.com/str4d/rage.git", rev = "d28f10ee776ce7391f7065695997f998631b113a" }
 
+# Temporary patch for `WalletDb::transactionally_with_extension` (adds atomic
+# z_importkey account+key writes), merged upstream but not yet released. The API
+# lives in zcash_client_sqlite, but the repo is a workspace: pinning only that
+# crate pulls its path-dep siblings from git while their crates.io copies remain,
+# duplicating the librustzcash stack, so the whole stack is pinned to one rev.
+# Replace with the crates.io releases once the next zcash_client_sqlite release
+# ships.
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+
 # TEMPORARY: pin the zaino crates to zingolabs/zaino `dev` (currently 8048bf8d),
 # which surfaces the Ironwood (NU6.3) note commitment treestate from
 # `get_treestate` (now a `(sapling, orchard, ironwood)` triple of

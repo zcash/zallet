@@ -16,6 +16,13 @@ be considered breaking changes.
   now be passed bare (`zallet rpc help getwalletinfo`) in addition to the
   JSON-quoted form.
 
+### Fixed
+
+- `z_importkey` now writes the imported account and its encrypted spending key
+  in a single database transaction. A failure partway through the import can no
+  longer leave the spending key stored (and exportable via `z_exportkey`) while
+  the wallet has no account to scan for it.
+
 ## [0.1.0-beta.1] - 2026-07-12
 
 ### Added
