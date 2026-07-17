@@ -165,7 +165,7 @@ bip32 = "0.2"
 # tip, and the store/load/update persistence methods) and `engine::plan_migration`,
 # which backs the preview RPC. Bump the rev when the integration needs a newer
 # engine API.
-zcash_pool_migration_backend = { git = "https://github.com/zcash/librustzcash", rev = "df6e0b6e9c61e9b8490813a27683801beb1f25c6" }
+zcash_pool_migration_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "df6e0b6e9c61e9b8490813a27683801beb1f25c6" }
 
 # Zcashd wallet migration
 zewif = { version = "1.0.0-rc.3" }
