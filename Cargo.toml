@@ -46,6 +46,10 @@ sha2 = "0.10"
 
 # Key storage
 age = { version = "0.12", features = ["armor", "cli-common", "plugin"] }
+# Depended on solely to enable the `zeroize` feature on the copy of `x25519-dalek`
+# that `age` pulls in, so that native age identity secret keys are overwritten in
+# memory when cached identities are dropped. `age` enables only `static_secrets`.
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 bech32 = "0.11"
 bip0039 = "0.12"
 

@@ -6949,6 +6949,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "which",
+ "x25519-dalek",
  "xdg 2.5.2",
  "zcash_address 0.13.0",
  "zcash_client_backend",
