@@ -197,6 +197,16 @@ err-wallet-locked = Wallet is locked
 err-account-not-found = Account does not exist
 err-account-no-payment-source = Account has no payment source.
 
+## Transaction verification errors
+
+err-transparent-output-not-wallet-derived =
+    The built transaction pays a transparent output ({$output}) that is neither a requested
+    payment nor an address derived from the account's own key. The wallet database is
+    corrupted or has been tampered with. The transaction has not been broadcast.
+err-transparent-payment-missing =
+    The built transaction is missing a requested payment output (to {$address}). The wallet
+    database is corrupted or has been tampered with. The transaction has not been broadcast.
+
 # errors in migration of configuration data from the zcashd `zcash.conf` config file format
 
 err-migrate-allow-warnings = To allow a migration with warnings, use '{-allow-warnings}'

@@ -23,8 +23,11 @@ use zcash_client_backend::{
     },
     wallet::OvkPolicy,
 };
-use zcash_client_sqlite::ReceivedNoteId;
-use zcash_keys::{address::Address, keys::UnifiedSpendingKey};
+use zcash_client_sqlite::{AccountUuid, ReceivedNoteId};
+use zcash_keys::{
+    address::Address,
+    keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
+};
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
     PoolType, ShieldedPool,
@@ -39,8 +42,8 @@ use crate::{
             asyncop::{ContextInfo, OperationId},
             payments::{
                 AmountParameter, IncompatiblePrivacyPolicy, PrivacyPolicy, SendResult,
-                broadcast_transactions, build_request, enforce_privacy_policy,
-                get_account_for_address, get_legacy_pool_account,
+                build_request, enforce_privacy_policy, get_account_for_address,
+                get_legacy_pool_account, verify_and_broadcast_transactions,
             },
             server::LegacyCode,
         },
@@ -405,6 +408,8 @@ pub(crate) async fn call<C: Chain>(
         run(
             wallet,
             chain,
+            account.id(),
+            usk.to_unified_full_viewing_key(),
             proposal,
             #[cfg(feature = "zcashd-import")]
             SpendingKeys::new(usk, standalone_keys),
@@ -417,6 +422,10 @@ pub(crate) async fn call<C: Chain>(
 /// Construct and send the transaction, returning the resulting txid.
 /// Errors in transaction construction will throw.
 ///
+/// `ufvk` must be derived from the wallet seed: the built transactions' transparent
+/// outputs are verified against it before broadcast, because their addresses come from
+/// wallet database records that are not integrity-protected.
+///
 /// Notes:
 /// 1. #1159 Currently there is no limit set on the number of elements, which could
 ///    make the tx too large.
@@ -426,11 +435,13 @@ pub(crate) async fn call<C: Chain>(
 async fn run<C: Chain>(
     mut wallet: DbHandle,
     chain: C,
+    account_id: AccountUuid,
+    ufvk: UnifiedFullViewingKey,
     proposal: Proposal<StandardFeeRule, ReceivedNoteId>,
     spending_keys: SpendingKeys,
 ) -> RpcResult<SendResult> {
     let prover = LocalTxProver::bundled();
-    let (wallet, txids) = crate::spawn_blocking!("z_sendmany prover", move || {
+    let (wallet, proposal, txids) = crate::spawn_blocking!("z_sendmany prover", move || {
         let params = *wallet.params();
         create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             wallet.as_mut(),
@@ -441,14 +452,15 @@ async fn run<C: Chain>(
             OvkPolicy::Sender,
             &proposal,
         )
-        .map(|txids| (wallet, txids))
+        .map(|txids| (wallet, proposal, txids))
     })
     .await
     // TODO: Map errors to `zcashd` shape.
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
 
-    broadcast_transactions(&wallet, chain, txids.into()).await
+    verify_and_broadcast_transactions(&wallet, chain, account_id, &ufvk, &proposal, txids.into())
+        .await
 }
 
 #[cfg(test)]

@@ -24,7 +24,10 @@ use zcash_client_backend::{
     wallet::OvkPolicy,
 };
 use zcash_client_sqlite::AccountUuid;
-use zcash_keys::{address::Address, keys::UnifiedSpendingKey};
+use zcash_keys::{
+    address::Address,
+    keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
+};
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::value::Zatoshis;
 
@@ -35,7 +38,7 @@ use crate::{
         database::{DbConnection, DbHandle},
         json_rpc::{
             asyncop::{ContextInfo, OperationId},
-            payments::{PrivacyPolicy, SendResult, broadcast_transactions, parse_memo},
+            payments::{PrivacyPolicy, SendResult, parse_memo, verify_and_broadcast_transactions},
             server::LegacyCode,
             utils::{JsonZec, value_from_zatoshis},
         },
@@ -318,6 +321,8 @@ pub(crate) async fn call<C: Chain>(
         run(
             wallet,
             chain,
+            account_id,
+            usk.to_unified_full_viewing_key(),
             proposal,
             #[cfg(feature = "zcashd-import")]
             SpendingKeys::new(usk, standalone_keys),
@@ -499,14 +504,20 @@ fn enumerate_eligible(
 }
 
 /// Construct and broadcast the shielding transaction.
+///
+/// `ufvk` must be derived from the wallet seed: the built transactions' transparent
+/// outputs are verified against it before broadcast, because their addresses come from
+/// wallet database records that are not integrity-protected.
 async fn run<C: Chain>(
     mut wallet: DbHandle,
     chain: C,
+    account_id: AccountUuid,
+    ufvk: UnifiedFullViewingKey,
     proposal: Proposal<StandardFeeRule, Infallible>,
     spending_keys: SpendingKeys,
 ) -> RpcResult<SendResult> {
     let prover = LocalTxProver::bundled();
-    let (wallet, txids) = crate::spawn_blocking!("z_shieldcoinbase runner", move || {
+    let (wallet, proposal, txids) = crate::spawn_blocking!("z_shieldcoinbase runner", move || {
         let params = *wallet.params();
         create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             wallet.as_mut(),
@@ -517,7 +528,7 @@ async fn run<C: Chain>(
             OvkPolicy::Sender,
             &proposal,
         )
-        .map(|txids| (wallet, txids))
+        .map(|txids| (wallet, proposal, txids))
     })
     .await
     .map_err(|e| {
@@ -527,7 +538,8 @@ async fn run<C: Chain>(
         LegacyCode::Wallet.with_message(format!("Failed to build shielding transaction: {e}"))
     })?;
 
-    broadcast_transactions(&wallet, chain, txids.into()).await
+    verify_and_broadcast_transactions(&wallet, chain, account_id, &ufvk, &proposal, txids.into())
+        .await
 }
 
 #[cfg(test)]

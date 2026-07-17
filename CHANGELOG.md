@@ -18,6 +18,17 @@ be considered breaking changes.
 
 ### Fixed
 
+- `z_sendmany` and `z_shieldcoinbase` now verify, after building a transaction
+  and before broadcasting it, that every transparent output either exactly
+  matches a requested payment or has an address that re-derives from the
+  wallet-seed-derived account key at the derivation path the wallet database
+  records for it. Shielded outputs are constructed in-process from the spending
+  key material, but transparent change and ephemeral (ZIP 320) output addresses
+  are read from database records that are not integrity-protected, so a
+  modified record could previously redirect change to an arbitrary address
+  while the requested payments (and thus the operation) still succeeded. A
+  transaction that fails this check is reported as wallet database corruption
+  or tampering and is never handed to the broadcast step.
 - The keystore now verifies decrypted key material against the database row it
   was looked up by: seeds and mnemonics must reproduce the seed fingerprint
   their row is keyed by, and standalone transparent keys must reproduce the
@@ -133,7 +144,7 @@ be considered breaking changes.
   frontier as empty instead of reading the real (non-empty) tree, corrupting
   the wallet's local shardtree state on the very next batch (surfacing as a
   checkpoint or root conflict in `zcash_client_sqlite`, or an `Inserted root
-  conflicts with existing root` error from `shardtree`). The tree is now read
+conflicts with existing root` error from `shardtree`). The tree is now read
   from the backend the same way as Sapling and Orchard, via
   `ReadRequest::IronwoodTree`.
 
@@ -163,6 +174,7 @@ be considered breaking changes.
   - `z_shieldcoinbase`
 
 ### Changed
+
 - **This release is not compatible with wallets created by earlier alpha
   releases.** The embedded Zaino chain indexer made a backwards-incompatible
   change to its database format (zingolabs/zaino#914), which this release pulls
@@ -196,6 +208,7 @@ be considered breaking changes.
   embedding them in the HTTP URL.
 
 ### Fixed
+
 - `walletlock` now awaits aborted relock tasks before returning, preventing a race
   where a rapid `walletpassphrase` after `walletlock` could leave the wallet locked
   despite reporting success.
