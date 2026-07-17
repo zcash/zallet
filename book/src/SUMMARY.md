@@ -14,6 +14,7 @@
 - [Wallet encryption](concepts/encryption.md)
 - [Notes, confirmations, and fees](concepts/notes.md)
 - [Asynchronous operations](concepts/async-operations.md)
+- [The legacy transparent pool](concepts/legacy-pool.md)
 
 # Reference guide
 
