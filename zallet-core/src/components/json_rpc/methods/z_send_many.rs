@@ -451,6 +451,7 @@ async fn run<C: Chain>(
             &spending_keys,
             OvkPolicy::Sender,
             &proposal,
+            None,
         )
         .map(|txids| (wallet, proposal, txids))
     })
