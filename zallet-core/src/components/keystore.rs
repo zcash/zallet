@@ -741,6 +741,14 @@ impl KeyStore {
         let mnemonic = decrypt_string(&identities, &encrypted_mnemonic)
             .map_err(|e| ErrorKind::Generic.context(e))?;
 
+        // The ciphertext is not bound to the fingerprint the row is keyed by, so verify
+        // that the decrypted mnemonic reproduces the fingerprint used for the lookup.
+        if !mnemonic_matches_fingerprint(&mnemonic, seed_fp)? {
+            return Err(ErrorKind::Generic
+                .context(fl!("err-keystore-key-material-mismatch"))
+                .into());
+        }
+
         Ok(mnemonic)
     }
 
@@ -789,8 +797,18 @@ impl KeyStore {
             })
             .await?;
 
-        decrypt_secret_bytes(&identities, &encrypted_legacy_seed)
-            .map_err(|e| ErrorKind::Generic.context(e).into())
+        let legacy_seed = decrypt_secret_bytes(&identities, &encrypted_legacy_seed)
+            .map_err(|e| ErrorKind::Generic.context(e))?;
+
+        // The ciphertext is not bound to the fingerprint the row is keyed by, so verify
+        // that the decrypted seed reproduces the fingerprint used for the lookup.
+        if !seed_matches_fingerprint(legacy_seed.expose_secret(), seed_fp) {
+            return Err(ErrorKind::Generic
+                .context(fl!("err-keystore-key-material-mismatch"))
+                .into());
+        }
+
+        Ok(legacy_seed)
     }
 
     /// Exports the mnemonic phrase corresponding to the given seed fingerprint.
@@ -882,27 +900,41 @@ impl KeyStore {
             return Err(ErrorKind::Generic.context(fl!("err-wallet-locked")).into());
         }
 
-        let encrypted_key_bytes = self
+        let (pubkey_bytes, encrypted_key_bytes) = self
             .with_db(|conn, network| {
                 let addr_str = Address::Transparent(*address).encode(network);
-                let encrypted_key_bytes = conn
+                let row = conn
                     .query_row(
-                        "SELECT encrypted_transparent_privkey
+                        "SELECT ztk.pubkey, encrypted_transparent_privkey
                          FROM ext_zallet_keystore_standalone_transparent_keys ztk
                          JOIN addresses a ON ztk.pubkey = a.imported_transparent_receiver_pubkey
                          WHERE a.cached_transparent_receiver_address = :address",
                         named_params! {
                             ":address": addr_str,
                         },
-                        |row| row.get::<_, Vec<u8>>("encrypted_transparent_privkey"),
+                        |row| {
+                            Ok((
+                                row.get::<_, Vec<u8>>("pubkey")?,
+                                row.get::<_, Vec<u8>>("encrypted_transparent_privkey")?,
+                            ))
+                        },
                     )
                     .map_err(|e| ErrorKind::Generic.context(e))?;
-                Ok(encrypted_key_bytes)
+                Ok(row)
             })
             .await?;
 
         let secret_key =
             decrypt_standalone_transparent_privkey(&identities, &encrypted_key_bytes[..])?;
+
+        // The ciphertext is not bound to the pubkey the row is keyed by, so verify that
+        // the decrypted key reproduces the pubkey used for the lookup.
+        let pubkey = secret_key.public_key(&secp256k1::Secp256k1::signing_only());
+        if pubkey.serialize()[..] != pubkey_bytes[..] {
+            return Err(ErrorKind::Generic
+                .context(fl!("err-keystore-key-material-mismatch"))
+                .into());
+        }
 
         Ok(secret_key)
     }
@@ -1058,6 +1090,33 @@ fn encrypt_string(
     Ok(ciphertext)
 }
 
+/// Returns whether the given seed bytes have the given [ZIP 32] seed fingerprint.
+///
+/// Keystore rows are keyed by seed fingerprint, but their ciphertexts are not bound to
+/// that key (age recipients are public), so decrypted seed material must be checked
+/// against the fingerprint it was looked up by before use.
+///
+/// [ZIP 32]: https://zips.z.cash/zip-0032#seed-fingerprints
+fn seed_matches_fingerprint(seed: &[u8], seed_fp: &SeedFingerprint) -> bool {
+    SeedFingerprint::from_seed(seed).is_some_and(|fp| fp.to_bytes() == seed_fp.to_bytes())
+}
+
+/// Returns whether the seed derived from the given mnemonic phrase has the given [ZIP 32]
+/// seed fingerprint.
+///
+/// [ZIP 32]: https://zips.z.cash/zip-0032#seed-fingerprints
+fn mnemonic_matches_fingerprint(
+    mnemonic: &SecretString,
+    seed_fp: &SeedFingerprint,
+) -> Result<bool, Error> {
+    let mut seed_bytes = Mnemonic::<English>::from_phrase(mnemonic.expose_secret())
+        .map_err(|e| ErrorKind::Generic.context(e))?
+        .to_seed("");
+    let matches = seed_matches_fingerprint(&seed_bytes, seed_fp);
+    seed_bytes.zeroize();
+    Ok(matches)
+}
+
 fn decrypt_string(
     identities: &[Box<dyn age::Identity + Send + Sync>],
     ciphertext: &[u8],
@@ -1162,4 +1221,75 @@ fn decrypt_standalone_transparent_privkey(
         .map_err(|e| ErrorKind::Generic.context(e))?;
 
     Ok(secret_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use bip0039::{English, Mnemonic};
+    use proptest::prelude::*;
+    use secrecy::SecretString;
+    use zip32::fingerprint::SeedFingerprint;
+
+    use super::{mnemonic_matches_fingerprint, seed_matches_fingerprint};
+
+    proptest! {
+        #[test]
+        fn seed_matches_its_own_fingerprint(seed in proptest::collection::vec(any::<u8>(), 32..=252)) {
+            let seed_fp = SeedFingerprint::from_seed(&seed).expect("valid length");
+            prop_assert!(seed_matches_fingerprint(&seed, &seed_fp));
+        }
+
+        #[test]
+        fn seed_does_not_match_other_fingerprint(
+            seed in proptest::collection::vec(any::<u8>(), 32..=252),
+            other_fp in any::<[u8; 32]>(),
+        ) {
+            let seed_fp = SeedFingerprint::from_seed(&seed).expect("valid length");
+            let other_fp = SeedFingerprint::from_bytes(other_fp);
+            prop_assert_eq!(
+                seed_matches_fingerprint(&seed, &other_fp),
+                other_fp.to_bytes() == seed_fp.to_bytes(),
+            );
+        }
+
+        #[test]
+        fn invalid_length_seed_matches_no_fingerprint(
+            seed in proptest::collection::vec(any::<u8>(), 0..32),
+            seed_fp in any::<[u8; 32]>(),
+        ) {
+            prop_assert!(!seed_matches_fingerprint(&seed, &SeedFingerprint::from_bytes(seed_fp)));
+        }
+    }
+
+    proptest! {
+        // Deriving a seed from a mnemonic uses PBKDF2, which is slow in unoptimized
+        // builds, so run fewer cases than the default.
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn mnemonic_matches_only_its_own_fingerprint(
+            entropy in any::<[u8; 32]>(),
+            other_fp in any::<[u8; 32]>(),
+        ) {
+            let mnemonic = Mnemonic::<English>::from_entropy(entropy).expect("valid entropy");
+            let seed_fp = SeedFingerprint::from_seed(&mnemonic.to_seed("")).expect("valid length");
+            let phrase = SecretString::new(mnemonic.into_phrase());
+
+            prop_assert!(mnemonic_matches_fingerprint(&phrase, &seed_fp).expect("valid phrase"));
+
+            let other_fp = SeedFingerprint::from_bytes(other_fp);
+            prop_assert_eq!(
+                mnemonic_matches_fingerprint(&phrase, &other_fp).expect("valid phrase"),
+                other_fp.to_bytes() == seed_fp.to_bytes(),
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_phrase_is_an_error() {
+        let phrase = SecretString::new("not a mnemonic".into());
+        assert!(
+            mnemonic_matches_fingerprint(&phrase, &SeedFingerprint::from_bytes([0; 32])).is_err()
+        );
+    }
 }
