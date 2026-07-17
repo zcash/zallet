@@ -63,6 +63,8 @@ mod validate_address;
 mod verify_message;
 mod view_transaction;
 #[cfg(zallet_build = "wallet")]
+mod z_export_viewing_key;
+#[cfg(zallet_build = "wallet")]
 mod z_get_balance_for_account;
 #[cfg(zallet_build = "wallet")]
 mod z_get_total_balance;
@@ -710,6 +712,33 @@ pub(crate) trait WalletRpc {
         memo: Option<String>,
         privacy_policy: Option<String>,
     ) -> z_shieldcoinbase::Response;
+
+    /// Reveals the viewing key corresponding to 'zaddr'.
+    ///
+    /// # Arguments
+    ///
+    /// - `zaddr` (string, required) The Sapling payment address or unified
+    ///   address.
+    /// - `ivk` (boolean, optional, default=`false`) When `true`, export the
+    ///   unified incoming viewing key (UIVK) for the account holding `zaddr`
+    ///   instead of the full viewing key.
+    ///
+    /// # Returns
+    /// A string containing the viewing key:
+    /// - For a Sapling payment address, the Sapling extended full viewing key
+    ///   (`zxviews…`).
+    /// - For a unified address, the unified full viewing key (`uview…`) of the
+    ///   account holding the address.
+    /// - When `ivk` is `true`, the unified incoming viewing key (`uivk…`) of
+    ///   the account holding the address, for either address kind. Note that
+    ///   a UIVK grants incoming viewing capability for every pool in the
+    ///   account, even when `zaddr` is a Sapling address.
+    #[method(name = "z_exportviewingkey")]
+    async fn export_viewing_key(
+        &self,
+        zaddr: &str,
+        ivk: Option<bool>,
+    ) -> z_export_viewing_key::Response;
 }
 
 pub(crate) struct RpcImpl<C: Chain> {
@@ -1122,5 +1151,13 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         .await?;
         let opid = self.start_async((context, fut)).await;
         Ok(z_shieldcoinbase::ShieldCoinbaseResult::new(preflight, opid))
+    }
+
+    async fn export_viewing_key(
+        &self,
+        zaddr: &str,
+        ivk: Option<bool>,
+    ) -> z_export_viewing_key::Response {
+        z_export_viewing_key::call(self.wallet().await?.as_ref(), &self.keystore, zaddr, ivk).await
     }
 }
