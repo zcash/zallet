@@ -10,6 +10,14 @@
 - [Wallet setup](guide/setup.md)
 - [Backup and restore](guide/backup.md)
 
+# Concepts
+
+- [Accounts and keys](concepts/accounts.md)
+- [Wallet encryption](concepts/encryption.md)
+- [Notes, confirmations, and fees](concepts/notes.md)
+- [Asynchronous operations](concepts/async-operations.md)
+- [The legacy transparent pool](concepts/legacy-pool.md)
+
 # Reference guide
 
 - [Command-line tool](cli/README.md)
