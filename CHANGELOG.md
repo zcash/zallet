@@ -18,6 +18,14 @@ be considered breaking changes.
 
 ### Fixed
 
+- The keystore now verifies decrypted key material against the database row it
+  was looked up by: seeds and mnemonics must reproduce the seed fingerprint
+  their row is keyed by, and standalone transparent keys must reproduce the
+  stored public key. Previously the ciphertexts were not bound to their row
+  keys, so anyone with write access to `wallet.db` could substitute their own
+  encrypted seed under an existing fingerprint (age recipients are public) and
+  subsequent account derivation would silently use the substituted material.
+  Such a mismatch is now reported as wallet database corruption or tampering.
 - `z_importkey` now writes the imported account and its encrypted spending key
   in a single database transaction. A failure partway through the import can no
   longer leave the spending key stored (and exportable via `z_exportkey`) while

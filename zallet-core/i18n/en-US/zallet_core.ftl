@@ -187,6 +187,9 @@ err-config-backend-mismatch = The config file selects the '{$configured}' chain 
 err-keystore-missing-recipients = The wallet has not been set up to store key material securely.
 rec-keystore-missing-recipients = Have you run '{$init_cmd}'?
 err-keystore-already-initialized = Keystore age recipients already initialized
+err-keystore-key-material-mismatch =
+    Decrypted key material does not match the fingerprint it is stored under. The wallet
+    database is corrupted or has been tampered with.
 err-wallet-locked = Wallet is locked
 
 ## Account errors
