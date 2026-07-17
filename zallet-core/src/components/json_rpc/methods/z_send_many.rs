@@ -40,7 +40,7 @@ use crate::{
             payments::{
                 AmountParameter, IncompatiblePrivacyPolicy, PrivacyPolicy, SendResult,
                 broadcast_transactions, build_request, enforce_privacy_policy,
-                get_account_for_address, get_legacy_pool_account,
+                get_account_for_address, get_legacy_pool_account, parse_privacy_policy,
             },
             server::LegacyCode,
         },
@@ -67,24 +67,57 @@ pub(super) const PARAM_FEE_DESC: &str = "If set, it must be null.";
 pub(super) const PARAM_PRIVACY_POLICY_DESC: &str =
     "Policy for what information leakage is acceptable.";
 
-/// The sources of funds a transfer from `source` may draw upon.
+/// The sources of funds a transfer from `source` may draw upon, given the caller's
+/// `privacy_policy`.
 ///
-/// Spending from a bare transparent address draws only on that address's UTXOs: the funds are
-/// already public, and confining selection to the named address avoids linking it to the
-/// account's other transparent receivers. Every other source stays shielded-only, so a
-/// shielded send can never silently reach into transparent funds.
+/// Spending from a bare transparent address draws only on that address's UTXOs, regardless of
+/// the privacy policy: the funds are already public, and confining selection to the named
+/// address avoids linking it to the account's other transparent receivers.
+///
+/// A unified address source spends the account's shielded funds by default, but the privacy
+/// policy can opt it into transparent spending as well, mirroring `zcashd`'s documented
+/// semantics for a UA `fromaddress`:
+///
+/// - `AllowLinkingAccountAddresses` (or `NoPrivacy`) lets it spend *any* of the account's
+///   transparent receivers, whichever the proposer picks to cover the request, linking them
+///   on-chain when more than one is needed ([`TransparentSpendPolicy::any_account_addr`]).
+/// - `AllowRevealedSenders` (or `AllowFullyTransparent`) lets it spend only the UTXOs of *that
+///   UA's own* transparent receiver, if it has one; a UA without a transparent receiver has
+///   nothing for this tier to confine to, so it stays shielded-only.
+/// - Anything stricter (the default `FullPrivacy`, `AllowRevealedAmounts`,
+///   `AllowRevealedRecipients`) stays shielded-only, unchanged.
+///
+/// Every other source (Sapling, TEX) stays shielded-only.
 ///
 /// Coinbase UTXOs are excluded: `TransparentSpendPolicy` defaults to
 /// `CoinbasePolicy::NonCoinbase`, and consensus requires coinbase to be spent to a single
 /// shielded output, which is `z_shieldcoinbase`'s job.
 ///
-/// The privacy policy deliberately does not narrow this: the selector returns its best
-/// proposal, and `enforce_privacy_policy` rejects it afterwards if it leaks more than the
-/// caller permitted.
-fn spend_policy_for(source: &Address) -> SpendPolicy {
+/// The privacy policy never *narrows* selection within the permitted sources — the
+/// selector returns its best proposal and `enforce_privacy_policy` rejects it afterwards if it
+/// leaks more than the caller allowed. But for a UA source it does gate whether the transparent
+/// source is opted into at all, and it must: the [`GreedyInputSelector`] gathers transparent
+/// UTXOs up front, targeting the full request amount, whenever a [`TransparentSpendPolicy`] is
+/// present, and only then covers the remainder from shielded notes. A policy-blind transparent
+/// opt-in would therefore make the default fully-shielded send propose transparent inputs and
+/// then fail `enforce_privacy_policy` after the fact, so the opt-in itself is derived from the
+/// requested policy while privacy enforcement stays post-hoc.
+fn spend_policy_for(source: &Address, privacy_policy: PrivacyPolicy) -> SpendPolicy {
     match source {
         Address::Transparent(taddr) => SpendPolicy::shielded_pools([])
             .with_transparent(TransparentSpendPolicy::from_one_address(*taddr)),
+        Address::Unified(ua) => {
+            if privacy_policy.allow_linking_account_addresses() {
+                SpendPolicy::default().with_transparent(TransparentSpendPolicy::any_account_addr())
+            } else if let (true, Some(&taddr)) =
+                (privacy_policy.allow_revealed_senders(), ua.transparent())
+            {
+                SpendPolicy::default()
+                    .with_transparent(TransparentSpendPolicy::from_one_address(taddr))
+            } else {
+                SpendPolicy::default()
+            }
+        }
         _ => SpendPolicy::default(),
     }
 }
@@ -151,6 +184,11 @@ pub(crate) async fn call<C: Chain>(
 
     let request = build_request(&amounts)?;
 
+    // Parse the privacy policy before deriving the spend policy: for a unified-address source
+    // the requested policy gates whether transparent spending is opted into at all (see
+    // `spend_policy_for`).
+    let privacy_policy = parse_privacy_policy(privacy_policy.as_deref())?;
+
     let (account, spend_policy) = match fromaddress.as_str() {
         // Select from the legacy transparent address pool, which this wallet holds in a
         // single account. Enabled by `features.legacy_pool_seed_fingerprint`.
@@ -168,18 +206,9 @@ pub(crate) async fn call<C: Chain>(
 
             let account = get_account_for_address(wallet.as_ref(), &address)?;
 
-            (account, spend_policy_for(&address))
+            (account, spend_policy_for(&address, privacy_policy))
         }
     };
-
-    let privacy_policy = match privacy_policy.as_deref() {
-        Some("LegacyCompat") => Err(LegacyCode::InvalidParameter
-            .with_static("LegacyCompat privacy policy is unsupported in Zallet")),
-        Some(s) => PrivacyPolicy::from_str(s).ok_or_else(|| {
-            LegacyCode::InvalidParameter.with_message(format!("Unknown privacy policy {s}"))
-        }),
-        None => Ok(PrivacyPolicy::FullPrivacy),
-    }?;
 
     // Sanity check for transaction size
     // TODO: https://github.com/zcash/zallet/issues/255
@@ -466,8 +495,20 @@ mod tests {
     use zip32::AccountId;
 
     use super::{
-        SpendPolicy, legacy_pool_spend_policy, spend_policy_for, transparent_change_policy_for,
+        PrivacyPolicy, SpendPolicy, legacy_pool_spend_policy, spend_policy_for,
+        transparent_change_policy_for,
     };
+
+    /// Every privacy policy, from strictest to loosest.
+    const ALL_POLICIES: &[PrivacyPolicy] = &[
+        PrivacyPolicy::FullPrivacy,
+        PrivacyPolicy::AllowRevealedAmounts,
+        PrivacyPolicy::AllowRevealedRecipients,
+        PrivacyPolicy::AllowRevealedSenders,
+        PrivacyPolicy::AllowFullyTransparent,
+        PrivacyPolicy::AllowLinkingAccountAddresses,
+        PrivacyPolicy::NoPrivacy,
+    ];
 
     /// `ANY_TADDR` draws on the legacy pool's transparent funds, on any address within it, and
     /// on nothing else.
@@ -524,6 +565,23 @@ mod tests {
         Some(ua)
     }
 
+    /// A unified address carrying only shielded receivers (no transparent receiver), derived
+    /// from `seed` and `account`.
+    ///
+    /// `UnifiedAddressRequest::SHIELDED` omits the P2PKH receiver, so `ua.transparent()` is
+    /// `None`. This is the input that distinguishes the two `AllowRevealedSenders` and
+    /// `AllowLinkingAccountAddresses` tiers: the former needs the UA's own transparent
+    /// receiver to confine to, the latter draws on the account's receivers regardless.
+    fn shielded_only_ua_from(seed: &[u8; 32], account: u32) -> Option<UnifiedAddress> {
+        let account = AccountId::try_from(account).ok()?;
+        let usk = UnifiedSpendingKey::from_seed(&Network::TestNetwork, seed, account).ok()?;
+        let (ua, _) = usk
+            .to_unified_full_viewing_key()
+            .default_address(UnifiedAddressRequest::SHIELDED)
+            .ok()?;
+        Some(ua)
+    }
+
     /// ZIP 32 account indices are non-hardened, so they occupy the low 31 bits.
     fn arb_account() -> impl Strategy<Value = u32> {
         0u32..(1 << 31)
@@ -535,8 +593,10 @@ mod tests {
         // corners of the seed space, so a modest sample establishes them.
         #![proptest_config(ProptestConfig::with_cases(32))]
 
-        /// Whatever key it was derived from, a transparent source draws only on that one
-        /// address's UTXOs, and on no shielded note.
+        /// Whatever key it was derived from, and whatever the privacy policy, a bare
+        /// transparent source draws only on that one address's UTXOs, and on no shielded note.
+        /// The privacy policy does not enter into a bare taddr's confinement: those funds are
+        /// already public, so there is nothing for a looser policy to unlock.
         #[test]
         fn transparent_source_spends_only_that_address_and_no_shielded_pool(
             seed in any::<[u8; 32]>(),
@@ -545,67 +605,210 @@ mod tests {
             let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
             let Some(&taddr) = ua.transparent() else { return Ok(()) };
 
-            let policy = spend_policy_for(&Address::Transparent(taddr));
+            for &privacy_policy in ALL_POLICIES {
+                let policy = spend_policy_for(&Address::Transparent(taddr), privacy_policy);
 
-            // A transparent send must not reach into the account's shielded funds. The
-            // permitted-pool SET being empty says this exhaustively: it forbids every
-            // shielded pool, including any added to `ShieldedPool` after this was written,
-            // which enumerating the variants here would not.
-            prop_assert!(
-                policy.shielded().is_empty(),
-                "a transparent source must permit no shielded pool, got {:?}",
-                policy.shielded(),
-            );
+                // A transparent send must not reach into the account's shielded funds. The
+                // permitted-pool SET being empty says this exhaustively: it forbids every
+                // shielded pool, including any added to `ShieldedPool` after this was written,
+                // which enumerating the variants here would not.
+                prop_assert!(
+                    policy.shielded().is_empty(),
+                    "a transparent source must permit no shielded pool, got {:?} (policy {})",
+                    policy.shielded(),
+                    privacy_policy,
+                );
 
-            let transparent = policy
-                .transparent()
-                .expect("a transparent source permits transparent spending");
+                let transparent = policy
+                    .transparent()
+                    .expect("a transparent source permits transparent spending");
 
-            // Only the named address, so spending it does not link the source to the
-            // account's other transparent receivers.
-            match transparent.source() {
-                TransparentSource::FromAddresses(addrs) => prop_assert_eq!(
-                    addrs.iter().copied().collect::<Vec<_>>(),
-                    vec![taddr],
-                    "selection must be confined to the named address",
-                ),
-                other => prop_assert!(
-                    false,
-                    "expected a single-address source, got {other:?}",
-                ),
+                // Only the named address, so spending it does not link the source to the
+                // account's other transparent receivers.
+                match transparent.source() {
+                    TransparentSource::FromAddresses(addrs) => prop_assert_eq!(
+                        addrs.iter().copied().collect::<Vec<_>>(),
+                        vec![taddr],
+                        "selection must be confined to the named address",
+                    ),
+                    other => prop_assert!(
+                        false,
+                        "expected a single-address source, got {other:?}",
+                    ),
+                }
+
+                // Coinbase must be spent to a single shielded output (`z_shieldcoinbase`'s
+                // job), so a general transfer never draws on it.
+                prop_assert_eq!(transparent.coinbase(), CoinbasePolicy::NonCoinbase);
             }
-
-            // Coinbase must be spent to a single shielded output (`z_shieldcoinbase`'s
-            // job), so a general transfer never draws on it.
-            prop_assert_eq!(transparent.coinbase(), CoinbasePolicy::NonCoinbase);
         }
 
-        /// The property whose absence made transparent spending impossible, inverted: a
-        /// shielded source must never be able to select a transparent input, even though the
-        /// unified address it names does carry a transparent receiver.
+        /// Under a privacy policy stricter than `AllowRevealedSenders` — the default
+        /// `FullPrivacy`, `AllowRevealedAmounts`, or `AllowRevealedRecipients` — a unified
+        /// address source stays shielded-only, exactly as it did before transparent spending
+        /// from a UA existed. None of these policies permit revealing that the account owns
+        /// transparent funds, so the transparent source is not opted into and the greedy
+        /// selector never gathers a transparent UTXO.
         #[test]
-        fn shielded_source_permits_no_transparent_spending(
+        fn ua_source_under_strict_policy_permits_no_transparent_spending(
             seed in any::<[u8; 32]>(),
             account in arb_account(),
         ) {
             let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            let default = SpendPolicy::default();
 
-            let policy = spend_policy_for(&Address::Unified(ua));
+            let strict = [
+                PrivacyPolicy::FullPrivacy,
+                PrivacyPolicy::AllowRevealedAmounts,
+                PrivacyPolicy::AllowRevealedRecipients,
+            ];
 
+            for privacy_policy in strict {
+                let policy = spend_policy_for(&Address::Unified(ua.clone()), privacy_policy);
+
+                prop_assert!(
+                    policy.transparent().is_none(),
+                    "a UA source under {} must not permit transparent spending",
+                    privacy_policy,
+                );
+
+                // Shielded selection is left exactly as the default. Comparing against the
+                // default's pool set keeps that true for any pool added later, rather than
+                // pinning today's set.
+                prop_assert_eq!(policy.shielded(), default.shielded());
+            }
+        }
+
+        /// Under `AllowRevealedSenders` or `AllowFullyTransparent`, a unified address source
+        /// spends the non-coinbase UTXOs of *that UA's own* transparent receiver, and no
+        /// others: these policies reveal the sender but do not authorize linking the account's
+        /// transparent receivers, so selection is confined to the one receiver the caller
+        /// named. Shielded selection is untouched.
+        #[test]
+        fn ua_source_under_revealed_senders_spends_only_that_uas_receiver(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+        ) {
+            let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            let Some(&taddr) = ua.transparent() else { return Ok(()) };
+            let default = SpendPolicy::default();
+
+            for privacy_policy in [
+                PrivacyPolicy::AllowRevealedSenders,
+                PrivacyPolicy::AllowFullyTransparent,
+            ] {
+                let policy = spend_policy_for(&Address::Unified(ua.clone()), privacy_policy);
+
+                // Shielded selection remains the account's full shielded default; the
+                // transparent opt-in adds to it rather than replacing it.
+                prop_assert_eq!(policy.shielded(), default.shielded());
+
+                let transparent = policy
+                    .transparent()
+                    .expect("AllowRevealedSenders opts a UA with a t-receiver into transparent spending");
+
+                match transparent.source() {
+                    TransparentSource::FromAddresses(addrs) => prop_assert_eq!(
+                        addrs.iter().copied().collect::<Vec<_>>(),
+                        vec![taddr],
+                        "selection must be confined to the UA's own transparent receiver",
+                    ),
+                    other => prop_assert!(
+                        false,
+                        "expected the UA's single receiver as source, got {other:?}",
+                    ),
+                }
+
+                prop_assert_eq!(transparent.coinbase(), CoinbasePolicy::NonCoinbase);
+            }
+        }
+
+        /// Under `AllowLinkingAccountAddresses` or `NoPrivacy`, a unified address source draws
+        /// on *any* of the account's transparent receivers, whichever the proposer picks —
+        /// `TransparentSource::AnyAccountAddr`, the same source `ANY_TADDR` uses. These
+        /// policies authorize linking the account's transparent receivers on-chain, so the
+        /// UA the caller named is merely a handle to the account, not a confinement. Shielded
+        /// selection is untouched.
+        #[test]
+        fn ua_source_under_linking_policy_spends_any_account_receiver(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+        ) {
+            let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            let default = SpendPolicy::default();
+
+            for privacy_policy in [
+                PrivacyPolicy::AllowLinkingAccountAddresses,
+                PrivacyPolicy::NoPrivacy,
+            ] {
+                let policy = spend_policy_for(&Address::Unified(ua.clone()), privacy_policy);
+
+                prop_assert_eq!(policy.shielded(), default.shielded());
+
+                let transparent = policy
+                    .transparent()
+                    .expect("AllowLinkingAccountAddresses opts a UA source into transparent spending");
+
+                prop_assert!(
+                    matches!(transparent.source(), TransparentSource::AnyAccountAddr),
+                    "a linking policy must draw on any of the account's receivers, got {:?}",
+                    transparent.source(),
+                );
+
+                prop_assert_eq!(transparent.coinbase(), CoinbasePolicy::NonCoinbase);
+            }
+        }
+
+        /// The two tiers diverge on a UA that carries no transparent receiver of its own.
+        ///
+        /// `AllowRevealedSenders` confines the transparent spend to *the named UA's* receiver,
+        /// so a UA without one has nothing to confine to and stays shielded-only. But
+        /// `AllowLinkingAccountAddresses` draws on the *account's* transparent receivers, which
+        /// exist independently of which UA the caller named, so it still opts into
+        /// `AnyAccountAddr` even though the named UA is purely shielded.
+        #[test]
+        fn shielded_only_ua_source_opts_in_only_under_a_linking_policy(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+        ) {
+            let Some(ua) = shielded_only_ua_from(&seed, account) else { return Ok(()) };
+            let default = SpendPolicy::default();
             prop_assert!(
-                policy.transparent().is_none(),
-                "a shielded source must not permit transparent spending",
+                ua.transparent().is_none(),
+                "the SHIELDED request must yield a UA with no transparent receiver",
             );
 
-            // Shielded selection is left exactly as it was before transparent spending
-            // existed. Comparing against the default's pool set keeps that true for any
-            // pool added later, rather than pinning today's three.
-            let unchanged = SpendPolicy::default();
-            prop_assert_eq!(policy.shielded(), unchanged.shielded());
+            // `AllowRevealedSenders`: no receiver to confine to, so shielded-only.
+            let revealed = spend_policy_for(
+                &Address::Unified(ua.clone()),
+                PrivacyPolicy::AllowRevealedSenders,
+            );
+            prop_assert!(
+                revealed.transparent().is_none(),
+                "a shielded-only UA has no transparent receiver for AllowRevealedSenders to spend",
+            );
+            prop_assert_eq!(revealed.shielded(), default.shielded());
+
+            // `AllowLinkingAccountAddresses`: the account's receivers exist regardless, so the
+            // transparent source is opted in as `AnyAccountAddr`.
+            let linking = spend_policy_for(
+                &Address::Unified(ua),
+                PrivacyPolicy::AllowLinkingAccountAddresses,
+            );
+            let transparent = linking
+                .transparent()
+                .expect("a linking policy opts in via the account's receivers, not the UA's");
+            prop_assert!(
+                matches!(transparent.source(), TransparentSource::AnyAccountAddr),
+                "a linking policy draws on the account's receivers, got {:?}",
+                transparent.source(),
+            );
         }
 
         /// Change may be returned to the transparent pool exactly when the source could spend
-        /// transparent funds in the first place.
+        /// transparent funds in the first place: a bare taddr under any policy; a UA only once
+        /// a linking policy opts it into transparent spending. A UA under `FullPrivacy` spends
+        /// only shielded funds, so its change is shielded.
         #[test]
         fn transparent_change_permitted_exactly_when_transparent_funds_are_spendable(
             seed in any::<[u8; 32]>(),
@@ -614,19 +817,39 @@ mod tests {
             let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
             let Some(&taddr) = ua.transparent() else { return Ok(()) };
 
-            let transparent_source = spend_policy_for(&Address::Transparent(taddr));
-            prop_assert_eq!(
-                transparent_change_policy_for(&transparent_source),
-                TransparentChangePolicy::TransparentChangeAllowed,
-                "a fully transparent send keeps its change transparent",
-            );
+            // A bare taddr keeps its change transparent under every policy.
+            for &privacy_policy in ALL_POLICIES {
+                let taddr_source = spend_policy_for(&Address::Transparent(taddr), privacy_policy);
+                prop_assert_eq!(
+                    transparent_change_policy_for(&taddr_source),
+                    TransparentChangePolicy::TransparentChangeAllowed,
+                    "a fully transparent send keeps its change transparent",
+                );
+            }
 
-            let shielded_source = spend_policy_for(&Address::Unified(ua));
+            // A UA source under `FullPrivacy` spends only shielded funds, so change is shielded.
+            let shielded_source =
+                spend_policy_for(&Address::Unified(ua.clone()), PrivacyPolicy::FullPrivacy);
             prop_assert_eq!(
                 transparent_change_policy_for(&shielded_source),
                 TransparentChangePolicy::ShieldChange,
                 "a shielded send must not acquire a transparent change output",
             );
+
+            // A UA source under a linking policy can spend transparent funds, so it may keep
+            // transparent change.
+            for privacy_policy in [
+                PrivacyPolicy::AllowLinkingAccountAddresses,
+                PrivacyPolicy::NoPrivacy,
+            ] {
+                let linking_source =
+                    spend_policy_for(&Address::Unified(ua.clone()), privacy_policy);
+                prop_assert_eq!(
+                    transparent_change_policy_for(&linking_source),
+                    TransparentChangePolicy::TransparentChangeAllowed,
+                    "a UA source permitted to spend transparent funds may keep transparent change",
+                );
+            }
         }
     }
 }

@@ -429,9 +429,6 @@ pub(super) fn required_privacy_policy<FeeRuleT, NoteRef>(
 /// Parses the optional `privacy_policy` JSON-RPC argument into a [`PrivacyPolicy`],
 /// defaulting to [`PrivacyPolicy::FullPrivacy`] when absent and rejecting the unsupported
 /// `"LegacyCompat"` policy.
-// Extracted ahead of its caller; not yet wired into a JSON-RPC method on this branch, hence
-// `allow(dead_code)`.
-#[allow(dead_code)]
 pub(super) fn parse_privacy_policy(privacy_policy: Option<&str>) -> RpcResult<PrivacyPolicy> {
     match privacy_policy {
         Some("LegacyCompat") => Err(LegacyCode::InvalidParameter
@@ -776,7 +773,10 @@ pub(super) fn get_legacy_pool_account(wallet: &DbConnection) -> RpcResult<Accoun
             LegacyCode::WalletAccountsUnsupported.with_static(
                 "The legacy pool of funds is disabled. To enable it, set \
                  `features.legacy_pool_seed_fingerprint` in the Zallet config file to the \
-                 seed fingerprint of the `zcashd` wallet migrated into this wallet.",
+                 seed fingerprint of the `zcashd` wallet migrated into this wallet. To spend \
+                 the transparent funds of a regular account instead, pass one of its unified \
+                 addresses as fromaddress with privacyPolicy AllowLinkingAccountAddresses (or \
+                 NoPrivacy if the transaction also has transparent recipients or change).",
             )
         })?;
 

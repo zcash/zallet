@@ -10,6 +10,17 @@ be considered breaking changes.
 
 ### Changed
 
+- `z_sendmany` with a unified-address `fromaddress` can now spend the account's
+  transparent funds when the caller's privacy policy permits it, matching
+  `zcashd`'s documented privacy-policy semantics for a UA source. Under
+  `AllowRevealedSenders` or `AllowFullyTransparent` it spends the non-coinbase
+  UTXOs of the transparent receiver in the provided UA; under
+  `AllowLinkingAccountAddresses` or `NoPrivacy` it spends the non-coinbase UTXOs
+  of any of the account's transparent receivers, linking them on-chain when more
+  than one is needed. Previously a UA `fromaddress` was always shielded-only, so
+  a regular account had no way to gather its transparent change in one
+  transaction; only the legacy-pool `ANY_TADDR` source could spend from multiple
+  transparent addresses.
 - `zallet rpc help` is now answered locally instead of being sent to the
   wallet's JSON-RPC server, so it no longer requires a config file, an
   initialized wallet, or a running `zallet start`. The command argument may

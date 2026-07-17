@@ -596,10 +596,20 @@ pub(crate) trait WalletRpc {
     ///     on-chain, so such a call requires a privacy policy of
     ///     `AllowLinkingAccountAddresses` (or of `NoPrivacy`, if it also has a transparent
     ///     recipient or transparent change). Use `z_shieldcoinbase` to shield coinbase
-    ///     UTXOs from multiple transparent addresses.
-    ///   If a unified address is provided for this argument, the TXOs to be spent will be
-    ///   selected from those associated with the account corresponding to that unified
-    ///   address, from value pools corresponding to the receivers included in the UA.
+    ///     UTXOs from multiple transparent addresses. For a regular (non-legacy-pool)
+    ///     account, the equivalent is to pass one of the account's unified addresses as
+    ///     `fromaddress` with a privacy policy of `AllowLinkingAccountAddresses` (or
+    ///     `NoPrivacy`, when the transaction also has a transparent recipient or transparent
+    ///     change).
+    ///   If a unified address is provided for this argument, the TXOs to be spent are
+    ///   selected from the account corresponding to that unified address. Its shielded funds
+    ///   are always available. Transparent funds become available as the privacy policy
+    ///   permits: under `AllowRevealedSenders` or `AllowFullyTransparent`, the non-coinbase
+    ///   UTXOs of the transparent receiver in the provided UA; under
+    ///   `AllowLinkingAccountAddresses` or `NoPrivacy`, the non-coinbase UTXOs of any of the
+    ///   account's transparent receivers (which links them on-chain when more than one is
+    ///   spent). A transaction that both spends from multiple transparent addresses and has a
+    ///   transparent recipient or transparent change requires `NoPrivacy`.
     /// - `amounts` (array, required) An array of JSON objects representing the amounts to
     ///   send, with the following fields:
     ///   - `address` (string, required) A taddr, zaddr, or Unified Address.
