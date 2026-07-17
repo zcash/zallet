@@ -26,6 +26,7 @@
   - [repair](cli/repair/README.md)
     - [truncate-wallet](cli/repair/truncate-wallet.md)
 - [Migrating from `zcashd`](zcashd/README.md)
+  - [JSON-RPC method status](zcashd/rpc_status.md)
   - [JSON-RPC altered semantics](zcashd/json_rpc.md)
 
 # Operations
