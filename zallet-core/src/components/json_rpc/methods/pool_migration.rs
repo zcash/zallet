@@ -6,11 +6,16 @@
 //! [`SUPPORTED_MIGRATIONS`] table that is the single extension point for new pool
 //! pairs, the stubbed plan/progress/phase shapes, and the input validation.
 //!
-//! The surface is currently a SCAFFOLD. Each method validates its inputs (pool
+//! Most of the surface is currently a SCAFFOLD: `z_startpoolmigration` and the
+//! companion status, advance, cancel, and list methods validate their inputs (pool
 //! parsing, the supported-pair table, and network-upgrade activation), but the call
-//! into the migration engine returns [`not_implemented`] instead of doing any work.
-//! The engine (`zcash_ironwood_migration_backend`) is still evolving upstream, so
-//! nothing here depends on the shape of its final API.
+//! into the migration engine returns [`not_implemented`] instead of doing any work,
+//! because building, signing, scheduling, and persisting the migration transactions
+//! need engine slices that are still landing upstream. The exception is
+//! `z_previewpoolmigration` (see [`preview_pool_migration`](super::preview_pool_migration)),
+//! which is fully wired against the engine's planning slice. The engine crate
+//! (`zcash_pool_migration_backend`) is still evolving upstream, so nothing here
+//! depends on the shape of its final API beyond that planning entry point.
 
 use documented::Documented;
 use jsonrpsee::core::RpcResult;

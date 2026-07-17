@@ -154,12 +154,26 @@ zcash_note_encryption = "0.4"
 zip32 = "0.2"
 bip32 = "0.2"
 
-# Orchard -> Ironwood value-pool migration engine. This crate is not yet
-# published to crates.io; it lives only on the `feat/ironwood-denominations`
-# branch of librustzcash while its API is still evolving, so it is pinned to
-# that branch rather than to a released version like the crates above. Repoint
-# at a released crates.io version once one is published.
-zcash_ironwood_migration_backend = { git = "https://github.com/zcash/librustzcash", branch = "feat/ironwood-denominations" }
+# Backend-agnostic value-pool migration engine (Orchard -> Ironwood, NU6.3).
+# This crate is not yet published to crates.io; it lives only on the
+# `feat/pool-migration-engine` branch of librustzcash while its API is still
+# evolving (it was `zcash_ironwood_migration_backend`, renamed upstream to a
+# pool-agnostic name).
+#
+# LOCAL DEVELOPMENT ONLY: this is pinned to the checked-out worktree via a
+# relative path, so zallet builds against the exact engine revision under
+# development. This path is NOT portable and MUST NOT be pushed.
+#
+# BEFORE PUSHING: replace the path with a git dependency pinned to a specific
+# commit (not a bare branch), e.g.
+#   zcash_pool_migration_backend = { git = "https://github.com/zcash/librustzcash", rev = "<commit>" }
+# PREREQUISITE: the pinned commit must be the one that introduces the current
+# engine API (the 5-method `MigrationBackend` trait with the store/load/update
+# persistence methods, plus `engine::plan_migration`). As of this writing that
+# is local commit 7e9214aaef, which is NOT yet on any remote; the remote tip of
+# `feat/pool-migration-engine` (3f0c5777) predates it and would not compile
+# against this integration. Push the engine commit first, then pin its rev here.
+zcash_pool_migration_backend = { path = "../librustzcash-pool-migration-types/zcash_pool_migration_backend" }
 
 # Zcashd wallet migration
 zewif = { version = "1.0.0-rc.3" }

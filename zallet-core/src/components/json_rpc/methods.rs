@@ -775,14 +775,15 @@ pub(crate) trait WalletRpc {
         to_pool: String,
     ) -> start_pool_migration::Response;
 
-    /// Previews the note-split plan for migrating an account's balance between two value
+    /// Previews the migration plan for migrating an account's balance between two value
     /// pools, without scheduling or broadcasting anything.
     ///
-    /// Reads the account's spendable balance in `from_pool` and runs the note-split
-    /// planner to show how it would be decomposed into the self-funding notes that cross
-    /// the turnstile (the crossing denominations, the residual left behind, and the
-    /// reserved prep fee). This is a read-only planning preview: unlike the rest of the
-    /// migration surface it is fully wired, because it only plans and does not build,
+    /// Enumerates the account's spendable notes in `from_pool` and runs the migration
+    /// engine's planning slice to show how the balance would be decomposed into the
+    /// self-funding notes that cross the turnstile (the crossing denominations and their
+    /// transfer schedule), the note-preparation transactions that would mint them, and
+    /// the residual left behind. This is a read-only planning preview: unlike the rest of
+    /// the migration surface it is fully wired, because it only plans and does not build,
     /// prove, or broadcast any transaction.
     ///
     /// # Arguments
@@ -791,10 +792,8 @@ pub(crate) trait WalletRpc {
     /// - `from_pool` (string, required): The value pool to migrate funds from
     ///   ("sapling", "orchard", or "ironwood").
     /// - `to_pool` (string, required): The value pool to migrate funds to.
-    /// - `minconf` (numeric, optional, default=1): Only include outputs in transactions
+    /// - `minconf` (numeric, optional, default=1): Only include source-pool notes
     ///   confirmed at least this many times.
-    /// - `strategy` (string, optional, default="randomized"): The denomination strategy
-    ///   to preview ("randomized" or "canonical").
     #[method(name = "z_previewpoolmigration")]
     async fn preview_pool_migration(
         &self,
@@ -802,7 +801,6 @@ pub(crate) trait WalletRpc {
         from_pool: String,
         to_pool: String,
         minconf: Option<u32>,
-        strategy: Option<String>,
     ) -> preview_pool_migration::Response;
 
     /// Returns the status of a previously-scheduled pool migration.
@@ -1286,7 +1284,6 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         from_pool: String,
         to_pool: String,
         minconf: Option<u32>,
-        strategy: Option<String>,
     ) -> preview_pool_migration::Response {
         preview_pool_migration::call(
             self.wallet().await?.as_ref(),
@@ -1295,7 +1292,6 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             &from_pool,
             &to_pool,
             minconf,
-            strategy,
         )
         .await
     }
