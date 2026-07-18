@@ -39,7 +39,7 @@ behavior as documented in the code of conduct.
 ## I Have a Question
 
 > If you want to ask a question, please ensure that you have read the available
-> documentation. Documentation is published to the [Zallet Book](https://zcash.github.io/wallet).
+> documentation. Documentation is published to the [Zallet Book](https://zcash.github.io/zallet/).
 
 Before you ask a question, it is best to search for existing [Issues](https://github.com/zcash/zallet/issues)
 that might help you. In case you have found a suitable issue and still need
