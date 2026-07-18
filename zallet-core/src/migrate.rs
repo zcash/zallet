@@ -38,8 +38,8 @@ use zcash_client_sqlite::{AccountUuid, WalletDb, util::SystemClock};
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_pool_migration_backend::engine::{
     CommitError, MigrationBackend, MigrationError, MigrationState, MigrationStatus, MigrationTxId,
-    MigrationTxKind, MigrationTxState, PoolMigrationRead, PoolMigrationWrite, commit_preparation,
-    commit_transfers, plan_migration,
+    MigrationTxKind, MigrationTxState, PoolMigrationRead, PoolMigrationWrite,
+    commit_pending_preparation, commit_preparation, commit_transfers, plan_migration,
 };
 use zcash_pool_migration_backend::note_splitting::{FeePolicy, Zip317FeePolicy};
 use zcash_pool_migration_backend::preparation::PREP_TX_ACTIONS;
@@ -246,6 +246,29 @@ pub fn commit_transfers_over_wallet(
     commit_transfers(network, target_height, &mut migration, &mut rng).map_err(map_commit_error)
 }
 
+/// Commits the next ready PREPARATION LAYER of an in-progress multi-layer migration over the wallet:
+/// a later preparation layer spends the feeder notes minted by the layer before it, which are
+/// witnessable only once that layer is mined, so the layer is built here rather than up front. Builds
+/// and pre-signs every transaction of the earliest still-unbuilt layer whose predecessor has mined,
+/// returning the updated state (NOT persisted; the caller persists it). `loaded` is the migration read
+/// from the store. If no layer is ready it returns the state unchanged. Runs the engine synchronously;
+/// call inside the blocking database section.
+pub fn commit_pending_preparation_over_wallet(
+    conn: &mut Connection,
+    network: &Network,
+    account: AccountUuid,
+    usk: UnifiedSpendingKey,
+    target_height: u32,
+    loaded: MigrationState,
+) -> Result<MigrationState, CommitFailure> {
+    let mut wallet = WalletDb::from_connection(&mut *conn, *network, SystemClock, OsRng);
+    let store = InMemoryStore::seeded(Some(loaded));
+    let mut migration = WalletMigration::new(&mut wallet, account, usk, store);
+    let mut rng = OsRng;
+    commit_pending_preparation(network, target_height, &mut migration, &mut rng)
+        .map_err(map_commit_error)
+}
+
 /// Why proving or extracting a migration transaction failed.
 pub enum BroadcastError {
     /// The stored PCZT could not be parsed.
@@ -368,6 +391,17 @@ fn deps_mined(state: &MigrationState, depends_on: &[MigrationTxId]) -> bool {
     })
 }
 
+/// Whether a deferred preparation layer is ready to build: a multi-layer preparation records its
+/// later layers (`layer > 0`) as unbuilt placeholders, and one becomes buildable once its whole
+/// prior layer (its `depends_on`) is mined and its feeder notes are witnessable.
+fn has_ready_prep_layer(state: &MigrationState) -> bool {
+    state.transactions.iter().any(|t| {
+        matches!(t.kind, MigrationTxKind::Preparation { layer, .. } if layer > 0)
+            && matches!(t.state, MigrationTxState::Planned)
+            && deps_mined(state, &t.depends_on)
+    })
+}
+
 /// The index of the next transaction ready to prove and broadcast: pre-signed (`Signed`), its
 /// dependencies mined, and scheduled at or before `target_height`.
 fn next_broadcastable(state: &MigrationState, target_height: u32) -> Option<usize> {
@@ -421,9 +455,11 @@ pub fn record_broadcast(
 
 /// The blocking half of advancing a migration one step: load it, detect newly mined transactions,
 /// then either (a) prove+extract the next broadcastable transaction and return it for the caller to
-/// broadcast, (b) build the phase-2 transfers once the preparation is mined, or (c) report what it is
-/// waiting for. Runs inside the database write lock; the caller broadcasts asynchronously. `tip` is
-/// the current chain tip; transactions build and become due at `tip + 1`.
+/// broadcast, (a.5) build the next preparation layer once its predecessor is mined (multi-layer
+/// preparations defer their later layers), (b) build the phase-2 transfers once the whole preparation
+/// is mined, or (c) report what it is waiting for. Runs inside the database write lock; the caller
+/// broadcasts asynchronously. `tip` is the current chain tip; transactions build and become due at
+/// `tip + 1`.
 pub fn advance_blocking(
     conn: &mut Connection,
     network: &Network,
@@ -471,6 +507,30 @@ pub fn advance_blocking(
             state,
             to_broadcast: Some((tx, tx_id)),
             message: format!("broadcasting a {kind} transaction"),
+        });
+    }
+
+    // (a.5) Build the next preparation layer once its predecessor is mined. A multi-layer preparation
+    // defers its later layers (their feeder notes are witnessable only after the prior layer mines);
+    // building the next ready layer turns its transactions into broadcastable `Signed` ones for a
+    // later step. This runs only after (a) finds nothing to broadcast, i.e. the current layer's
+    // transactions are all broadcast and mined.
+    if has_ready_prep_layer(&state) {
+        let mut updated = commit_pending_preparation_over_wallet(
+            conn,
+            network,
+            account,
+            usk,
+            target_height,
+            state.clone(),
+        )
+        .map_err(AdvanceError::Commit)?;
+        recompute_status(&mut updated);
+        persist_migration(conn, &updated).map_err(|e| AdvanceError::Store(e.to_string()))?;
+        return Ok(AdvanceOutcome {
+            state: updated,
+            to_broadcast: None,
+            message: "built the next preparation layer".into(),
         });
     }
 
