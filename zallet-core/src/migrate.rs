@@ -24,20 +24,30 @@
 //! wallet, not this snapshot.
 
 use core::convert::Infallible;
+use core::fmt;
+use std::sync::OnceLock;
 
+use orchard::circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey};
+use pczt::Pczt;
+use pczt::roles::prover::Prover;
+use pczt::roles::tx_extractor::TransactionExtractor;
 use rand::rngs::OsRng;
 use rusqlite::Connection;
+use zcash_client_backend::data_api::WalletRead;
 use zcash_client_sqlite::{AccountUuid, WalletDb, util::SystemClock};
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_pool_migration_backend::engine::{
     CommitError, MigrationBackend, MigrationError, MigrationState, MigrationStatus, MigrationTxId,
-    MigrationTxState, PoolMigrationRead, PoolMigrationWrite, commit_preparation, commit_transfers,
-    plan_migration,
+    MigrationTxKind, MigrationTxState, PoolMigrationRead, PoolMigrationWrite, commit_preparation,
+    commit_transfers, plan_migration,
 };
 use zcash_pool_migration_backend::note_splitting::{FeePolicy, Zip317FeePolicy};
 use zcash_pool_migration_backend::preparation::PREP_TX_ACTIONS;
 use zcash_pool_migration_backend::wallet::WalletMigration;
 use zcash_pool_migration_sqlite::PoolMigrations;
+use zcash_primitives::transaction::components::orchard::bundle_version_for_branch;
+use zcash_primitives::transaction::{Transaction, TxId};
+use zcash_protocol::consensus::{BlockHeight, BranchId};
 
 use crate::network::Network;
 
@@ -112,7 +122,7 @@ pub fn is_terminal(state: &MigrationState) -> bool {
     )
 }
 
-fn map_plan_error<E: core::fmt::Display>(err: MigrationError<E>) -> CommitFailure {
+fn map_plan_error<E: fmt::Display>(err: MigrationError<E>) -> CommitFailure {
     match err {
         MigrationError::NothingToMigrate => CommitFailure::NothingToMigrate,
         MigrationError::Preparation(e) => CommitFailure::Other(format!(
@@ -122,7 +132,7 @@ fn map_plan_error<E: core::fmt::Display>(err: MigrationError<E>) -> CommitFailur
     }
 }
 
-fn map_commit_error<E: core::fmt::Display>(err: CommitError<E>) -> CommitFailure {
+fn map_commit_error<E: fmt::Display>(err: CommitError<E>) -> CommitFailure {
     match err {
         CommitError::UnsupportedMultiLayer => CommitFailure::UnsupportedMultiLayer,
         CommitError::NoMigrationInProgress => CommitFailure::NoMigrationInProgress,
@@ -234,4 +244,269 @@ pub fn commit_transfers_over_wallet(
     let mut migration = WalletMigration::new(&mut wallet, account, usk, store);
     let mut rng = OsRng;
     commit_transfers(network, target_height, &mut migration, &mut rng).map_err(map_commit_error)
+}
+
+/// Why proving or extracting a migration transaction failed.
+pub enum BroadcastError {
+    /// The stored PCZT could not be parsed.
+    Parse(String),
+    /// Proving the PCZT failed.
+    Prove(String),
+    /// Extracting the transaction from the proved PCZT failed.
+    Extract(String),
+}
+
+impl fmt::Display for BroadcastError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BroadcastError::Parse(m) => write!(f, "parsing the migration transaction failed: {m}"),
+            BroadcastError::Prove(m) => write!(f, "proving the migration transaction failed: {m}"),
+            BroadcastError::Extract(m) => {
+                write!(f, "extracting the migration transaction failed: {m}")
+            }
+        }
+    }
+}
+
+/// The Orchard circuit version the migration's transactions are proved and verified against, derived
+/// from the consensus branch at `height`. A migration runs at NU6.3+, whose Orchard protocol
+/// revision fixes the circuit version; the same version applies to the Orchard preparation bundles
+/// and the Ironwood transfer bundles.
+fn orchard_circuit_version(params: &Network, height: BlockHeight) -> OrchardCircuitVersion {
+    let branch = BranchId::for_height(params, height);
+    bundle_version_for_branch(branch, orchard::ValuePool::Orchard)
+        .expect("a migration runs at NU6.3+, which has an Orchard bundle version")
+        .circuit_version()
+}
+
+/// The Orchard proving key, built once and cached (building it is expensive). The same key proves
+/// both the Orchard preparation bundles and the Ironwood transfer bundles. All of a migration's
+/// transactions share one circuit version (its consensus branch), so caching a single key is sound.
+fn orchard_proving_key(version: OrchardCircuitVersion) -> &'static ProvingKey {
+    static PROVING_KEY: OnceLock<ProvingKey> = OnceLock::new();
+    PROVING_KEY.get_or_init(|| ProvingKey::build(version))
+}
+
+/// The Orchard verifying key, built once and cached. It verifies both the Orchard and the Ironwood
+/// bundles when the transaction is extracted.
+fn orchard_verifying_key(version: OrchardCircuitVersion) -> &'static VerifyingKey {
+    static VERIFYING_KEY: OnceLock<VerifyingKey> = OnceLock::new();
+    VERIFYING_KEY.get_or_init(|| VerifyingKey::build(version))
+}
+
+/// Proves a stored, pre-signed but unproven migration PCZT and extracts the broadcastable
+/// transaction. `height` selects the circuit version (the migration's consensus branch). Proving is
+/// CPU-heavy, so call this inside the blocking database section; the extracted transaction is then
+/// broadcast asynchronously by the caller.
+pub fn prove_and_extract(
+    params: &Network,
+    height: BlockHeight,
+    pczt_bytes: &[u8],
+) -> Result<Transaction, BroadcastError> {
+    let version = orchard_circuit_version(params, height);
+    let pczt = Pczt::parse(pczt_bytes).map_err(|e| BroadcastError::Parse(format!("{e:?}")))?;
+    let mut prover = Prover::new(pczt);
+    if prover.requires_orchard_proof() {
+        prover = prover
+            .create_orchard_proof(orchard_proving_key(version))
+            .map_err(|e| BroadcastError::Prove(format!("{e:?}")))?;
+    }
+    if prover.requires_ironwood_proof() {
+        prover = prover
+            .create_ironwood_proof(orchard_proving_key(version))
+            .map_err(|e| BroadcastError::Prove(format!("{e:?}")))?;
+    }
+    let pczt = prover.finish();
+    TransactionExtractor::new(pczt)
+        .with_orchard(orchard_verifying_key(version))
+        .extract()
+        .map_err(|e| BroadcastError::Extract(format!("{e:?}")))
+}
+
+/// Why advancing a migration one step failed.
+pub enum AdvanceError {
+    /// No migration is stored.
+    NoMigration,
+    /// A store (load/persist) failure.
+    Store(String),
+    /// Building the phase-2 transfers failed.
+    Commit(CommitFailure),
+    /// Proving or extracting a transaction failed.
+    Prove(BroadcastError),
+}
+
+/// The outcome of the blocking half of advancing a migration one step.
+pub struct AdvanceOutcome {
+    /// The migration state after the step. If `to_broadcast` is set, this is NOT yet persisted (the
+    /// caller broadcasts, records the txid, and persists); otherwise it is already persisted.
+    pub state: MigrationState,
+    /// A proved, extracted transaction to broadcast next, with the id of the migration transaction it
+    /// corresponds to.
+    pub to_broadcast: Option<(Transaction, MigrationTxId)>,
+    /// A short description of what the step did.
+    pub message: String,
+}
+
+/// Whether all of a migration's preparation transactions are mined.
+fn all_preparations_mined(state: &MigrationState) -> bool {
+    state
+        .transactions
+        .iter()
+        .filter(|t| matches!(t.kind, MigrationTxKind::Preparation { .. }))
+        .all(|t| matches!(t.state, MigrationTxState::Mined { .. }))
+}
+
+/// Whether every transaction in `depends_on` is mined.
+fn deps_mined(state: &MigrationState, depends_on: &[MigrationTxId]) -> bool {
+    depends_on.iter().all(|dep| {
+        state
+            .transactions
+            .iter()
+            .find(|t| t.id == *dep)
+            .map(|t| matches!(t.state, MigrationTxState::Mined { .. }))
+            .unwrap_or(false)
+    })
+}
+
+/// The index of the next transaction ready to prove and broadcast: pre-signed (`Signed`), its
+/// dependencies mined, and scheduled at or before `target_height`.
+fn next_broadcastable(state: &MigrationState, target_height: u32) -> Option<usize> {
+    state.transactions.iter().position(|t| {
+        matches!(t.state, MigrationTxState::Signed)
+            && t.scheduled_height <= target_height
+            && deps_mined(state, &t.depends_on)
+    })
+}
+
+/// Recomputes the overall migration status: complete once every transaction is mined, in progress
+/// once any has been broadcast or mined.
+fn recompute_status(state: &mut MigrationState) {
+    let all_mined = !state.transactions.is_empty()
+        && state
+            .transactions
+            .iter()
+            .all(|t| matches!(t.state, MigrationTxState::Mined { .. }));
+    let any_started = state.transactions.iter().any(|t| {
+        matches!(
+            t.state,
+            MigrationTxState::Broadcast { .. } | MigrationTxState::Mined { .. }
+        )
+    });
+    if all_mined {
+        state.status = MigrationStatus::Complete;
+    } else if any_started {
+        state.status = MigrationStatus::InProgress;
+    }
+}
+
+/// The txid bytes of a transaction, for recording its broadcast in the store.
+pub fn transaction_txid_bytes(tx: &Transaction) -> [u8; 32] {
+    *tx.txid().as_ref()
+}
+
+/// Records that the migration transaction `tx_id` was broadcast with `txid`, recomputes the status,
+/// and persists the state.
+pub fn record_broadcast(
+    conn: &mut Connection,
+    state: &mut MigrationState,
+    tx_id: MigrationTxId,
+    txid: [u8; 32],
+) -> Result<(), AdvanceError> {
+    if let Some(tx) = state.transactions.iter_mut().find(|t| t.id == tx_id) {
+        tx.state = MigrationTxState::Broadcast { txid };
+    }
+    recompute_status(state);
+    persist_migration(conn, state).map_err(|e| AdvanceError::Store(e.to_string()))
+}
+
+/// The blocking half of advancing a migration one step: load it, detect newly mined transactions,
+/// then either (a) prove+extract the next broadcastable transaction and return it for the caller to
+/// broadcast, (b) build the phase-2 transfers once the preparation is mined, or (c) report what it is
+/// waiting for. Runs inside the database write lock; the caller broadcasts asynchronously. `tip` is
+/// the current chain tip; transactions build and become due at `tip + 1`.
+pub fn advance_blocking(
+    conn: &mut Connection,
+    network: &Network,
+    account: AccountUuid,
+    usk: UnifiedSpendingKey,
+    tip: u32,
+) -> Result<AdvanceOutcome, AdvanceError> {
+    let target_height = tip + 1;
+
+    let mut state = load_migration(conn)
+        .map_err(|e| AdvanceError::Store(e.to_string()))?
+        .ok_or(AdvanceError::NoMigration)?;
+
+    // Detect newly mined transactions: a broadcast transaction the wallet now sees at a height.
+    {
+        let wallet = WalletDb::from_connection(&mut *conn, *network, SystemClock, OsRng);
+        for tx in state.transactions.iter_mut() {
+            if let MigrationTxState::Broadcast { txid } = tx.state {
+                if let Some(height) = wallet
+                    .get_tx_height(TxId::from_bytes(txid))
+                    .map_err(|e| AdvanceError::Store(e.to_string()))?
+                {
+                    tx.state = MigrationTxState::Mined {
+                        height: u32::from(height),
+                    };
+                }
+            }
+        }
+    }
+    recompute_status(&mut state);
+
+    // (a) Broadcast the next ready transaction.
+    if let Some(index) = next_broadcastable(&state, target_height) {
+        let bytes = state.transactions[index].pczt.clone().ok_or_else(|| {
+            AdvanceError::Store("a signed transaction is missing its PCZT".into())
+        })?;
+        let tx = prove_and_extract(network, BlockHeight::from(tip), &bytes)
+            .map_err(AdvanceError::Prove)?;
+        let tx_id = state.transactions[index].id;
+        let kind = match state.transactions[index].kind {
+            MigrationTxKind::Preparation { .. } => "preparation",
+            MigrationTxKind::Transfer { .. } => "transfer",
+        };
+        return Ok(AdvanceOutcome {
+            state,
+            to_broadcast: Some((tx, tx_id)),
+            message: format!("broadcasting a {kind} transaction"),
+        });
+    }
+
+    // (b) Build the phase-2 transfers once every preparation is mined.
+    let has_unbuilt_transfers = state.transactions.iter().any(|t| {
+        matches!(t.kind, MigrationTxKind::Transfer { .. })
+            && matches!(t.state, MigrationTxState::Planned)
+    });
+    if all_preparations_mined(&state) && has_unbuilt_transfers {
+        let mut updated =
+            commit_transfers_over_wallet(conn, network, account, usk, target_height, state.clone())
+                .map_err(AdvanceError::Commit)?;
+        recompute_status(&mut updated);
+        persist_migration(conn, &updated).map_err(|e| AdvanceError::Store(e.to_string()))?;
+        return Ok(AdvanceOutcome {
+            state: updated,
+            to_broadcast: None,
+            message: "built the transfer transactions".into(),
+        });
+    }
+
+    // (c) Nothing to do this step: persist the mining updates and report what it is waiting for.
+    persist_migration(conn, &state).map_err(|e| AdvanceError::Store(e.to_string()))?;
+    let pending = state
+        .transactions
+        .iter()
+        .filter(|t| !matches!(t.state, MigrationTxState::Mined { .. }))
+        .count();
+    let message = if pending == 0 {
+        "the migration is complete".to_string()
+    } else {
+        format!("waiting for {pending} transaction(s) to mine")
+    };
+    Ok(AdvanceOutcome {
+        state,
+        to_broadcast: None,
+        message,
+    })
 }

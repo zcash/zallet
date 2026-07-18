@@ -170,6 +170,13 @@ zcash_pool_migration_backend = { git = "https://github.com/zcash/librustzcash.gi
 # The SQLite store for the migration (the pool_migrations tables + the
 # PoolMigrationRead/Write impls over the wallet database). Same rev as the engine.
 zcash_pool_migration_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "0efd29ef08011038d1c3692c8ef2b29785154755" }
+# PCZT roles used to prove and extract the migration's pre-signed transactions before broadcasting
+# them (z_advancepoolmigration). Same rev as the engine, which produces the pre-signed PCZTs.
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "0efd29ef08011038d1c3692c8ef2b29785154755", features = [
+    "prover",
+    "tx-extractor",
+    "orchard",
+] }
 
 # Zcashd wallet migration
 zewif = { version = "1.0.0-rc.3" }

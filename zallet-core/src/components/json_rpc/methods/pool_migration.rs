@@ -17,11 +17,15 @@ use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::types::ErrorObjectOwned;
 use schemars::JsonSchema;
+use secrecy::ExposeSecret;
 use serde::Serialize;
-use zcash_client_backend::data_api::WalletRead;
+use zcash_client_backend::data_api::{Account, WalletRead};
+use zcash_client_sqlite::AccountUuid;
+use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_pool_migration_backend::engine::{MigrationState, MigrationStatus, MigrationTxState};
 use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
 
+use crate::components::keystore::KeyStore;
 use crate::components::{database::DbConnection, json_rpc::server::LegacyCode};
 use crate::migrate::CommitFailure;
 
@@ -162,6 +166,40 @@ pub(crate) fn validate_pool_pair(
             migration.enabling_upgrade,
         ))),
     }
+}
+
+/// Decrypts the account's unified spending key. This is the async step that must run BEFORE the
+/// blocking build/prove section (no `.await` may occur while the database write lock is held).
+/// Mirrors the send path: find the account's ZIP-32 derivation, decrypt its seed, and derive the
+/// spending key.
+pub(crate) async fn decrypt_account_usk(
+    wallet: &DbConnection,
+    keystore: &KeyStore,
+    account_id: AccountUuid,
+) -> RpcResult<UnifiedSpendingKey> {
+    let account = wallet
+        .get_account(account_id)
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+        .ok_or_else(|| LegacyCode::InvalidParameter.with_static("no such account"))?;
+    let derivation = account.source().key_derivation().ok_or_else(|| {
+        LegacyCode::InvalidAddressOrKey
+            .with_static("the account has no spending key to migrate with")
+    })?;
+    let seed = keystore
+        .decrypt_seed(derivation.seed_fingerprint())
+        .await
+        .map_err(|e| match e.kind() {
+            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
+                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
+            }
+            _ => LegacyCode::Database.with_message(e.to_string()),
+        })?;
+    UnifiedSpendingKey::from_seed(
+        wallet.params(),
+        seed.expose_secret(),
+        derivation.account_index(),
+    )
+    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))
 }
 
 /// Validates that a migration identifier is well-formed (currently just non-empty).

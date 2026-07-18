@@ -126,6 +126,7 @@ zcash_client_sqlite = { workspace = true, features = [
 ] }
 zcash_pool_migration_backend.workspace = true
 zcash_pool_migration_sqlite.workspace = true
+pczt.workspace = true
 zcash_note_encryption.workspace = true
 zip32.workspace = true
 

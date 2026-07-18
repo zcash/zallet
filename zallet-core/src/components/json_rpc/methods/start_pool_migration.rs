@@ -8,13 +8,12 @@
 use documented::Documented;
 use jsonrpsee::core::{JsonValue, RpcResult};
 use schemars::JsonSchema;
-use secrecy::ExposeSecret;
 use serde::Serialize;
-use zcash_client_backend::data_api::{Account, WalletRead};
-use zcash_keys::keys::UnifiedSpendingKey;
+use zcash_client_backend::data_api::WalletRead;
 
 use super::pool_migration::{
-    MIGRATION_ID, MigrationPlan, Pool, map_commit_failure, migration_plan, validate_pool_pair,
+    MIGRATION_ID, MigrationPlan, Pool, decrypt_account_usk, map_commit_failure, migration_plan,
+    validate_pool_pair,
 };
 use crate::components::database::DbConnection;
 use crate::components::json_rpc::server::LegacyCode;
@@ -69,29 +68,7 @@ pub(crate) async fn call(
 
     // Decrypt the account's spending key. This is the only async step, and it happens BEFORE the
     // blocking build section (no `.await` may occur inside `with_raw_mut`).
-    let acct = wallet
-        .get_account(account_id)
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-        .ok_or_else(|| LegacyCode::InvalidParameter.with_static("no such account"))?;
-    let derivation = acct.source().key_derivation().ok_or_else(|| {
-        LegacyCode::InvalidAddressOrKey
-            .with_static("the account has no spending key to migrate with")
-    })?;
-    let seed = keystore
-        .decrypt_seed(derivation.seed_fingerprint())
-        .await
-        .map_err(|e| match e.kind() {
-            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
-                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
-            }
-            _ => LegacyCode::Database.with_message(e.to_string()),
-        })?;
-    let usk = UnifiedSpendingKey::from_seed(
-        wallet.params(),
-        seed.expose_secret(),
-        derivation.account_index(),
-    )
-    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
+    let usk = decrypt_account_usk(wallet, keystore, account_id).await?;
 
     // Build + pre-sign the preparation over the wallet, then persist the resulting migration. Both
     // the engine's wallet access and the store write run on one connection, sequentially.

@@ -822,15 +822,19 @@ pub(crate) trait WalletRpc {
 
     /// Advances a previously-scheduled pool migration by one step.
     ///
-    /// NOTE: This is currently a scaffold. The identifier is validated, but the migration
-    /// engine is not yet wired in, so the call returns a "not implemented yet" error.
+    /// Detects newly mined transactions, proves and broadcasts the next due pre-signed
+    /// transaction, and once the preparation is mined builds the phase-2 transfers. Advances
+    /// one step per call, so a caller polls it.
     ///
     /// # Arguments
+    /// - `account` (string or numeric, required): The UUID or ZIP 32 index of the account
+    ///   whose migration to advance.
     /// - `migration_id` (string, required): The identifier returned by
     ///   `z_startpoolmigration`.
     #[method(name = "z_advancepoolmigration")]
     async fn advance_pool_migration(
         &self,
+        account: JsonValue,
         migration_id: String,
     ) -> advance_pool_migration::Response;
 
@@ -1316,9 +1320,17 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
 
     async fn advance_pool_migration(
         &self,
+        account: JsonValue,
         migration_id: String,
     ) -> advance_pool_migration::Response {
-        advance_pool_migration::call(self.wallet().await?.as_ref(), &migration_id)
+        advance_pool_migration::call(
+            self.wallet().await?.as_ref(),
+            &self.keystore,
+            self.chain().await?,
+            account,
+            &migration_id,
+        )
+        .await
     }
 
     async fn cancel_pool_migration(&self, migration_id: String) -> cancel_pool_migration::Response {
