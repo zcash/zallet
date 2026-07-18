@@ -1,4 +1,4 @@
-//! Scaffolding for the Orchard-to-Ironwood value-pool migration.
+//! Orchard-to-Ironwood value-pool migration wiring.
 //!
 //! This module wires the backend-agnostic pool-migration engine into Zallet. The
 //! engine crate is still evolving upstream (it lives on a librustzcash feature
@@ -134,11 +134,6 @@ fn map_commit_error<E: fmt::Display>(err: CommitError<E>) -> CommitFailure {
         CommitError::NoMigrationInProgress => CommitFailure::NoMigrationInProgress,
         CommitError::Backend(e) => CommitFailure::Other(e.to_string()),
         CommitError::Build(m) => CommitFailure::Other(m),
-        // Multi-layer preparation is supported (committed layer by layer), so the engine no longer
-        // rejects it; any residual variant maps to a generic build failure.
-        CommitError::UnsupportedMultiLayer => {
-            CommitFailure::Other("unexpected multi-layer commit rejection".into())
-        }
     }
 }
 

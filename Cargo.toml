@@ -166,13 +166,13 @@ bip32 = "0.2"
 # `WalletMigration` wallet-backed adapter (the `wallet` feature), and
 # `engine::{plan_migration, commit_preparation, commit_transfers}`. Bump the rev
 # when the integration needs a newer engine API.
-zcash_pool_migration_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "009e7c58841cc60148a822049ac4cb7d1f737ca7", features = ["wallet"] }
+zcash_pool_migration_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "760774cd8e0d7e418315fceca6296afb36493c0b", features = ["wallet"] }
 # The SQLite store for the migration (the pool_migrations tables + the
 # PoolMigrationRead/Write impls over the wallet database). Same rev as the engine.
-zcash_pool_migration_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "009e7c58841cc60148a822049ac4cb7d1f737ca7" }
+zcash_pool_migration_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "760774cd8e0d7e418315fceca6296afb36493c0b" }
 # PCZT roles used to prove and extract the migration's pre-signed transactions before broadcasting
 # them (z_advancepoolmigration). Same rev as the engine, which produces the pre-signed PCZTs.
-pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "009e7c58841cc60148a822049ac4cb7d1f737ca7", features = [
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "760774cd8e0d7e418315fceca6296afb36493c0b", features = [
     "prover",
     "tx-extractor",
     "orchard",
