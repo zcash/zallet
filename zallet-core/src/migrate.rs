@@ -37,9 +37,9 @@ use zcash_client_backend::data_api::WalletRead;
 use zcash_client_sqlite::{AccountUuid, WalletDb, util::SystemClock};
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_pool_migration_backend::engine::{
-    CommitError, MigrationBackend, MigrationError, MigrationState, MigrationTxId, MigrationTxKind,
-    MigrationTxState, PoolMigrationRead, PoolMigrationWrite, commit_pending_preparation,
-    commit_preparation, commit_transfers, plan_migration,
+    CommitError, MigrationBackend, MigrationError, MigrationState, MigrationStatus, MigrationTxId,
+    MigrationTxKind, MigrationTxState, PoolMigrationRead, PoolMigrationWrite,
+    commit_pending_preparation, commit_preparation, commit_transfers, plan_migration,
 };
 // The migration state machine lives in the engine (the mobile wallet drives it the same way); zallet
 // only performs the wallet I/O around the engine's decisions. The decision and transition logic are
@@ -398,6 +398,21 @@ pub fn advance_blocking(
     let mut state = load_migration(conn)
         .map_err(|e| AdvanceError::Store(e.to_string()))?
         .ok_or(AdvanceError::NoMigration)?;
+
+    // A terminal migration (complete, or cancelled/failed) is never advanced: report its status and
+    // do nothing, so a cancelled migration cannot be driven further or resurrected.
+    if state.is_terminal() {
+        let message = if matches!(state.status, MigrationStatus::Complete) {
+            "the migration is complete"
+        } else {
+            "the migration was cancelled"
+        };
+        return Ok(AdvanceOutcome {
+            state,
+            to_broadcast: None,
+            message: message.to_string(),
+        });
+    }
 
     // Detect newly mined transactions: a broadcast transaction the wallet now sees at a height.
     // Collect the (id, height) pairs while the wallet is borrowed, then apply the engine's mining
