@@ -57,6 +57,26 @@ Changes to response:
   listed in a new `derived_transparent` field (an array of objects) instead of
   the `transparent` field.
 
+### `z_exportviewingkey`
+
+Changes to parameters:
+- Sprout addresses are rejected; Zallet does not support Sprout.
+- Unified Addresses are now accepted in addition to Sapling addresses.
+- New `ivk` optional boolean parameter (default `false`).
+
+Changes to response:
+- For a Sapling address, the account's Sapling extended full viewing key
+  (`zxviews…`) is returned, as in `zcashd`. This key cannot be exported from an
+  imported view-only account, as the wallet cannot reconstruct the extended
+  full viewing key.
+- For a Unified Address, the account's unified full viewing key (`uview…`) is
+  returned.
+- If `ivk` is `true`, the account's unified incoming viewing key (`uivk…`) is
+  returned instead of the full viewing key. This also works for imported
+  view-only accounts. Note that a UIVK grants incoming viewing capability for
+  every pool in the account, even when the queried address is a Sapling
+  address.
+
 ### `getrawtransaction`
 
 Changes to parameters:
@@ -146,25 +166,65 @@ methods have been updated to replace them.
 | Omitted RPC method     | Use this instead |
 |------------------------|------------------|
 | `createrawtransaction` | [To-be-implemented methods for working with PCZTs][pczts] |
+| `encryptwallet`        | Nothing; see [note](#encryptwallet) |
 | `fundrawtransaction`   | [To-be-implemented methods for working with PCZTs][pczts] |
 | `getnewaddress`        | `z_getnewaccount`, `z_getaddressforaccount` |
-| `getrawchangeaddress`  |
-| `keypoolrefill`        |
-| `importpubkey`         |
-| `importwallet`         |
-| `settxfee`             |
+| `getrawchangeaddress`  | Nothing; see [note](#getrawchangeaddress) |
+| `keypoolrefill`        | Nothing; see [note](#keypoolrefill) |
+| `importpubkey`         | `z_importaddress` |
+| `importwallet`         | `z_importkey` per key, or the [`zallet migrate-zcashd-wallet`](../cli/migrate-zcashd-wallet.md) command for a whole `zcashd` wallet |
+| `settxfee`             | Nothing; [ZIP 317] fees are always used |
 | `signrawtransaction`   | [To-be-implemented methods for working with PCZTs][pczts] |
-| `z_importwallet`       |
-| `z_getbalance`         | `z_getbalanceforaccount`, `z_getbalanceforviewingkey`, `getbalance` |
-| `z_getmigrationstatus` |
+| `z_importwallet`       | `z_importkey` per key, or the [`zallet migrate-zcashd-wallet`](../cli/migrate-zcashd-wallet.md) command for a whole `zcashd` wallet |
+| `z_getbalance`         | `z_getbalanceforaccount` |
+| `z_getmigrationstatus` | Nothing; see [note](#z_getmigrationstatus-and-z_setmigration) |
 | `z_getnewaddress`      | `z_getnewaccount`, `z_getaddressforaccount` |
 | `z_listaddresses`      | `listaddresses` |
-| `z_setmigration`       |
+| `z_setmigration`       | Nothing; see [note](#z_getmigrationstatus-and-z_setmigration) |
+| `zcbenchmark`          | Nothing; see [note](#zcbenchmark) |
 
-The `z_getmigrationstatus` and `z_setmigration` methods configured and reported
-on the automatic Sprout-to-Sapling fund migration. Zallet does not support
-Sprout, so there is nothing to migrate and no equivalent method is provided. If
-you still hold Sprout funds, migrate them out of the Sprout pool before
-transitioning your wallet to Zallet.
+### `encryptwallet`
+
+In `zcashd`, wallet encryption was disabled (running with an encrypted wallet
+was never fully supported), so this method always failed. In Zallet, key
+material is always encrypted: an [age](https://age-encryption.org/) encryption
+identity is created when the wallet is [set up](../guide/setup.md#initialize-the-wallet-encryption),
+before any keys exist. To require a passphrase at runtime, use a
+passphrase-encrypted identity; the `walletpassphrase` and `walletlock` methods
+then unlock and re-lock the key store.
+
+### `getrawchangeaddress`
+
+Zallet derives change addresses internally when it builds a transaction, and
+never exposes them for external use. Workflows that used
+`getrawchangeaddress` together with the raw-transaction methods will be served
+by the [to-be-implemented PCZT methods][pczts], which handle change as part of
+transaction proposal.
+
+### `keypoolrefill`
+
+The `zcashd` key pool was a reserve of pre-generated keys that had to be
+topped up so that backups stayed complete. Zallet has no key pool: all
+addresses are derived on demand from a seed via [ZIP 32], so there is nothing
+to refill. Note that a mnemonic backup covers derived keys but not standalone
+imported keys; see the
+[`migrate-zcashd-wallet` reference](../cli/migrate-zcashd-wallet.md) for
+what a complete backup requires.
+
+### `z_getmigrationstatus` and `z_setmigration`
+
+These methods configured and reported on the automatic Sprout-to-Sapling fund
+migration. Zallet does not support Sprout, so there is nothing to migrate and
+no equivalent method is provided. If you still hold Sprout funds, migrate them
+out of the Sprout pool before transitioning your wallet to Zallet.
+
+### `zcbenchmark`
+
+`zcbenchmark` ran micro-benchmarks of `zcashd`'s own internals (such as proof
+creation and validation). It measured `zcashd` code that Zallet does not
+contain, so there is nothing equivalent for Zallet to measure and no
+replacement is planned.
 
 [pczts]: https://github.com/zcash/zallet/issues/99
+[ZIP 32]: https://zips.z.cash/zip-0032
+[ZIP 317]: https://zips.z.cash/zip-0317

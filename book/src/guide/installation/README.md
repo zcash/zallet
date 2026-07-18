@@ -19,13 +19,13 @@ workspace, so the two can track different `zebra` releases), and the `zallet` co
 a small launcher that runs whichever backend your config file names:
 
 ```toml
-# zallet.toml — the default if the key is absent is "zebra-state"
+# zallet.toml — the default if the key is absent is "zebra"
 backend = "zaino"
 ```
 
 | Backend | Default | Platform | Reaches the chain via | Requires | Regtest |
 |---------|:-------:|----------|-----------------------|----------|:-------:|
-| `zebra-state` | Yes | Linux only | co-located `zebrad`'s state database (`ReadStateService`) | `zebrad` built with the `indexer` feature + `[indexer.read_state_service]` config + shared state dir | No |
+| `zebra` | Yes | Linux only | co-located `zebrad`'s state database (`ReadStateService`) | `zebrad` built with the `indexer` feature + `[indexer.read_state_service]` config + shared state dir | No |
 | `zaino` | No | Linux, macOS, Windows | co-located `zebrad`'s JSON-RPC endpoint (optionally reads state directly when `[indexer.read_state_service]` is set) | co-located `zebrad` JSON-RPC endpoint | Yes |
 
 The **`zebra` backend** is the default. It reads finalized chain state directly from
@@ -63,7 +63,7 @@ Each backend is its own package in its own cargo workspace, so you install the o
 want by name (plus the launcher, if you want config-driven dispatch):
 
 ```
-# The zebra-state backend (Linux only)
+# The zebra backend (Linux only, reads zebrad's state database)
 cargo install --locked --git https://github.com/zcash/zallet.git zallet-zebra
 
 # The zaino backend

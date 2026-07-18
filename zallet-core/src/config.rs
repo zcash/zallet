@@ -422,6 +422,31 @@ impl ExternalSection {
 }
 
 /// Settings for Zallet features.
+///
+/// Zallet's behaviour evolves over time: new functionality starts out as an
+/// experimental feature that must be explicitly enabled, and functionality on its way
+/// out becomes a deprecated feature that must be explicitly re-enabled. This section
+/// records the non-default choices this wallet has made, along with the Zallet version
+/// they were made against (`as_of_version`), which enables Zallet to detect when a
+/// feature named in this config has changed state across an upgrade, rather than
+/// silently changing the wallet's behaviour.
+///
+/// The lifecycle of a feature:
+///
+/// 1. New unstable functionality is added behind a flag in `[features.experimental]`.
+///    Setting the flag opts this wallet in; experimental features may change
+///    incompatibly or be removed without a deprecation cycle.
+/// 2. If the feature is stabilised, its behaviour becomes the default and the flag is
+///    retired. A config that still sets the flag is out of date.
+/// 3. If existing functionality is deprecated, it becomes disabled by default and
+///    gains a flag in `[features.deprecated]` that temporarily re-enables it, giving
+///    you time to migrate away.
+/// 4. When a deprecated feature is removed, its flag is retired; re-enabling is no
+///    longer possible.
+///
+/// Retired flags left in this config are how Zallet knows to alert you (instead of
+/// wallet behaviour just changing out from under you), so do not remove a flag from
+/// this section until you have acted on the corresponding change.
 #[derive(Clone, Debug, Deserialize, Serialize, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct FeaturesSection {
@@ -521,6 +546,12 @@ impl Default for FeaturesSection {
 }
 
 /// Deprecated Zallet features that you are temporarily re-enabling.
+///
+/// A deprecated feature is disabled by default and scheduled for removal in a future
+/// Zallet version. Setting its flag to `true` here re-enables it for this wallet.
+/// Treat that as a stopgap while you migrate away: the flag stops being usable once
+/// the feature is removed, and the removal will be flagged via
+/// `features.as_of_version` when you upgrade.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Documented, DocumentedFields)]
 pub struct DeprecatedFeaturesSection {
     /// Any other deprecated feature flags.
@@ -532,6 +563,11 @@ pub struct DeprecatedFeaturesSection {
 }
 
 /// Experimental Zallet features that you are using before they are stable.
+///
+/// An experimental feature is disabled by default, and may change incompatibly or be
+/// removed entirely without a deprecation cycle. Setting its flag to `true` here opts
+/// this wallet in. When the feature is stabilised or abandoned, the flag is retired,
+/// and the change will be flagged via `features.as_of_version` when you upgrade.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Documented, DocumentedFields)]
 pub struct ExperimentalFeaturesSection {
     /// Any other experimental feature flags.

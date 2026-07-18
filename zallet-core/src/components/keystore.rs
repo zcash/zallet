@@ -123,6 +123,7 @@ use tokio::{
     task::JoinHandle,
     time,
 };
+use zcash_client_sqlite::ExtensionTransaction;
 use zip32::fingerprint::SeedFingerprint;
 
 use crate::network::Network;
@@ -410,31 +411,51 @@ impl KeyStore {
         &self,
         recipient_strings: Vec<String>,
     ) -> Result<(), Error> {
-        // If the wallet has any existing recipients, fail (we would instead need to
-        // re-encrypt the wallet).
-        if !self.maybe_encryptor().await?.is_empty() {
-            return Err(ErrorKind::Generic
-                .context(fl!("err-keystore-already-initialized"))
-                .into());
-        }
-
         let now = ::time::OffsetDateTime::now_utc();
 
         self.with_db_mut(|conn, _| {
-            let mut stmt = conn
-                .prepare(
-                    "INSERT INTO ext_zallet_keystore_age_recipients
-                    VALUES (:recipient, :added)",
-                )
+            // Use an explicit transaction so the emptiness check and the inserts are
+            // atomic: either every recipient is committed or none are. This prevents a
+            // partial write (e.g. from a disk-full or I/O error mid-loop) from committing
+            // an incomplete recipient set that the one-shot guard below would then refuse
+            // to ever repair.
+            let tx = conn
+                .transaction()
                 .map_err(|e| ErrorKind::Generic.context(e))?;
 
-            for recipient in recipient_strings {
-                stmt.execute(named_params! {
-                    ":recipient": recipient,
-                    ":added": now,
-                })
+            // If the wallet has any existing recipients, fail (we would instead need to
+            // re-encrypt the wallet).
+            let existing_recipients: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM ext_zallet_keystore_age_recipients",
+                    [],
+                    |row| row.get(0),
+                )
                 .map_err(|e| ErrorKind::Generic.context(e))?;
+            if existing_recipients != 0 {
+                return Err(ErrorKind::Generic
+                    .context(fl!("err-keystore-already-initialized"))
+                    .into());
             }
+
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "INSERT INTO ext_zallet_keystore_age_recipients
+                        VALUES (:recipient, :added)",
+                    )
+                    .map_err(|e| ErrorKind::Generic.context(e))?;
+
+                for recipient in recipient_strings {
+                    stmt.execute(named_params! {
+                        ":recipient": recipient,
+                        ":added": now,
+                    })
+                    .map_err(|e| ErrorKind::Generic.context(e))?;
+                }
+            }
+
+            tx.commit().map_err(|e| ErrorKind::Generic.context(e))?;
 
             Ok(())
         })
@@ -589,10 +610,16 @@ impl KeyStore {
         Ok(legacy_seed_fp)
     }
 
-    pub(crate) async fn encrypt_and_store_standalone_sapling_key(
+    /// Encrypts a standalone Sapling spending key without touching the database.
+    ///
+    /// This is the fallible half of storing a standalone Sapling key: it needs the keystore
+    /// encryptor (unavailable while the wallet is locked), and it is async. Persist the
+    /// result with [`EncryptedStandaloneSaplingKey::insert`] to write it inside a wallet
+    /// transaction, or with `Self::store_standalone_sapling_key`.
+    pub(crate) async fn encrypt_standalone_sapling_key(
         &self,
         sapling_key: &ExtendedSpendingKey,
-    ) -> Result<DiversifiableFullViewingKey, Error> {
+    ) -> Result<EncryptedStandaloneSaplingKey, Error> {
         let encryptor = self.encryptor().await?;
 
         let dfvk = sapling_key.to_diversifiable_full_viewing_key();
@@ -600,22 +627,37 @@ impl KeyStore {
             .encrypt_standalone_sapling_key(sapling_key)
             .map_err(|e| ErrorKind::Generic.context(e))?;
 
+        Ok(EncryptedStandaloneSaplingKey {
+            dfvk,
+            encrypted_sapling_extsk,
+        })
+    }
+
+    /// Stores a pre-encrypted standalone Sapling key over a pooled connection.
+    ///
+    /// The upsert is idempotent; re-storing a key replaces any ciphertext already stored for it.
+    #[cfg(feature = "zcashd-import")]
+    pub(crate) async fn store_standalone_sapling_key(
+        &self,
+        encrypted: &EncryptedStandaloneSaplingKey,
+    ) -> Result<(), Error> {
         self.with_db_mut(|conn, _| {
-            conn.execute(
-                "INSERT INTO ext_zallet_keystore_standalone_sapling_keys
-                VALUES (:dfvk, :encrypted_sapling_extsk)
-                ON CONFLICT (dfvk) DO NOTHING ",
-                named_params! {
-                    ":dfvk": &dfvk.to_bytes(),
-                    ":encrypted_sapling_extsk": encrypted_sapling_extsk,
-                },
-            )
-            .map_err(|e| ErrorKind::Generic.context(e))?;
+            encrypted
+                .store_with(|sql, params| conn.execute(sql, params))
+                .map_err(|e| ErrorKind::Generic.context(e))?;
             Ok(())
         })
-        .await?;
+        .await
+    }
 
-        Ok(dfvk)
+    #[cfg(feature = "zcashd-import")]
+    pub(crate) async fn encrypt_and_store_standalone_sapling_key(
+        &self,
+        sapling_key: &ExtendedSpendingKey,
+    ) -> Result<DiversifiableFullViewingKey, Error> {
+        let encrypted = self.encrypt_standalone_sapling_key(sapling_key).await?;
+        self.store_standalone_sapling_key(&encrypted).await?;
+        Ok(encrypted.dfvk)
     }
 
     #[cfg(feature = "zcashd-import")]
@@ -699,6 +741,14 @@ impl KeyStore {
         let mnemonic = decrypt_string(&identities, &encrypted_mnemonic)
             .map_err(|e| ErrorKind::Generic.context(e))?;
 
+        // The ciphertext is not bound to the fingerprint the row is keyed by, so verify
+        // that the decrypted mnemonic reproduces the fingerprint used for the lookup.
+        if !mnemonic_matches_fingerprint(&mnemonic, seed_fp)? {
+            return Err(ErrorKind::Generic
+                .context(fl!("err-keystore-key-material-mismatch"))
+                .into());
+        }
+
         Ok(mnemonic)
     }
 
@@ -747,8 +797,18 @@ impl KeyStore {
             })
             .await?;
 
-        decrypt_secret_bytes(&identities, &encrypted_legacy_seed)
-            .map_err(|e| ErrorKind::Generic.context(e).into())
+        let legacy_seed = decrypt_secret_bytes(&identities, &encrypted_legacy_seed)
+            .map_err(|e| ErrorKind::Generic.context(e))?;
+
+        // The ciphertext is not bound to the fingerprint the row is keyed by, so verify
+        // that the decrypted seed reproduces the fingerprint used for the lookup.
+        if !seed_matches_fingerprint(legacy_seed.expose_secret(), seed_fp) {
+            return Err(ErrorKind::Generic
+                .context(fl!("err-keystore-key-material-mismatch"))
+                .into());
+        }
+
+        Ok(legacy_seed)
     }
 
     /// Exports the mnemonic phrase corresponding to the given seed fingerprint.
@@ -840,27 +900,41 @@ impl KeyStore {
             return Err(ErrorKind::Generic.context(fl!("err-wallet-locked")).into());
         }
 
-        let encrypted_key_bytes = self
+        let (pubkey_bytes, encrypted_key_bytes) = self
             .with_db(|conn, network| {
                 let addr_str = Address::Transparent(*address).encode(network);
-                let encrypted_key_bytes = conn
+                let row = conn
                     .query_row(
-                        "SELECT encrypted_transparent_privkey
+                        "SELECT ztk.pubkey, encrypted_transparent_privkey
                          FROM ext_zallet_keystore_standalone_transparent_keys ztk
                          JOIN addresses a ON ztk.pubkey = a.imported_transparent_receiver_pubkey
                          WHERE a.cached_transparent_receiver_address = :address",
                         named_params! {
                             ":address": addr_str,
                         },
-                        |row| row.get::<_, Vec<u8>>("encrypted_transparent_privkey"),
+                        |row| {
+                            Ok((
+                                row.get::<_, Vec<u8>>("pubkey")?,
+                                row.get::<_, Vec<u8>>("encrypted_transparent_privkey")?,
+                            ))
+                        },
                     )
                     .map_err(|e| ErrorKind::Generic.context(e))?;
-                Ok(encrypted_key_bytes)
+                Ok(row)
             })
             .await?;
 
         let secret_key =
             decrypt_standalone_transparent_privkey(&identities, &encrypted_key_bytes[..])?;
+
+        // The ciphertext is not bound to the pubkey the row is keyed by, so verify that
+        // the decrypted key reproduces the pubkey used for the lookup.
+        let pubkey = secret_key.public_key(&secp256k1::Secp256k1::signing_only());
+        if pubkey.serialize()[..] != pubkey_bytes[..] {
+            return Err(ErrorKind::Generic
+                .context(fl!("err-keystore-key-material-mismatch"))
+                .into());
+        }
 
         Ok(secret_key)
     }
@@ -950,6 +1024,48 @@ impl Encryptor {
     }
 }
 
+/// Idempotent upsert for an encrypted standalone Sapling key, shared by the pooled-connection
+/// and in-transaction write paths so the SQL and table layout live in one place. The `dfvk`
+/// key uniquely identifies the plaintext, so re-storing a key replaces the stored ciphertext,
+/// refreshing it to the current encryption recipients.
+const INSERT_STANDALONE_SAPLING_KEY_SQL: &str =
+    "INSERT INTO ext_zallet_keystore_standalone_sapling_keys
+    VALUES (:dfvk, :encrypted_sapling_extsk)
+    ON CONFLICT (dfvk) DO UPDATE SET encrypted_sapling_extsk = :encrypted_sapling_extsk ";
+
+/// An age-encrypted standalone Sapling spending key, ready to be persisted.
+///
+/// Produced by [`KeyStore::encrypt_standalone_sapling_key`]; holds only ciphertext and the
+/// derived (public) full viewing key used as the table's key, so it carries no plaintext.
+pub(crate) struct EncryptedStandaloneSaplingKey {
+    dfvk: DiversifiableFullViewingKey,
+    encrypted_sapling_extsk: Vec<u8>,
+}
+
+impl EncryptedStandaloneSaplingKey {
+    /// Runs the upsert against the given executor (a pooled connection or an extension
+    /// transaction), replacing any ciphertext already stored for this key.
+    fn store_with(
+        &self,
+        execute: impl FnOnce(&str, &[(&str, &dyn rusqlite::ToSql)]) -> rusqlite::Result<usize>,
+    ) -> rusqlite::Result<()> {
+        execute(
+            INSERT_STANDALONE_SAPLING_KEY_SQL,
+            named_params! {
+                ":dfvk": &self.dfvk.to_bytes(),
+                ":encrypted_sapling_extsk": self.encrypted_sapling_extsk,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Writes this key into the keystore table using the given wallet-database extension
+    /// transaction, so the write commits atomically with the caller's other wallet writes.
+    pub(crate) fn insert(&self, ext: &ExtensionTransaction<'_>) -> rusqlite::Result<()> {
+        self.store_with(|sql, params| ext.execute(sql, params))
+    }
+}
+
 #[cfg(feature = "transparent-key-import")]
 pub(crate) struct EncryptedStandaloneTransparentKey {
     pubkey: secp256k1::PublicKey,
@@ -972,6 +1088,33 @@ fn encrypt_string(
     writer.finish()?.finish()?;
 
     Ok(ciphertext)
+}
+
+/// Returns whether the given seed bytes have the given [ZIP 32] seed fingerprint.
+///
+/// Keystore rows are keyed by seed fingerprint, but their ciphertexts are not bound to
+/// that key (age recipients are public), so decrypted seed material must be checked
+/// against the fingerprint it was looked up by before use.
+///
+/// [ZIP 32]: https://zips.z.cash/zip-0032#seed-fingerprints
+fn seed_matches_fingerprint(seed: &[u8], seed_fp: &SeedFingerprint) -> bool {
+    SeedFingerprint::from_seed(seed).is_some_and(|fp| fp.to_bytes() == seed_fp.to_bytes())
+}
+
+/// Returns whether the seed derived from the given mnemonic phrase has the given [ZIP 32]
+/// seed fingerprint.
+///
+/// [ZIP 32]: https://zips.z.cash/zip-0032#seed-fingerprints
+fn mnemonic_matches_fingerprint(
+    mnemonic: &SecretString,
+    seed_fp: &SeedFingerprint,
+) -> Result<bool, Error> {
+    let mut seed_bytes = Mnemonic::<English>::from_phrase(mnemonic.expose_secret())
+        .map_err(|e| ErrorKind::Generic.context(e))?
+        .to_seed("");
+    let matches = seed_matches_fingerprint(&seed_bytes, seed_fp);
+    seed_bytes.zeroize();
+    Ok(matches)
 }
 
 fn decrypt_string(
@@ -1078,4 +1221,75 @@ fn decrypt_standalone_transparent_privkey(
         .map_err(|e| ErrorKind::Generic.context(e))?;
 
     Ok(secret_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use bip0039::{English, Mnemonic};
+    use proptest::prelude::*;
+    use secrecy::SecretString;
+    use zip32::fingerprint::SeedFingerprint;
+
+    use super::{mnemonic_matches_fingerprint, seed_matches_fingerprint};
+
+    proptest! {
+        #[test]
+        fn seed_matches_its_own_fingerprint(seed in proptest::collection::vec(any::<u8>(), 32..=252)) {
+            let seed_fp = SeedFingerprint::from_seed(&seed).expect("valid length");
+            prop_assert!(seed_matches_fingerprint(&seed, &seed_fp));
+        }
+
+        #[test]
+        fn seed_does_not_match_other_fingerprint(
+            seed in proptest::collection::vec(any::<u8>(), 32..=252),
+            other_fp in any::<[u8; 32]>(),
+        ) {
+            let seed_fp = SeedFingerprint::from_seed(&seed).expect("valid length");
+            let other_fp = SeedFingerprint::from_bytes(other_fp);
+            prop_assert_eq!(
+                seed_matches_fingerprint(&seed, &other_fp),
+                other_fp.to_bytes() == seed_fp.to_bytes(),
+            );
+        }
+
+        #[test]
+        fn invalid_length_seed_matches_no_fingerprint(
+            seed in proptest::collection::vec(any::<u8>(), 0..32),
+            seed_fp in any::<[u8; 32]>(),
+        ) {
+            prop_assert!(!seed_matches_fingerprint(&seed, &SeedFingerprint::from_bytes(seed_fp)));
+        }
+    }
+
+    proptest! {
+        // Deriving a seed from a mnemonic uses PBKDF2, which is slow in unoptimized
+        // builds, so run fewer cases than the default.
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn mnemonic_matches_only_its_own_fingerprint(
+            entropy in any::<[u8; 32]>(),
+            other_fp in any::<[u8; 32]>(),
+        ) {
+            let mnemonic = Mnemonic::<English>::from_entropy(entropy).expect("valid entropy");
+            let seed_fp = SeedFingerprint::from_seed(&mnemonic.to_seed("")).expect("valid length");
+            let phrase = SecretString::new(mnemonic.into_phrase());
+
+            prop_assert!(mnemonic_matches_fingerprint(&phrase, &seed_fp).expect("valid phrase"));
+
+            let other_fp = SeedFingerprint::from_bytes(other_fp);
+            prop_assert_eq!(
+                mnemonic_matches_fingerprint(&phrase, &other_fp).expect("valid phrase"),
+                other_fp.to_bytes() == seed_fp.to_bytes(),
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_phrase_is_an_error() {
+        let phrase = SecretString::new("not a mnemonic".into());
+        assert!(
+            mnemonic_matches_fingerprint(&phrase, &SeedFingerprint::from_bytes([0; 32])).is_err()
+        );
+    }
 }

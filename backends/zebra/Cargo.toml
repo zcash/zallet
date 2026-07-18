@@ -52,7 +52,7 @@ zebra-state = { version = "10", features = ["indexer"] }
 
 [dev-dependencies]
 abscissa_core = { version = "0.9", features = ["testing"] }
-age = { version = "0.11", features = ["armor", "cli-common", "plugin"] }
+age = { version = "0.12", features = ["armor", "cli-common", "plugin"] }
 once_cell = "1.2"
 regex = "1.4"
 tempfile = "3"
@@ -75,11 +75,24 @@ rpc-cli = ["zallet-core/rpc-cli"]
 tokio-console = ["zallet-core/tokio-console"]
 
 [patch.crates-io]
-# Temporary pin to rage/main: the keystore uses age APIs (`EncryptedIdentity`,
-# `Send + Sync` bounds on `IdentityFile::into_identities`) that the 0.11.x
-# maintenance releases exclude. Replace with the crates.io release once
-# rage 0.12 ships.
-age = { git = "https://github.com/str4d/rage.git", rev = "d28f10ee776ce7391f7065695997f998631b113a" }
+# Temporary patch for `WalletDb::transactionally_with_extension` (adds atomic
+# z_importkey account+key writes), merged upstream but not yet released. The API
+# lives in zcash_client_sqlite, but the repo is a workspace: pinning only that
+# crate pulls its path-dep siblings from git while their crates.io copies remain,
+# duplicating the librustzcash stack, so the whole stack is pinned to one rev.
+# Replace with the crates.io releases once the next zcash_client_sqlite release
+# ships.
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "d09d1f390f2e4e3d8978bedfe84dd18aeceef008" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

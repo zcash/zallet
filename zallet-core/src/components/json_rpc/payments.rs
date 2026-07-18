@@ -5,20 +5,23 @@ use jsonrpsee::core::JsonValue;
 use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use transparent::{address::TransparentAddress, keys::AccountPubKey};
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
     data_api::{Account as _, WalletRead},
     proposal::Proposal,
+    wallet::TransparentAddressSource,
     zip321::{Payment, TransactionRequest},
 };
-use zcash_client_sqlite::wallet::Account;
-use zcash_keys::address::Address;
+use zcash_client_sqlite::{AccountUuid, wallet::Account};
+use zcash_keys::{address::Address, keys::UnifiedFullViewingKey};
 use zcash_protocol::{PoolType, TxId, memo::MemoBytes, value::Zatoshis};
 use zip32::{AccountId, fingerprint::SeedFingerprint};
 
 use crate::{
     components::{chain::Chain, database::DbConnection},
     fl,
+    network::Network,
     prelude::APP,
 };
 
@@ -811,25 +814,235 @@ pub(super) fn get_legacy_pool_account(wallet: &DbConnection) -> RpcResult<Accoun
     )))
 }
 
-/// Broadcasts the specified transactions to the network, if configured to do so.
-pub(super) async fn broadcast_transactions<C: Chain>(
+/// Why a transparent output of a built transaction failed verification against the
+/// account's seed-derived key material.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TransparentOutputError<E> {
+    /// The output's script does not have a recognizable transparent address form.
+    UnrecognizedScript { vout: usize },
+    /// The wallet has no derivation record for the output's address.
+    UnknownAddress(TransparentAddress),
+    /// The wallet's record for the output's address does not claim derivation from the
+    /// account key.
+    #[cfg(feature = "transparent-key-import")]
+    NotDerived(TransparentAddress),
+    /// Re-derivation at the recorded derivation path does not reproduce the output's
+    /// address.
+    DerivationMismatch(TransparentAddress),
+    /// The account key has no transparent component to derive from.
+    NoTransparentKey(TransparentAddress),
+    /// A requested payment output is absent from the transaction.
+    MissingPayment(TransparentAddress),
+    /// The derivation-record lookup failed.
+    Lookup(E),
+}
+
+/// Checks that every transparent output of a built transaction is accounted for.
+///
+/// Shielded outputs are constructed in-process from the spending key material passed to
+/// the transaction builder, but transparent change and ephemeral (ZIP 320) output
+/// addresses are read from wallet database records that are not integrity-protected.
+/// Each transparent output must therefore either exactly match one of `expected_payments`
+/// (consuming it, so a payment vouches for at most one output), or re-derive from
+/// `account_pubkey` — the account's seed-derived transparent key — at the derivation path
+/// the wallet records for its address. The record itself is untrusted; only the
+/// re-derivation equality establishes that the funds remain under the account's key.
+///
+/// All of `expected_payments` must be consumed: a transaction that fails to pay a
+/// requested recipient is as unaccountable as one that pays an unrecognized output.
+pub(super) fn check_transparent_outputs<E>(
+    outputs: impl IntoIterator<Item = (Option<TransparentAddress>, Zatoshis)>,
+    mut expected_payments: Vec<(TransparentAddress, Zatoshis)>,
+    account_pubkey: Option<&AccountPubKey>,
+    mut address_source: impl FnMut(&TransparentAddress) -> Result<Option<TransparentAddressSource>, E>,
+) -> Result<(), TransparentOutputError<E>> {
+    for (vout, (addr, value)) in outputs.into_iter().enumerate() {
+        let addr = addr.ok_or(TransparentOutputError::UnrecognizedScript { vout })?;
+
+        if let Some(index) = expected_payments
+            .iter()
+            .position(|(expected_addr, expected_value)| {
+                *expected_addr == addr && *expected_value == value
+            })
+        {
+            expected_payments.swap_remove(index);
+            continue;
+        }
+
+        match address_source(&addr).map_err(TransparentOutputError::Lookup)? {
+            None => return Err(TransparentOutputError::UnknownAddress(addr)),
+            Some(TransparentAddressSource::Derived {
+                scope,
+                address_index,
+            }) => {
+                let derived = account_pubkey
+                    .ok_or(TransparentOutputError::NoTransparentKey(addr))?
+                    .derive_address_pubkey(scope, address_index)
+                    .map_err(|_| TransparentOutputError::DerivationMismatch(addr))?;
+                if TransparentAddress::from_pubkey(&derived) != addr {
+                    return Err(TransparentOutputError::DerivationMismatch(addr));
+                }
+            }
+            // Sources without derivation information (standalone imported keys) cannot be
+            // tied to the account key. Change and ephemeral outputs are always derived, so
+            // fail closed.
+            #[cfg(feature = "transparent-key-import")]
+            Some(_) => return Err(TransparentOutputError::NotDerived(addr)),
+        }
+    }
+
+    if let Some((addr, _)) = expected_payments.first() {
+        return Err(TransparentOutputError::MissingPayment(*addr));
+    }
+
+    Ok(())
+}
+
+/// The transparent (address, amount) pairs that the given proposal explicitly pays to
+/// requested recipients, one list per proposal step.
+///
+/// Transparent-pool payments resolve to the receiver the transaction builder pays: a
+/// unified address's transparent receiver, a bare transparent address, or the P2PKH
+/// address underlying a TEX address. Ephemeral (ZIP 320) intermediate outputs are not
+/// payments — they appear in a step's proposed change and must instead verify as
+/// wallet-derived.
+fn proposed_transparent_payments<FeeRuleT, NoteRef>(
+    params: &Network,
+    proposal: &Proposal<FeeRuleT, NoteRef>,
+) -> RpcResult<Vec<Vec<(TransparentAddress, Zatoshis)>>> {
+    proposal
+        .steps()
+        .iter()
+        .map(|step| {
+            let mut payments = vec![];
+            for (payment_index, pool) in step.payment_pools() {
+                if pool == &PoolType::Transparent {
+                    let payment = step
+                        .transaction_request()
+                        .payments()
+                        .get(payment_index)
+                        .ok_or_else(|| {
+                            LegacyCode::Wallet.with_static(
+                                "Internal error: proposal step references a nonexistent payment.",
+                            )
+                        })?;
+                    let value = payment.amount().ok_or_else(|| {
+                        LegacyCode::Wallet
+                            .with_static("Internal error: proposal step payment has no amount.")
+                    })?;
+                    let addr = match Address::try_from_zcash_address(
+                        params,
+                        payment.recipient_address().clone(),
+                    ) {
+                        Ok(Address::Transparent(addr)) => addr,
+                        Ok(Address::Tex(data)) => TransparentAddress::PublicKeyHash(data),
+                        Ok(Address::Unified(ua)) => *ua.transparent().ok_or_else(|| {
+                            LegacyCode::Wallet.with_static(
+                                "Internal error: transparent-pool payment to a unified address \
+                                 without a transparent receiver.",
+                            )
+                        })?,
+                        Ok(Address::Sapling(_)) | Err(_) => {
+                            return Err(LegacyCode::Wallet.with_static(
+                                "Internal error: transparent-pool payment to a non-transparent \
+                                 address.",
+                            ));
+                        }
+                    };
+                    payments.push((addr, value));
+                }
+            }
+            Ok(payments)
+        })
+        .collect()
+}
+
+/// Verifies the built transactions against the proposal and the account's seed-derived
+/// key material, then broadcasts them to the network, if configured to do so.
+///
+/// A transaction containing a transparent output that verifies neither as a payment
+/// requested by the proposal nor as an address derived from `ufvk` (see
+/// [`check_transparent_outputs`]) is never handed to the broadcast step. `ufvk` must be
+/// derived from the wallet seed, not read from the database.
+pub(super) async fn verify_and_broadcast_transactions<C: Chain, FeeRuleT, NoteRef>(
     wallet: &DbConnection,
     chain: C,
+    account_id: AccountUuid,
+    ufvk: &UnifiedFullViewingKey,
+    proposal: &Proposal<FeeRuleT, NoteRef>,
     txids: Vec<TxId>,
 ) -> RpcResult<SendResult> {
-    if APP.config().external.broadcast() {
-        for txid in &txids {
-            let tx = wallet
-                .get_transaction(*txid)
-                .map_err(|e| {
-                    LegacyCode::Database.with_message(format!("Failed to get transaction: {e}"))
-                })?
-                .ok_or_else(|| {
-                    LegacyCode::Wallet
-                        .with_message(format!("Wallet does not contain transaction {txid}"))
-                })?;
+    let params = *wallet.params();
+    let expected_payments = proposed_transparent_payments(&params, proposal)?;
 
-            chain.broadcast_transaction(&tx).await.map_err(|e| {
+    // The builder creates one transaction per proposal step, in step order.
+    if txids.len() != expected_payments.len() {
+        return Err(LegacyCode::Wallet.with_static(
+            "Internal error: built transaction count does not match proposal step count.",
+        ));
+    }
+
+    let mut transactions = Vec::with_capacity(txids.len());
+    for (txid, expected) in txids.iter().zip(expected_payments) {
+        let tx = wallet
+            .get_transaction(*txid)
+            .map_err(|e| {
+                LegacyCode::Database.with_message(format!("Failed to get transaction: {e}"))
+            })?
+            .ok_or_else(|| {
+                LegacyCode::Wallet
+                    .with_message(format!("Wallet does not contain transaction {txid}"))
+            })?;
+
+        let outputs = tx
+            .transparent_bundle()
+            .map(|bundle| {
+                bundle
+                    .vout
+                    .iter()
+                    .map(|txout| (txout.recipient_address(), txout.value()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        check_transparent_outputs(outputs, expected, ufvk.transparent(), |addr| {
+            wallet
+                .get_transparent_address_metadata(account_id, addr)
+                .map(|meta| meta.map(|m| m.source().clone()))
+        })
+        .map_err(|e| match e {
+            TransparentOutputError::Lookup(e) => LegacyCode::Database.with_message(e.to_string()),
+            TransparentOutputError::UnrecognizedScript { vout } => {
+                LegacyCode::Wallet.with_message(fl!(
+                    "err-transparent-output-not-wallet-derived",
+                    output = format!("output index {vout}"),
+                ))
+            }
+            TransparentOutputError::MissingPayment(addr) => LegacyCode::Wallet.with_message(fl!(
+                "err-transparent-payment-missing",
+                address = Address::Transparent(addr).encode(&params),
+            )),
+            TransparentOutputError::UnknownAddress(addr)
+            | TransparentOutputError::DerivationMismatch(addr)
+            | TransparentOutputError::NoTransparentKey(addr) => {
+                LegacyCode::Wallet.with_message(fl!(
+                    "err-transparent-output-not-wallet-derived",
+                    output = Address::Transparent(addr).encode(&params),
+                ))
+            }
+            #[cfg(feature = "transparent-key-import")]
+            TransparentOutputError::NotDerived(addr) => LegacyCode::Wallet.with_message(fl!(
+                "err-transparent-output-not-wallet-derived",
+                output = Address::Transparent(addr).encode(&params),
+            )),
+        })?;
+
+        transactions.push(tx);
+    }
+
+    if APP.config().external.broadcast() {
+        for tx in &transactions {
+            chain.broadcast_transaction(tx).await.map_err(|e| {
                 LegacyCode::Wallet
                     .with_message(format!("SendTransaction: Transaction commit failed:: {e}"))
             })?;
@@ -905,6 +1118,320 @@ pub(crate) mod arb {
     pub(crate) fn amount_with_memo(address: &str, zec: &str, memo: &str) -> AmountParameter {
         serde_json::from_value(json!({ "address": address, "amount": zec, "memo": memo }))
             .expect("valid AmountParameter")
+    }
+}
+
+#[cfg(test)]
+mod transparent_output_tests {
+    use std::convert::Infallible;
+
+    use proptest::prelude::*;
+    use transparent::{
+        address::TransparentAddress,
+        keys::{AccountPubKey, NonHardenedChildIndex, TransparentKeyScope},
+    };
+    use zcash_client_backend::wallet::TransparentAddressSource;
+    use zcash_keys::keys::UnifiedSpendingKey;
+    use zcash_protocol::{
+        consensus,
+        value::{MAX_MONEY, Zatoshis},
+    };
+    use zip32::AccountId;
+
+    use super::{TransparentOutputError, check_transparent_outputs};
+
+    /// The account-level transparent public key derived from `seed` and `account`; the
+    /// trusted key the checks under test re-derive against. No wallet database: the check
+    /// is a pure function of the outputs, the expected payments, this key, and the
+    /// (untrusted) derivation records fed to it, which is what makes it unit-testable
+    /// here rather than in `integration-tests`.
+    ///
+    /// Returns `None` for the seeds ZIP 32 rejects, so a property can skip them.
+    fn account_pubkey_from(seed: &[u8; 32], account: u32) -> Option<AccountPubKey> {
+        let account = AccountId::try_from(account).ok()?;
+        let usk =
+            UnifiedSpendingKey::from_seed(&consensus::Network::TestNetwork, seed, account).ok()?;
+        usk.to_unified_full_viewing_key().transparent().cloned()
+    }
+
+    /// The address the wallet would legitimately place at (`scope`, `index`) under `key`.
+    fn derived_addr(
+        key: &AccountPubKey,
+        scope: TransparentKeyScope,
+        index: NonHardenedChildIndex,
+    ) -> Option<TransparentAddress> {
+        key.derive_address_pubkey(scope, index)
+            .ok()
+            .map(|pk| TransparentAddress::from_pubkey(&pk))
+    }
+
+    /// A derivation-record lookup that claims every address lives at (`scope`, `index`).
+    /// The record is untrusted input to the check, so a property may claim whatever an
+    /// attacker could write.
+    fn claims(
+        scope: TransparentKeyScope,
+        index: NonHardenedChildIndex,
+    ) -> impl FnMut(&TransparentAddress) -> Result<Option<TransparentAddressSource>, Infallible>
+    {
+        move |_| {
+            Ok(Some(TransparentAddressSource::Derived {
+                scope,
+                address_index: index,
+            }))
+        }
+    }
+
+    /// A derivation-record lookup with no record for any address.
+    fn no_record(_: &TransparentAddress) -> Result<Option<TransparentAddressSource>, Infallible> {
+        Ok(None)
+    }
+
+    /// ZIP 32 account indices are non-hardened, so they occupy the low 31 bits.
+    fn arb_account() -> impl Strategy<Value = u32> {
+        0u32..(1 << 31)
+    }
+
+    /// Every scope the wallet derives transparent addresses under, including the
+    /// ephemeral (ZIP 320) scope.
+    fn arb_scope() -> impl Strategy<Value = TransparentKeyScope> {
+        prop_oneof![
+            Just(TransparentKeyScope::EXTERNAL),
+            Just(TransparentKeyScope::INTERNAL),
+            Just(TransparentKeyScope::EPHEMERAL),
+        ]
+    }
+
+    fn arb_index() -> impl Strategy<Value = NonHardenedChildIndex> {
+        (0u32..(1 << 31)).prop_map(NonHardenedChildIndex::const_from_index)
+    }
+
+    fn arb_value() -> impl Strategy<Value = Zatoshis> {
+        (0u64..=MAX_MONEY).prop_map(Zatoshis::const_from_u64)
+    }
+
+    proptest! {
+        // Each case derives key material, which is expensive, so take fewer samples than
+        // the default 256. The properties hold for every key, not for rare corners of the
+        // seed space, so a modest sample establishes them.
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        /// An output whose recorded (scope, index) re-derives to its own address is the
+        /// wallet's, whatever the scope: internal change, an ephemeral (ZIP 320) output,
+        /// or an external receiver.
+        #[test]
+        fn derived_output_accepted_at_its_recorded_path(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+            scope in arb_scope(),
+            index in arb_index(),
+            value in arb_value(),
+        ) {
+            let Some(key) = account_pubkey_from(&seed, account) else { return Ok(()) };
+            let Some(addr) = derived_addr(&key, scope, index) else { return Ok(()) };
+
+            prop_assert_eq!(
+                check_transparent_outputs(
+                    [(Some(addr), value)],
+                    vec![],
+                    Some(&key),
+                    claims(scope, index),
+                ),
+                Ok(()),
+            );
+        }
+
+        /// The attack this check exists for: a change or ephemeral output substituted
+        /// with an address under someone else's key is rejected, even though its
+        /// derivation record is internally consistent.
+        #[test]
+        fn substituted_output_address_rejected(
+            wallet_seed in any::<[u8; 32]>(),
+            attacker_seed in any::<[u8; 32]>(),
+            account in arb_account(),
+            scope in arb_scope(),
+            index in arb_index(),
+            value in arb_value(),
+        ) {
+            prop_assume!(wallet_seed != attacker_seed);
+            let Some(wallet_key) = account_pubkey_from(&wallet_seed, account) else {
+                return Ok(());
+            };
+            let Some(attacker_key) = account_pubkey_from(&attacker_seed, account) else {
+                return Ok(());
+            };
+            let Some(attacker_addr) = derived_addr(&attacker_key, scope, index) else {
+                return Ok(());
+            };
+
+            prop_assert_eq!(
+                check_transparent_outputs(
+                    [(Some(attacker_addr), value)],
+                    vec![],
+                    Some(&wallet_key),
+                    claims(scope, index),
+                ),
+                Err(TransparentOutputError::DerivationMismatch(attacker_addr)),
+            );
+        }
+
+        /// A record claiming a different index than the one the address was derived at is
+        /// rejected: the check trusts the re-derivation equality, not the record.
+        #[test]
+        fn record_claiming_wrong_index_rejected(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+            scope in arb_scope(),
+            index in arb_index(),
+            other_index in arb_index(),
+            value in arb_value(),
+        ) {
+            prop_assume!(index != other_index);
+            let Some(key) = account_pubkey_from(&seed, account) else { return Ok(()) };
+            let Some(addr) = derived_addr(&key, scope, index) else { return Ok(()) };
+            let Some(other_addr) = derived_addr(&key, scope, other_index) else {
+                return Ok(());
+            };
+            prop_assume!(addr != other_addr);
+
+            prop_assert_eq!(
+                check_transparent_outputs(
+                    [(Some(addr), value)],
+                    vec![],
+                    Some(&key),
+                    claims(scope, other_index),
+                ),
+                Err(TransparentOutputError::DerivationMismatch(addr)),
+            );
+        }
+
+        /// An output exactly matching a requested payment is accepted without consulting
+        /// any derivation record, and each payment vouches for exactly one output: a
+        /// duplicate of the same output does not ride along.
+        #[test]
+        fn requested_payment_accepted_exactly_once(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+            scope in arb_scope(),
+            index in arb_index(),
+            value in arb_value(),
+        ) {
+            let Some(key) = account_pubkey_from(&seed, account) else { return Ok(()) };
+            // Any address serves as a recipient; one not under the wallet's key is the
+            // interesting case.
+            let Some(addr) = derived_addr(&key, scope, index) else { return Ok(()) };
+
+            prop_assert_eq!(
+                check_transparent_outputs(
+                    [(Some(addr), value)],
+                    vec![(addr, value)],
+                    None,
+                    no_record,
+                ),
+                Ok(()),
+            );
+
+            prop_assert_eq!(
+                check_transparent_outputs(
+                    [(Some(addr), value), (Some(addr), value)],
+                    vec![(addr, value)],
+                    None,
+                    no_record,
+                ),
+                Err(TransparentOutputError::UnknownAddress(addr)),
+            );
+        }
+
+        /// An output with no derivation record at all is rejected, as is an output
+        /// paying a requested recipient a different amount than requested.
+        #[test]
+        fn unrecorded_output_rejected(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+            scope in arb_scope(),
+            index in arb_index(),
+            value in arb_value(),
+            other_value in arb_value(),
+        ) {
+            let Some(key) = account_pubkey_from(&seed, account) else { return Ok(()) };
+            let Some(addr) = derived_addr(&key, scope, index) else { return Ok(()) };
+
+            prop_assert_eq!(
+                check_transparent_outputs([(Some(addr), value)], vec![], Some(&key), no_record),
+                Err(TransparentOutputError::UnknownAddress(addr)),
+            );
+
+            prop_assume!(value != other_value);
+            prop_assert!(
+                check_transparent_outputs(
+                    [(Some(addr), other_value)],
+                    vec![(addr, value)],
+                    Some(&key),
+                    no_record,
+                )
+                .is_err(),
+            );
+        }
+
+        /// A transaction missing a requested payment output is rejected.
+        #[test]
+        fn missing_requested_payment_rejected(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+            scope in arb_scope(),
+            index in arb_index(),
+            value in arb_value(),
+        ) {
+            let Some(key) = account_pubkey_from(&seed, account) else { return Ok(()) };
+            let Some(addr) = derived_addr(&key, scope, index) else { return Ok(()) };
+
+            prop_assert_eq!(
+                check_transparent_outputs::<Infallible>(
+                    [],
+                    vec![(addr, value)],
+                    Some(&key),
+                    no_record,
+                ),
+                Err(TransparentOutputError::MissingPayment(addr)),
+            );
+        }
+
+        /// A derived record cannot vouch for anything when the account has no
+        /// transparent key component to re-derive from.
+        #[test]
+        fn output_without_transparent_key_rejected(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+            scope in arb_scope(),
+            index in arb_index(),
+            value in arb_value(),
+        ) {
+            let Some(key) = account_pubkey_from(&seed, account) else { return Ok(()) };
+            let Some(addr) = derived_addr(&key, scope, index) else { return Ok(()) };
+
+            prop_assert_eq!(
+                check_transparent_outputs(
+                    [(Some(addr), value)],
+                    vec![],
+                    None,
+                    claims(scope, index),
+                ),
+                Err(TransparentOutputError::NoTransparentKey(addr)),
+            );
+        }
+    }
+
+    /// An output whose script has no transparent address form cannot be verified.
+    #[test]
+    fn unrecognized_script_rejected() {
+        assert_eq!(
+            check_transparent_outputs::<Infallible>(
+                [(None, Zatoshis::ZERO)],
+                vec![],
+                None,
+                no_record,
+            ),
+            Err(TransparentOutputError::UnrecognizedScript { vout: 0 }),
+        );
     }
 }
 
