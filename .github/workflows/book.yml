@@ -36,6 +36,14 @@ jobs:
         run: |
           mdbook build book
 
+      # Publish zallet-core's rustdoc alongside the book, under /rustdoc/.
+      # Private items are included: zallet-core is not a public library, so the
+      # audience for these docs is Zallet contributors.
+      - name: Build rustdoc (zallet-core)
+        run: |
+          cargo doc --no-deps --document-private-items -p zallet-core
+          cp -r target/doc book/book/rustdoc
+
       - name: Setup Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
 

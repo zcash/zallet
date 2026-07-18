@@ -1,6 +1,45 @@
-//! Zallet
+//! The shared core of Zallet, a full-node Zcash wallet.
 //!
-//! Application based on the [Abscissa] framework.
+//! Zallet is not designed to be used as a Rust library; this crate is the common
+//! implementation that Zallet's per-backend binaries statically link. Its documentation
+//! is for Zallet contributors.
+//!
+//! # Architecture
+//!
+//! Zallet ships as several binaries built from three Cargo workspaces:
+//!
+//! - `zallet` (in the root workspace, alongside this crate) is a dependency-light
+//!   launcher: it reads the config file's top-level `backend` key and hands the entire
+//!   invocation over to the matching `zallet-<backend>` binary.
+//! - `zallet-zebra` and `zallet-zaino` (each in its own workspace under `backends/`, so
+//!   their `zebra`/`zaino` dependency trees can move independently) are the real wallet
+//!   binaries. Each supplies a [`components::chain::ChainRuntime`] for its chain backend
+//!   and calls [`application::boot`], which registers the backend and starts the
+//!   [Abscissa] application defined here; everything else — CLI, configuration, wallet
+//!   database, key store, sync engine, JSON-RPC interface — is this crate.
+//!
+//! All backend binaries operate on the same wallet database, which is why they validate
+//! the config's `backend` key against the backend they provide, and why the
+//! `zcash_client_sqlite` stack must resolve to identical versions across the three
+//! workspaces (enforced in CI).
+//!
+//! # Components
+//!
+//! The long-running pieces live in [`components`]:
+//!
+//! - [`components::chain`] — the interface to the chain backend.
+//! - `components::database` — the wallet database (`zcash_client_sqlite`).
+//! - `components::keystore` — age-encrypted key material; see its module docs for the
+//!   design.
+//! - `components::sync` — the sync engine keeping the wallet's chain view current; see
+//!   its module docs for the design.
+//! - `components::json_rpc` — the JSON-RPC server and methods. The rustdoc on the RPC
+//!   traits is the single source of truth for method documentation: the build script
+//!   generates the `zallet rpc help` output, the `rpc.discover` OpenRPC document, and
+//!   the book's JSON-RPC reference from it.
+//!
+//! Similarly, the rustdoc on [`config`] generates the `zallet example-config` output and
+//! the book's configuration reference.
 //!
 //! [Abscissa]: https://github.com/iqlusioninc/abscissa
 
