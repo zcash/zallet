@@ -125,6 +125,7 @@ zcash_client_sqlite = { workspace = true, features = [
     "transparent-inputs",
 ] }
 zcash_pool_migration_backend.workspace = true
+zcash_pool_migration_sqlite.workspace = true
 zcash_note_encryption.workspace = true
 zip32.workspace = true
 

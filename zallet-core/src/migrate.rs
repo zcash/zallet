@@ -16,18 +16,14 @@
 //! error handling in the RPC layer, and lets the pure planner run synchronously
 //! after the last `.await`.
 //!
-//! The trait also declares persistence methods (store/load/update) used by the
-//! still-unreleased commit and reconcile slices. This planning-only snapshot does
-//! not persist anything: `load_migration` reports "no migration in progress" and
-//! the mutating methods return [`SnapshotError::PersistenceUnsupported`]. A
-//! persistence-capable backend over the wallet database replaces it once those
-//! slices land.
+//! Persistence is a separate concern: the engine's `PoolMigrationRead` /
+//! `PoolMigrationWrite` store traits (implemented over the wallet database by
+//! `zcash_pool_migration_sqlite`) hold a committed migration, and the
+//! `MigrationBackend` trait this snapshot implements is now just the planning
+//! inputs. Committing a migration uses the `WalletMigration` adapter over the
+//! wallet, not this snapshot.
 
-use std::fmt;
-
-use zcash_pool_migration_backend::engine::{
-    MigrationBackend, MigrationState, MigrationTxId, MigrationTxState,
-};
+use zcash_pool_migration_backend::engine::MigrationBackend;
 
 /// The backend-agnostic value-pool migration engine.
 ///
@@ -37,37 +33,15 @@ use zcash_pool_migration_backend::engine::{
 /// avoid coupling Zallet code to specific items until the engine is released.
 pub use zcash_pool_migration_backend as engine;
 
-/// The error type of the planning-only [`SpendableSnapshot`] backend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SnapshotError {
-    /// The planning snapshot cannot persist migration state. Committing a
-    /// migration (building, pre-signing, and storing the PCZTs) needs a
-    /// persistence-capable backend, which a later engine slice provides.
-    PersistenceUnsupported,
-}
-
-impl fmt::Display for SnapshotError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SnapshotError::PersistenceUnsupported => f.write_str(
-                "the migration preview backend does not persist migration state; \
-                 committing a migration is not yet available",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SnapshotError {}
-
 /// A point-in-time snapshot of the inputs the migration engine needs to PLAN a
 /// migration for one account: the values of the account's spendable source-pool
 /// (Orchard) notes, and the chain-tip height.
 ///
 /// This is Zallet's `MigrationBackend` for planning. The caller gathers both
 /// values from the wallet (mapping any wallet error to an RPC error), then hands
-/// the snapshot to `engine::plan_migration`. The persistence methods are not
-/// supported (see the module docs): planning never calls them, and committing
-/// needs a different, persistence-capable backend.
+/// the snapshot to `engine::plan_migration`. It holds only already-read values,
+/// so it is infallible; committing a migration uses the `WalletMigration`
+/// adapter over the wallet, not this snapshot.
 pub struct SpendableSnapshot {
     orchard_note_values: Vec<u64>,
     chain_tip_height: u32,
@@ -85,7 +59,7 @@ impl SpendableSnapshot {
 }
 
 impl MigrationBackend for SpendableSnapshot {
-    type Error = SnapshotError;
+    type Error = core::convert::Infallible;
 
     fn spendable_orchard_note_values(&self) -> Result<Vec<u64>, Self::Error> {
         Ok(self.orchard_note_values.clone())
@@ -93,22 +67,5 @@ impl MigrationBackend for SpendableSnapshot {
 
     fn chain_tip_height(&self) -> Result<u32, Self::Error> {
         Ok(self.chain_tip_height)
-    }
-
-    fn store_migration(&mut self, _state: &MigrationState) -> Result<(), Self::Error> {
-        Err(SnapshotError::PersistenceUnsupported)
-    }
-
-    fn load_migration(&self) -> Result<Option<MigrationState>, Self::Error> {
-        // A planning snapshot never persists, so no migration is ever in progress through it.
-        Ok(None)
-    }
-
-    fn update_transaction(
-        &mut self,
-        _id: MigrationTxId,
-        _state: MigrationTxState,
-    ) -> Result<(), Self::Error> {
-        Err(SnapshotError::PersistenceUnsupported)
     }
 }

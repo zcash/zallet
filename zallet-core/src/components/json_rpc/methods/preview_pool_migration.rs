@@ -33,7 +33,7 @@ use crate::{
         keystore::KeyStore,
     },
     migrate::{
-        SnapshotError, SpendableSnapshot,
+        SpendableSnapshot,
         engine::{
             engine::{MigrationError, MigrationPlan, plan_migration},
             note_splitting::{FeePolicy, Zip317FeePolicy},
@@ -199,16 +199,17 @@ pub(crate) async fn call(
 }
 
 /// Maps a migration-planning error to an RPC error.
-fn map_plan_error(err: MigrationError<SnapshotError>) -> jsonrpsee::types::ErrorObjectOwned {
+fn map_plan_error(
+    err: MigrationError<core::convert::Infallible>,
+) -> jsonrpsee::types::ErrorObjectOwned {
     match err {
         MigrationError::NothingToMigrate => LegacyCode::InvalidParameter
             .with_static("the account has no spendable source-pool balance to migrate"),
         MigrationError::Preparation(e) => LegacyCode::InvalidParameter.with_message(format!(
             "the spendable notes cannot fund the migration: {e}"
         )),
-        // Planning calls only the snapshot's read methods, which never fail; a backend error here
-        // would indicate a future change to `plan_migration`, so surface it rather than hide it.
-        MigrationError::Backend(e) => LegacyCode::Misc.with_message(format!("{e}")),
+        // The planning snapshot's read methods are infallible, so this arm is unreachable.
+        MigrationError::Backend(e) => match e {},
     }
 }
 
@@ -274,19 +275,17 @@ mod tests {
     use zcash_protocol::value::COIN;
 
     use super::*;
-    use crate::migrate::engine::engine::{
-        MigrationBackend, MigrationState, MigrationTxId, MigrationTxState,
-    };
+    use crate::migrate::engine::engine::MigrationBackend;
 
     /// A minimal planning backend for tests: a fixed set of spendable note values and a chain tip.
-    /// Persistence is unsupported (planning never uses it), mirroring `SpendableSnapshot`.
+    /// Mirrors `SpendableSnapshot`; planning is infallible.
     struct MockBackend {
         notes: Vec<u64>,
         tip: u32,
     }
 
     impl MigrationBackend for MockBackend {
-        type Error = SnapshotError;
+        type Error = core::convert::Infallible;
 
         fn spendable_orchard_note_values(&self) -> Result<Vec<u64>, Self::Error> {
             Ok(self.notes.clone())
@@ -294,22 +293,6 @@ mod tests {
 
         fn chain_tip_height(&self) -> Result<u32, Self::Error> {
             Ok(self.tip)
-        }
-
-        fn store_migration(&mut self, _state: &MigrationState) -> Result<(), Self::Error> {
-            Err(SnapshotError::PersistenceUnsupported)
-        }
-
-        fn load_migration(&self) -> Result<Option<MigrationState>, Self::Error> {
-            Ok(None)
-        }
-
-        fn update_transaction(
-            &mut self,
-            _id: MigrationTxId,
-            _state: MigrationTxState,
-        ) -> Result<(), Self::Error> {
-            Err(SnapshotError::PersistenceUnsupported)
         }
     }
 
