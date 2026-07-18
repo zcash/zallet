@@ -22,7 +22,9 @@ use serde::Serialize;
 use zcash_client_backend::data_api::{Account, WalletRead};
 use zcash_client_sqlite::AccountUuid;
 use zcash_keys::keys::UnifiedSpendingKey;
-use zcash_pool_migration_backend::engine::{MigrationState, MigrationStatus, MigrationTxState};
+use zcash_pool_migration_backend::engine::{
+    MigrationState, MigrationStatus, MigrationTxId, MigrationTxKind, MigrationTxState,
+};
 use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
 
 use crate::components::keystore::KeyStore;
@@ -254,6 +256,194 @@ pub(crate) fn migration_progress(state: &MigrationState) -> MigrationProgress {
         completed_transactions,
         total_transactions,
     }
+}
+
+/// Whether this is a preparation (note-splitting) or a transfer (pool-crossing) transaction.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MigrationTxRole {
+    /// A same-pool note-preparation transaction that mints self-funding notes.
+    Preparation,
+    /// A transfer that crosses one funding note into the destination pool.
+    Transfer,
+}
+
+/// The lifecycle state of one migration transaction.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MigrationTxLifecycle {
+    /// A placeholder that is not yet built or signed (it awaits its dependencies).
+    Planned,
+    /// Built and pre-signed, ready to prove and broadcast once it is due.
+    Signed,
+    /// Proved against a real anchor, ready to broadcast.
+    Proved,
+    /// Broadcast to the network, awaiting confirmation.
+    Broadcast,
+    /// Mined into a block.
+    Mined,
+    /// Expired before it could be mined; the wallet rebuilds and re-signs it.
+    Expired,
+}
+
+/// Why a migration transaction is not yet actionable.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MigrationTxBlocker {
+    /// Waiting for its dependency transactions (an earlier preparation layer, or the whole
+    /// preparation) to mine, so its input notes become witnessable in a new anchor bucket. A
+    /// multi-layer preparation signs and broadcasts each layer in a separate anchor bucket, so a
+    /// later layer cannot be built until its predecessor has mined.
+    Dependencies,
+    /// Built and due only at a later height (the privacy broadcast schedule): waiting for the chain
+    /// tip to reach its scheduled height.
+    Schedule,
+}
+
+/// The action a wallet takes next on a ready migration transaction.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MigrationTxAction {
+    /// Build and pre-sign this placeholder now that its dependencies are mined (a later preparation
+    /// layer, or the transfers once the whole preparation is mined).
+    BuildAndSign,
+    /// Prove and broadcast this pre-signed transaction now that its dependencies are mined and it is
+    /// due.
+    ProveAndBroadcast,
+}
+
+/// The status of one migration transaction, as a wallet renders it and decides the next step. This
+/// is the machine-readable companion to the human status string: a mobile wallet, which cannot
+/// pre-sign a multi-layer migration up front and may be restarted between layers, uses it to show
+/// the user which transaction to sign or broadcast next and what the rest are waiting on.
+#[derive(Clone, Debug, Serialize, Documented, JsonSchema)]
+pub(crate) struct MigrationTransactionStatus {
+    /// Stable identifier of this transaction within the migration.
+    id: u32,
+    /// Whether this is a preparation or a transfer transaction.
+    kind: MigrationTxRole,
+    /// For a preparation transaction, its layer, which is also its anchor bucket: layer 0 is signed
+    /// first, and each later layer is signed only once its predecessor has mined. Absent for
+    /// transfers.
+    layer: Option<u32>,
+    /// For a transfer, which crossing it performs. Absent for preparation transactions.
+    crossing: Option<u32>,
+    /// The transaction's current lifecycle state.
+    state: MigrationTxLifecycle,
+    /// The transactions that must be mined before this one can be built or broadcast.
+    depends_on: Vec<u32>,
+    /// The height at or after which this transaction is due to broadcast.
+    scheduled_height: u32,
+    /// Whether the wallet can act on this transaction right now.
+    ready: bool,
+    /// The action available now, when `ready` is true.
+    action: Option<MigrationTxAction>,
+    /// Why the transaction is not yet actionable, when it is waiting (and not already broadcast or
+    /// mined).
+    blocked_on: Option<MigrationTxBlocker>,
+    /// The transaction id, once broadcast (hex, big-endian display form).
+    txid: Option<String>,
+    /// The height it was mined at, once mined.
+    mined_height: Option<u32>,
+}
+
+/// Whether every id in `deps` names a transaction that is mined in `state`.
+fn deps_all_mined(state: &MigrationState, deps: &[MigrationTxId]) -> bool {
+    deps.iter().all(|d| {
+        state
+            .transactions
+            .iter()
+            .find(|t| t.id == *d)
+            .is_some_and(|t| matches!(t.state, MigrationTxState::Mined { .. }))
+    })
+}
+
+/// Builds the per-transaction status view for a migration at `target_height` (the height the next
+/// transaction would build at, i.e. `chain_tip + 1`), so a wallet can render progress and decide,
+/// deterministically and from persisted state alone, the next transaction to sign or broadcast.
+///
+/// A transaction is `ready` when the wallet can act on it now: a `Planned` placeholder whose
+/// dependencies are all mined can be built and signed; a `Signed` transaction whose dependencies are
+/// mined and whose scheduled height has arrived can be proved and broadcast. Otherwise a waiting
+/// transaction reports what it is `blocked_on` (its dependencies, or the schedule).
+pub(crate) fn migration_transactions(
+    state: &MigrationState,
+    target_height: u32,
+) -> Vec<MigrationTransactionStatus> {
+    state
+        .transactions
+        .iter()
+        .map(|t| {
+            let (kind, layer, crossing) = match t.kind {
+                MigrationTxKind::Preparation { layer, .. } => {
+                    (MigrationTxRole::Preparation, Some(layer as u32), None)
+                }
+                MigrationTxKind::Transfer { crossing } => {
+                    (MigrationTxRole::Transfer, None, Some(crossing as u32))
+                }
+            };
+            let deps_mined = deps_all_mined(state, &t.depends_on);
+            // `Planned`/`Expired` need building; `Signed`/`Proved` need broadcasting. In both cases a
+            // transaction is actionable only once its dependencies (the prior anchor bucket) are
+            // mined, and a broadcastable one only once it is also due.
+            let (lifecycle, ready, action, blocked_on) = match t.state {
+                MigrationTxState::Planned | MigrationTxState::Expired => {
+                    let lc = match t.state {
+                        MigrationTxState::Expired => MigrationTxLifecycle::Expired,
+                        _ => MigrationTxLifecycle::Planned,
+                    };
+                    if deps_mined {
+                        (lc, true, Some(MigrationTxAction::BuildAndSign), None)
+                    } else {
+                        (lc, false, None, Some(MigrationTxBlocker::Dependencies))
+                    }
+                }
+                MigrationTxState::Signed | MigrationTxState::Proved => {
+                    let lc = match t.state {
+                        MigrationTxState::Proved => MigrationTxLifecycle::Proved,
+                        _ => MigrationTxLifecycle::Signed,
+                    };
+                    if !deps_mined {
+                        (lc, false, None, Some(MigrationTxBlocker::Dependencies))
+                    } else if t.scheduled_height <= target_height {
+                        (lc, true, Some(MigrationTxAction::ProveAndBroadcast), None)
+                    } else {
+                        (lc, false, None, Some(MigrationTxBlocker::Schedule))
+                    }
+                }
+                MigrationTxState::Broadcast { .. } => {
+                    (MigrationTxLifecycle::Broadcast, false, None, None)
+                }
+                MigrationTxState::Mined { .. } => (MigrationTxLifecycle::Mined, false, None, None),
+            };
+            let txid = match t.state {
+                MigrationTxState::Broadcast { txid } => {
+                    let mut bytes = txid;
+                    bytes.reverse();
+                    Some(hex::encode(bytes))
+                }
+                _ => None,
+            };
+            let mined_height = match t.state {
+                MigrationTxState::Mined { height } => Some(height),
+                _ => None,
+            };
+            MigrationTransactionStatus {
+                id: t.id.0,
+                kind,
+                layer,
+                crossing,
+                state: lifecycle,
+                depends_on: t.depends_on.iter().map(|d| d.0).collect(),
+                scheduled_height: t.scheduled_height,
+                ready,
+                action,
+                blocked_on,
+                txid,
+                mined_height,
+            }
+        })
+        .collect()
 }
 
 /// The RPC error for a migration id that does not name the wallet's migration, or when no migration
