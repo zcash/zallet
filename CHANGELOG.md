@@ -17,6 +17,12 @@ be considered breaking changes.
     an optional `ivk` argument that exports the account's unified incoming
     viewing key instead.
 
+### Removed
+
+- The `migrate-zcashd-wallet --buffer-wallet-transactions` flag has been removed.
+  All wallet transactions are now always imported directly, so the flag no longer
+  has any effect.
+
 ### Changed
 
 - `zallet rpc help` is now answered locally instead of being sent to the
@@ -50,6 +56,12 @@ be considered breaking changes.
   in a single database transaction. A failure partway through the import can no
   longer leave the spending key stored (and exportable via `z_exportkey`) while
   the wallet has no account to scan for it.
+- `migrate-zcashd-wallet` now imports all of the wallet's transactions directly,
+  instead of relying on the post-import chain scan to recover them. The scan can
+  only re-derive transactions from the main-chain blocks it scans, so any
+  transaction that was never mined (for example a send that had not yet been
+  mined) or was recorded only against a non-main-chain block (a conflicted or
+  reorged transaction) was previously lost. These are now preserved.
 
 ## [0.1.0-beta.1] - 2026-07-12
 
