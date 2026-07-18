@@ -39,6 +39,10 @@
   - [JSON-RPC method status](zcashd/rpc_status.md)
   - [JSON-RPC altered semantics](zcashd/json_rpc.md)
 
+# Troubleshooting
+
+- [Troubleshooting](troubleshooting.md)
+
 # Operations
 
 - [Operating Zallet](operations/README.md)
