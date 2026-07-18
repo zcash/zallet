@@ -761,16 +761,19 @@ pub(crate) trait WalletRpc {
     /// Orchard pool to the Ironwood pool requires NU6.3). The pool pair is validated
     /// against that table and the enabling upgrade is required to be active.
     ///
-    /// NOTE: This is currently a scaffold. Inputs are validated, but the migration engine
-    /// is not yet wired in, so the call returns a "not implemented yet" error.
+    /// Builds and pre-signs the note-preparation transactions and persists the committed
+    /// migration; proving and broadcasting happen later via z_advancepoolmigration.
     ///
     /// # Arguments
+    /// - `account` (string or numeric, required): Either the UUID or the ZIP 32 account index
+    ///   of the account whose balance to migrate.
     /// - `from_pool` (string, required): The value pool to migrate funds from
     ///   ("sapling", "orchard", or "ironwood").
     /// - `to_pool` (string, required): The value pool to migrate funds to.
     #[method(name = "z_startpoolmigration")]
     async fn start_pool_migration(
         &self,
+        account: JsonValue,
         from_pool: String,
         to_pool: String,
     ) -> start_pool_migration::Response;
@@ -1272,10 +1275,18 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
 
     async fn start_pool_migration(
         &self,
+        account: JsonValue,
         from_pool: String,
         to_pool: String,
     ) -> start_pool_migration::Response {
-        start_pool_migration::call(self.wallet().await?.as_ref(), &from_pool, &to_pool)
+        start_pool_migration::call(
+            self.wallet().await?.as_ref(),
+            &self.keystore,
+            account,
+            &from_pool,
+            &to_pool,
+        )
+        .await
     }
 
     async fn preview_pool_migration(
@@ -1300,21 +1311,21 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         &self,
         migration_id: String,
     ) -> get_pool_migration_status::Response {
-        get_pool_migration_status::call(&migration_id)
+        get_pool_migration_status::call(self.wallet().await?.as_ref(), &migration_id)
     }
 
     async fn advance_pool_migration(
         &self,
         migration_id: String,
     ) -> advance_pool_migration::Response {
-        advance_pool_migration::call(&migration_id)
+        advance_pool_migration::call(self.wallet().await?.as_ref(), &migration_id)
     }
 
     async fn cancel_pool_migration(&self, migration_id: String) -> cancel_pool_migration::Response {
-        cancel_pool_migration::call(&migration_id)
+        cancel_pool_migration::call(self.wallet().await?.as_ref(), &migration_id)
     }
 
     async fn list_pool_migrations(&self) -> list_pool_migrations::Response {
-        list_pool_migrations::call()
+        list_pool_migrations::call(self.wallet().await?.as_ref())
     }
 }

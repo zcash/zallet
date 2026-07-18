@@ -4,27 +4,37 @@
 //! companion status, advance, cancel, and list methods) spread across sibling method
 //! modules. This module holds what they share: the pool-agnostic [`Pool`] type, the
 //! [`SUPPORTED_MIGRATIONS`] table that is the single extension point for new pool
-//! pairs, the stubbed plan/progress/phase shapes, and the input validation.
+//! pairs, the fixed migration identifier and pools, the plan/progress/phase response
+//! shapes and their mapping from the engine's state, and the input validation.
 //!
-//! Most of the surface is currently a SCAFFOLD: `z_startpoolmigration` and the
-//! companion status, advance, cancel, and list methods validate their inputs (pool
-//! parsing, the supported-pair table, and network-upgrade activation), but the call
-//! into the migration engine returns [`not_implemented`] instead of doing any work,
-//! because building, signing, scheduling, and persisting the migration transactions
-//! need engine slices that are still landing upstream. The exception is
-//! `z_previewpoolmigration` (see [`preview_pool_migration`](super::preview_pool_migration)),
-//! which is fully wired against the engine's planning slice. The engine crate
-//! (`zcash_pool_migration_backend`) is still evolving upstream, so nothing here
-//! depends on the shape of its final API beyond that planning entry point.
+//! `z_startpoolmigration` builds, pre-signs, and persists the migration; the status
+//! and list methods read the persisted state; cancel marks it cancelled. Proving and
+//! broadcasting the pre-signed transactions (`z_advancepoolmigration`) is the one step
+//! not yet wired into Zallet, because it needs the `pczt` prover and an Orchard proving
+//! key; until then a committed migration cannot make on-chain progress.
 
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
+use jsonrpsee::types::ErrorObjectOwned;
 use schemars::JsonSchema;
 use serde::Serialize;
 use zcash_client_backend::data_api::WalletRead;
+use zcash_pool_migration_backend::engine::{MigrationState, MigrationStatus, MigrationTxState};
 use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
 
 use crate::components::{database::DbConnection, json_rpc::server::LegacyCode};
+use crate::migrate::CommitFailure;
+
+/// The identifier of the wallet's pool migration. The store holds at most one migration at a time,
+/// so a single fixed identifier names it: `z_startpoolmigration` returns this, and the status,
+/// advance, and cancel methods accept it.
+pub(crate) const MIGRATION_ID: &str = "orchard-to-ironwood";
+
+/// The only supported migration is Orchard -> Ironwood, so a stored migration's pools and enabling
+/// upgrade are fixed rather than recorded per migration.
+pub(crate) const MIGRATION_FROM_POOL: Pool = Pool::Orchard;
+pub(crate) const MIGRATION_TO_POOL: Pool = Pool::Ironwood;
+pub(crate) const MIGRATION_ENABLING_UPGRADE: NetworkUpgrade = NetworkUpgrade::Nu6_3;
 
 /// Wire name of the Sapling value pool.
 const POOL_NAME_SAPLING: &str = "sapling";
@@ -32,11 +42,6 @@ const POOL_NAME_SAPLING: &str = "sapling";
 const POOL_NAME_ORCHARD: &str = "orchard";
 /// Wire name of the Ironwood value pool.
 const POOL_NAME_IRONWOOD: &str = "ironwood";
-
-/// Message returned wherever the scaffold would call into the migration engine. Kept
-/// as a single constant so every method reports the boundary identically.
-const NOT_IMPLEMENTED_MESSAGE: &str =
-    "pool migration is not yet implemented; this RPC surface is currently a scaffold";
 
 /// A Zcash shielded value pool that can take part in a pool-to-pool migration.
 ///
@@ -167,22 +172,7 @@ pub(crate) fn validate_migration_id(migration_id: &str) -> RpcResult<()> {
     Ok(())
 }
 
-/// Returns the not-implemented placeholder for a method, reported wherever the scaffold
-/// would call the migration engine.
-pub(crate) fn not_implemented<T>(method: &str) -> RpcResult<T> {
-    Err(LegacyCode::Misc.with_message(format!("{method}: {NOT_IMPLEMENTED_MESSAGE}")))
-}
-
 /// The lifecycle phase of a pool migration.
-///
-/// Part of the not-yet-implemented response shapes: the variants are documented in the
-/// `rpc.discover` schema but are only constructed once the migration engine is wired
-/// in, so the scaffold does not build any of them yet.
-#[expect(
-    dead_code,
-    reason = "scaffold response shape; variants are constructed once the migration \
-              engine is wired in"
-)]
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MigrationPhase {
@@ -194,6 +184,60 @@ pub(crate) enum MigrationPhase {
     Completed,
     /// The migration was cancelled before completing.
     Cancelled,
+}
+
+impl MigrationPhase {
+    /// The lifecycle phase corresponding to a stored migration's overall status.
+    pub(crate) fn from_status(status: MigrationStatus) -> Self {
+        match status {
+            MigrationStatus::Planning | MigrationStatus::Committed => MigrationPhase::Scheduled,
+            MigrationStatus::InProgress => MigrationPhase::InProgress,
+            MigrationStatus::Complete => MigrationPhase::Completed,
+            MigrationStatus::Failed => MigrationPhase::Cancelled,
+        }
+    }
+}
+
+/// Builds the response plan summary from the number of transactions a migration comprises.
+pub(crate) fn migration_plan(transaction_count: u32) -> MigrationPlan {
+    MigrationPlan { transaction_count }
+}
+
+/// Summarizes a migration's progress: how many of its transactions have been mined, out of the
+/// total the migration comprises.
+pub(crate) fn migration_progress(state: &MigrationState) -> MigrationProgress {
+    let total_transactions = state.transactions.len() as u32;
+    let completed_transactions = state
+        .transactions
+        .iter()
+        .filter(|t| matches!(t.state, MigrationTxState::Mined { .. }))
+        .count() as u32;
+    MigrationProgress {
+        completed_transactions,
+        total_transactions,
+    }
+}
+
+/// The RPC error for a migration id that does not name the wallet's migration, or when no migration
+/// is stored.
+pub(crate) fn no_such_migration() -> ErrorObjectOwned {
+    LegacyCode::InvalidParameter.with_static("no such migration")
+}
+
+/// Maps a migration build/commit failure to an RPC error.
+pub(crate) fn map_commit_failure(failure: CommitFailure) -> ErrorObjectOwned {
+    match failure {
+        CommitFailure::NothingToMigrate => LegacyCode::InvalidParameter
+            .with_static("the account has no spendable source-pool balance to migrate"),
+        CommitFailure::UnsupportedMultiLayer => LegacyCode::InvalidParameter
+            .with_static("this balance needs multi-layer preparation, which is not yet supported"),
+        CommitFailure::NoMigrationInProgress => {
+            LegacyCode::InvalidParameter.with_static("no migration is in progress")
+        }
+        CommitFailure::AlreadyInProgress => LegacyCode::InvalidParameter
+            .with_static("a migration is already in progress; cancel it before starting another"),
+        CommitFailure::Other(message) => LegacyCode::Misc.with_message(message),
+    }
 }
 
 /// The plan produced when a migration is scheduled.

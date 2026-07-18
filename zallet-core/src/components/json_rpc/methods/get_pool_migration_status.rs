@@ -1,4 +1,4 @@
-//! `z_getpoolmigrationstatus`: report the status of a pool migration (scaffold).
+//! `z_getpoolmigrationstatus`: report the status of a pool migration.
 
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
@@ -6,8 +6,13 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use super::pool_migration::{
-    MigrationPhase, MigrationProgress, Pool, not_implemented, validate_migration_id,
+    MIGRATION_ENABLING_UPGRADE, MIGRATION_FROM_POOL, MIGRATION_ID, MIGRATION_TO_POOL,
+    MigrationPhase, MigrationProgress, Pool, migration_progress, no_such_migration,
+    validate_migration_id,
 };
+use crate::components::database::DbConnection;
+use crate::components::json_rpc::server::LegacyCode;
+use crate::migrate::load_migration;
 
 /// Response to a `z_getpoolmigrationstatus` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -16,10 +21,6 @@ pub(crate) type ResultType = PoolMigrationStatus;
 pub(super) const PARAM_MIGRATION_ID_DESC: &str = "The identifier returned by z_startpoolmigration.";
 
 /// The status of a pool migration.
-///
-/// Describes the response shape for when the migration engine is wired in; the scaffold
-/// validates inputs and then returns a not-implemented error rather than constructing
-/// this value.
 #[derive(Clone, Debug, Serialize, Documented, JsonSchema)]
 pub(crate) struct PoolMigrationStatus {
     /// Opaque identifier for the migration.
@@ -36,7 +37,21 @@ pub(crate) struct PoolMigrationStatus {
     progress: MigrationProgress,
 }
 
-pub(crate) fn call(migration_id: &str) -> Response {
+pub(crate) fn call(wallet: &DbConnection, migration_id: &str) -> Response {
     validate_migration_id(migration_id)?;
-    not_implemented("z_getpoolmigrationstatus")
+    if migration_id != MIGRATION_ID {
+        return Err(no_such_migration());
+    }
+    let state = wallet
+        .with_raw_mut(|conn, _| load_migration(conn))
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+        .ok_or_else(no_such_migration)?;
+    Ok(PoolMigrationStatus {
+        migration_id: MIGRATION_ID.to_string(),
+        from_pool: MIGRATION_FROM_POOL,
+        to_pool: MIGRATION_TO_POOL,
+        enabling_upgrade: MIGRATION_ENABLING_UPGRADE.to_string(),
+        phase: MigrationPhase::from_status(state.status),
+        progress: migration_progress(&state),
+    })
 }
