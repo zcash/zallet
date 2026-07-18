@@ -37,12 +37,16 @@ use zcash_client_backend::data_api::WalletRead;
 use zcash_client_sqlite::{AccountUuid, WalletDb, util::SystemClock};
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_pool_migration_backend::engine::{
-    CommitError, MigrationBackend, MigrationError, MigrationState, MigrationStatus, MigrationTxId,
-    MigrationTxKind, MigrationTxState, PoolMigrationRead, PoolMigrationWrite,
-    commit_pending_preparation, commit_preparation, commit_transfers, plan_migration,
+    CommitError, MigrationBackend, MigrationError, MigrationState, MigrationTxId, MigrationTxKind,
+    MigrationTxState, PoolMigrationRead, PoolMigrationWrite, commit_pending_preparation,
+    commit_preparation, commit_transfers, plan_migration,
 };
+// The migration state machine lives in the engine (the mobile wallet drives it the same way); zallet
+// only performs the wallet I/O around the engine's decisions. The decision and transition logic are
+// methods on `MigrationState` (`next_step`, `mark_mined`, `mark_broadcast`, `is_terminal`, ...).
 use zcash_pool_migration_backend::note_splitting::{FeePolicy, Zip317FeePolicy};
 use zcash_pool_migration_backend::preparation::PREP_TX_ACTIONS;
+use zcash_pool_migration_backend::state::AdvanceStep;
 use zcash_pool_migration_backend::wallet::WalletMigration;
 use zcash_pool_migration_sqlite::PoolMigrations;
 use zcash_primitives::transaction::components::orchard::bundle_version_for_branch;
@@ -108,15 +112,6 @@ pub enum CommitFailure {
     AlreadyInProgress,
     /// Any other build/backend failure, rendered to a string.
     Other(String),
-}
-
-/// Whether a stored migration has reached a terminal status (complete or failed), so a new migration
-/// may replace it. A non-terminal migration is still in progress and must not be overwritten.
-pub fn is_terminal(state: &MigrationState) -> bool {
-    matches!(
-        state.status,
-        MigrationStatus::Complete | MigrationStatus::Failed
-    )
 }
 
 fn map_plan_error<E: fmt::Display>(err: MigrationError<E>) -> CommitFailure {
@@ -366,94 +361,29 @@ pub struct AdvanceOutcome {
     pub message: String,
 }
 
-/// Whether all of a migration's preparation transactions are mined.
-fn all_preparations_mined(state: &MigrationState) -> bool {
-    state
-        .transactions
-        .iter()
-        .filter(|t| matches!(t.kind, MigrationTxKind::Preparation { .. }))
-        .all(|t| matches!(t.state, MigrationTxState::Mined { .. }))
-}
-
-/// Whether every transaction in `depends_on` is mined.
-fn deps_mined(state: &MigrationState, depends_on: &[MigrationTxId]) -> bool {
-    depends_on.iter().all(|dep| {
-        state
-            .transactions
-            .iter()
-            .find(|t| t.id == *dep)
-            .map(|t| matches!(t.state, MigrationTxState::Mined { .. }))
-            .unwrap_or(false)
-    })
-}
-
-/// Whether a deferred preparation layer is ready to build: a multi-layer preparation records its
-/// later layers (`layer > 0`) as unbuilt placeholders, and one becomes buildable once its whole
-/// prior layer (its `depends_on`) is mined and its feeder notes are witnessable.
-fn has_ready_prep_layer(state: &MigrationState) -> bool {
-    state.transactions.iter().any(|t| {
-        matches!(t.kind, MigrationTxKind::Preparation { layer, .. } if layer > 0)
-            && matches!(t.state, MigrationTxState::Planned)
-            && deps_mined(state, &t.depends_on)
-    })
-}
-
-/// The index of the next transaction ready to prove and broadcast: pre-signed (`Signed`), its
-/// dependencies mined, and scheduled at or before `target_height`.
-fn next_broadcastable(state: &MigrationState, target_height: u32) -> Option<usize> {
-    state.transactions.iter().position(|t| {
-        matches!(t.state, MigrationTxState::Signed)
-            && t.scheduled_height <= target_height
-            && deps_mined(state, &t.depends_on)
-    })
-}
-
-/// Recomputes the overall migration status: complete once every transaction is mined, in progress
-/// once any has been broadcast or mined.
-fn recompute_status(state: &mut MigrationState) {
-    let all_mined = !state.transactions.is_empty()
-        && state
-            .transactions
-            .iter()
-            .all(|t| matches!(t.state, MigrationTxState::Mined { .. }));
-    let any_started = state.transactions.iter().any(|t| {
-        matches!(
-            t.state,
-            MigrationTxState::Broadcast { .. } | MigrationTxState::Mined { .. }
-        )
-    });
-    if all_mined {
-        state.status = MigrationStatus::Complete;
-    } else if any_started {
-        state.status = MigrationStatus::InProgress;
-    }
-}
-
 /// The txid bytes of a transaction, for recording its broadcast in the store.
 pub fn transaction_txid_bytes(tx: &Transaction) -> [u8; 32] {
     *tx.txid().as_ref()
 }
 
-/// Records that the migration transaction `tx_id` was broadcast with `txid`, recomputes the status,
-/// and persists the state.
+/// Records that the migration transaction `tx_id` was broadcast with `txid` (via the engine's state
+/// transition, which also recomputes the overall status), and persists the state.
 pub fn record_broadcast(
     conn: &mut Connection,
     state: &mut MigrationState,
     tx_id: MigrationTxId,
     txid: [u8; 32],
 ) -> Result<(), AdvanceError> {
-    if let Some(tx) = state.transactions.iter_mut().find(|t| t.id == tx_id) {
-        tx.state = MigrationTxState::Broadcast { txid };
-    }
-    recompute_status(state);
+    state.mark_broadcast(tx_id, txid);
     persist_migration(conn, state).map_err(|e| AdvanceError::Store(e.to_string()))
 }
 
 /// The blocking half of advancing a migration one step: load it, detect newly mined transactions,
-/// then either (a) prove+extract the next broadcastable transaction and return it for the caller to
-/// broadcast, (a.5) build the next preparation layer once its predecessor is mined (multi-layer
-/// preparations defer their later layers), (b) build the phase-2 transfers once the whole preparation
-/// is mined, or (c) report what it is waiting for. Runs inside the database write lock; the caller
+/// then ask the engine for the next step (`state::next_step`, the same decision the mobile wallet
+/// makes from state alone) and perform the wallet I/O it calls for: prove+extract the next
+/// broadcastable transaction (returned for the caller to broadcast), build+sign the next ready
+/// preparation layer, build+sign the transfers, or report what it is waiting for. zallet only does
+/// the I/O; the decision lives in the engine. Runs inside the database write lock; the caller
 /// broadcasts asynchronously. `tip` is the current chain tip; transactions build and become due at
 /// `tip + 1`.
 pub fn advance_blocking(
@@ -470,99 +400,102 @@ pub fn advance_blocking(
         .ok_or(AdvanceError::NoMigration)?;
 
     // Detect newly mined transactions: a broadcast transaction the wallet now sees at a height.
+    // Collect the (id, height) pairs while the wallet is borrowed, then apply the engine's mining
+    // transition (which recomputes the overall status).
+    let mut newly_mined: Vec<(MigrationTxId, u32)> = Vec::new();
     {
         let wallet = WalletDb::from_connection(&mut *conn, *network, SystemClock, OsRng);
-        for tx in state.transactions.iter_mut() {
+        for tx in state.transactions.iter() {
             if let MigrationTxState::Broadcast { txid } = tx.state {
                 if let Some(height) = wallet
                     .get_tx_height(TxId::from_bytes(txid))
                     .map_err(|e| AdvanceError::Store(e.to_string()))?
                 {
-                    tx.state = MigrationTxState::Mined {
-                        height: u32::from(height),
-                    };
+                    newly_mined.push((tx.id, u32::from(height)));
                 }
             }
         }
     }
-    recompute_status(&mut state);
-
-    // (a) Broadcast the next ready transaction.
-    if let Some(index) = next_broadcastable(&state, target_height) {
-        let bytes = state.transactions[index].pczt.clone().ok_or_else(|| {
-            AdvanceError::Store("a signed transaction is missing its PCZT".into())
-        })?;
-        let tx = prove_and_extract(network, BlockHeight::from(tip), &bytes)
-            .map_err(AdvanceError::Prove)?;
-        let tx_id = state.transactions[index].id;
-        let kind = match state.transactions[index].kind {
-            MigrationTxKind::Preparation { .. } => "preparation",
-            MigrationTxKind::Transfer { .. } => "transfer",
-        };
-        return Ok(AdvanceOutcome {
-            state,
-            to_broadcast: Some((tx, tx_id)),
-            message: format!("broadcasting a {kind} transaction"),
-        });
+    for (id, height) in newly_mined {
+        state.mark_mined(id, height);
     }
 
-    // (a.5) Build the next preparation layer once its predecessor is mined. A multi-layer preparation
-    // defers its later layers (their feeder notes are witnessable only after the prior layer mines);
-    // building the next ready layer turns its transactions into broadcastable `Signed` ones for a
-    // later step. This runs only after (a) finds nothing to broadcast, i.e. the current layer's
-    // transactions are all broadcast and mined.
-    if has_ready_prep_layer(&state) {
-        let mut updated = commit_pending_preparation_over_wallet(
-            conn,
-            network,
-            account,
-            usk,
-            target_height,
-            state.clone(),
-        )
-        .map_err(AdvanceError::Commit)?;
-        recompute_status(&mut updated);
-        persist_migration(conn, &updated).map_err(|e| AdvanceError::Store(e.to_string()))?;
-        return Ok(AdvanceOutcome {
-            state: updated,
-            to_broadcast: None,
-            message: "built the next preparation layer".into(),
-        });
+    // Decide the next step from state alone (the same decision the mobile wallet makes), then perform
+    // the wallet I/O it calls for.
+    match state.next_step(target_height) {
+        // Prove and extract the next ready transaction; the caller broadcasts it.
+        AdvanceStep::Broadcast { id } => {
+            let tx_ref = state
+                .transactions
+                .iter()
+                .find(|t| t.id == id)
+                .ok_or_else(|| AdvanceError::Store("the next transaction is missing".into()))?;
+            let bytes = tx_ref.pczt.clone().ok_or_else(|| {
+                AdvanceError::Store("a signed transaction is missing its PCZT".into())
+            })?;
+            let kind = match tx_ref.kind {
+                MigrationTxKind::Preparation { .. } => "preparation",
+                MigrationTxKind::Transfer { .. } => "transfer",
+            };
+            let tx = prove_and_extract(network, BlockHeight::from(tip), &bytes)
+                .map_err(AdvanceError::Prove)?;
+            Ok(AdvanceOutcome {
+                state,
+                to_broadcast: Some((tx, id)),
+                message: format!("broadcasting a {kind} transaction"),
+            })
+        }
+        // Build and pre-sign the next ready preparation layer, whose predecessor has now mined so its
+        // feeder notes are witnessable. This turns its transactions into broadcastable ones.
+        AdvanceStep::BuildPreparationLayer { layer } => {
+            let mut updated = commit_pending_preparation_over_wallet(
+                conn,
+                network,
+                account,
+                usk,
+                target_height,
+                state,
+            )
+            .map_err(AdvanceError::Commit)?;
+            updated.recompute_status();
+            persist_migration(conn, &updated).map_err(|e| AdvanceError::Store(e.to_string()))?;
+            Ok(AdvanceOutcome {
+                state: updated,
+                to_broadcast: None,
+                message: format!("built preparation layer {layer}"),
+            })
+        }
+        // Build and pre-sign the transfers, now that the whole preparation is mined.
+        AdvanceStep::BuildTransfers => {
+            let mut updated =
+                commit_transfers_over_wallet(conn, network, account, usk, target_height, state)
+                    .map_err(AdvanceError::Commit)?;
+            updated.recompute_status();
+            persist_migration(conn, &updated).map_err(|e| AdvanceError::Store(e.to_string()))?;
+            Ok(AdvanceOutcome {
+                state: updated,
+                to_broadcast: None,
+                message: "built the transfer transactions".into(),
+            })
+        }
+        // Nothing to build or broadcast this step: persist the mining updates and report progress.
+        AdvanceStep::Waiting | AdvanceStep::Complete => {
+            persist_migration(conn, &state).map_err(|e| AdvanceError::Store(e.to_string()))?;
+            let pending = state
+                .transactions
+                .iter()
+                .filter(|t| !matches!(t.state, MigrationTxState::Mined { .. }))
+                .count();
+            let message = if pending == 0 {
+                "the migration is complete".to_string()
+            } else {
+                format!("waiting for {pending} transaction(s) to mine")
+            };
+            Ok(AdvanceOutcome {
+                state,
+                to_broadcast: None,
+                message,
+            })
+        }
     }
-
-    // (b) Build the phase-2 transfers once every preparation is mined.
-    let has_unbuilt_transfers = state.transactions.iter().any(|t| {
-        matches!(t.kind, MigrationTxKind::Transfer { .. })
-            && matches!(t.state, MigrationTxState::Planned)
-    });
-    if all_preparations_mined(&state) && has_unbuilt_transfers {
-        let mut updated =
-            commit_transfers_over_wallet(conn, network, account, usk, target_height, state.clone())
-                .map_err(AdvanceError::Commit)?;
-        recompute_status(&mut updated);
-        persist_migration(conn, &updated).map_err(|e| AdvanceError::Store(e.to_string()))?;
-        return Ok(AdvanceOutcome {
-            state: updated,
-            to_broadcast: None,
-            message: "built the transfer transactions".into(),
-        });
-    }
-
-    // (c) Nothing to do this step: persist the mining updates and report what it is waiting for.
-    persist_migration(conn, &state).map_err(|e| AdvanceError::Store(e.to_string()))?;
-    let pending = state
-        .transactions
-        .iter()
-        .filter(|t| !matches!(t.state, MigrationTxState::Mined { .. }))
-        .count();
-    let message = if pending == 0 {
-        "the migration is complete".to_string()
-    } else {
-        format!("waiting for {pending} transaction(s) to mine")
-    };
-    Ok(AdvanceOutcome {
-        state,
-        to_broadcast: None,
-        message,
-    })
 }

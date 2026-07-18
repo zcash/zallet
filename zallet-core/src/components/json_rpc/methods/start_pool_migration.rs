@@ -20,7 +20,7 @@ use crate::components::json_rpc::server::LegacyCode;
 use crate::components::json_rpc::utils::parse_account_parameter;
 use crate::components::keystore::KeyStore;
 use crate::migrate::{
-    CommitFailure, commit_preparation_over_wallet, is_terminal, load_migration, persist_migration,
+    CommitFailure, commit_preparation_over_wallet, load_migration, persist_migration,
 };
 
 /// Response to a `z_startpoolmigration` RPC request.
@@ -79,7 +79,7 @@ pub(crate) async fn call(
             if let Some(existing) =
                 load_migration(conn).map_err(|e| CommitFailure::Other(e.to_string()))?
             {
-                if !is_terminal(&existing) {
+                if !existing.is_terminal() {
                     return Err(CommitFailure::AlreadyInProgress);
                 }
             }

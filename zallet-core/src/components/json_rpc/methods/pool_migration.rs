@@ -23,7 +23,10 @@ use zcash_client_backend::data_api::{Account, WalletRead};
 use zcash_client_sqlite::AccountUuid;
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_pool_migration_backend::engine::{
-    MigrationState, MigrationStatus, MigrationTxId, MigrationTxKind, MigrationTxState,
+    MigrationState, MigrationStatus, MigrationTxKind, MigrationTxState,
+};
+use zcash_pool_migration_backend::state::{
+    Blocker, NextAction, TransactionStatus as EngineTransactionStatus,
 };
 use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
 
@@ -347,102 +350,66 @@ pub(crate) struct MigrationTransactionStatus {
     mined_height: Option<u32>,
 }
 
-/// Whether every id in `deps` names a transaction that is mined in `state`.
-fn deps_all_mined(state: &MigrationState, deps: &[MigrationTxId]) -> bool {
-    deps.iter().all(|d| {
-        state
-            .transactions
-            .iter()
-            .find(|t| t.id == *d)
-            .is_some_and(|t| matches!(t.state, MigrationTxState::Mined { .. }))
-    })
+/// Maps one engine transaction status to the JSON-RPC shape: flattens the engine's `kind` into
+/// `layer`/`crossing`, maps the lifecycle and reason enums to their serde-friendly counterparts, and
+/// renders the txid as a big-endian hex string.
+fn to_rpc_status(es: EngineTransactionStatus) -> MigrationTransactionStatus {
+    let (kind, layer, crossing) = match es.kind {
+        MigrationTxKind::Preparation { layer, .. } => {
+            (MigrationTxRole::Preparation, Some(layer as u32), None)
+        }
+        MigrationTxKind::Transfer { crossing } => {
+            (MigrationTxRole::Transfer, None, Some(crossing as u32))
+        }
+    };
+    let state = match es.state {
+        MigrationTxState::Planned => MigrationTxLifecycle::Planned,
+        MigrationTxState::Signed => MigrationTxLifecycle::Signed,
+        MigrationTxState::Proved => MigrationTxLifecycle::Proved,
+        MigrationTxState::Broadcast { .. } => MigrationTxLifecycle::Broadcast,
+        MigrationTxState::Mined { .. } => MigrationTxLifecycle::Mined,
+        MigrationTxState::Expired => MigrationTxLifecycle::Expired,
+    };
+    let action = es.action.map(|a| match a {
+        NextAction::BuildAndSign => MigrationTxAction::BuildAndSign,
+        NextAction::ProveAndBroadcast => MigrationTxAction::ProveAndBroadcast,
+    });
+    let blocked_on = es.blocked_on.map(|b| match b {
+        Blocker::Dependencies => MigrationTxBlocker::Dependencies,
+        Blocker::Schedule => MigrationTxBlocker::Schedule,
+    });
+    let txid = es.txid.map(|mut bytes| {
+        bytes.reverse();
+        hex::encode(bytes)
+    });
+    MigrationTransactionStatus {
+        id: es.id.0,
+        kind,
+        layer,
+        crossing,
+        state,
+        depends_on: es.depends_on.iter().map(|d| d.0).collect(),
+        scheduled_height: es.scheduled_height,
+        ready: es.ready,
+        action,
+        blocked_on,
+        txid,
+        mined_height: es.mined_height,
+    }
 }
 
-/// Builds the per-transaction status view for a migration at `target_height` (the height the next
-/// transaction would build at, i.e. `chain_tip + 1`), so a wallet can render progress and decide,
-/// deterministically and from persisted state alone, the next transaction to sign or broadcast.
-///
-/// A transaction is `ready` when the wallet can act on it now: a `Planned` placeholder whose
-/// dependencies are all mined can be built and signed; a `Signed` transaction whose dependencies are
-/// mined and whose scheduled height has arrived can be proved and broadcast. Otherwise a waiting
-/// transaction reports what it is `blocked_on` (its dependencies, or the schedule).
+/// Builds the per-transaction status view for the RPC at `target_height` (the height the next
+/// transaction would build at, i.e. `chain_tip + 1`), by mapping the engine's shared
+/// `transaction_statuses` decision logic into the JSON-RPC shape. The engine owns the ready/blocked
+/// rules so a wallet (the mobile wallet, or zallet here) renders the same next-actions from state.
 pub(crate) fn migration_transactions(
     state: &MigrationState,
     target_height: u32,
 ) -> Vec<MigrationTransactionStatus> {
     state
-        .transactions
-        .iter()
-        .map(|t| {
-            let (kind, layer, crossing) = match t.kind {
-                MigrationTxKind::Preparation { layer, .. } => {
-                    (MigrationTxRole::Preparation, Some(layer as u32), None)
-                }
-                MigrationTxKind::Transfer { crossing } => {
-                    (MigrationTxRole::Transfer, None, Some(crossing as u32))
-                }
-            };
-            let deps_mined = deps_all_mined(state, &t.depends_on);
-            // `Planned`/`Expired` need building; `Signed`/`Proved` need broadcasting. In both cases a
-            // transaction is actionable only once its dependencies (the prior anchor bucket) are
-            // mined, and a broadcastable one only once it is also due.
-            let (lifecycle, ready, action, blocked_on) = match t.state {
-                MigrationTxState::Planned | MigrationTxState::Expired => {
-                    let lc = match t.state {
-                        MigrationTxState::Expired => MigrationTxLifecycle::Expired,
-                        _ => MigrationTxLifecycle::Planned,
-                    };
-                    if deps_mined {
-                        (lc, true, Some(MigrationTxAction::BuildAndSign), None)
-                    } else {
-                        (lc, false, None, Some(MigrationTxBlocker::Dependencies))
-                    }
-                }
-                MigrationTxState::Signed | MigrationTxState::Proved => {
-                    let lc = match t.state {
-                        MigrationTxState::Proved => MigrationTxLifecycle::Proved,
-                        _ => MigrationTxLifecycle::Signed,
-                    };
-                    if !deps_mined {
-                        (lc, false, None, Some(MigrationTxBlocker::Dependencies))
-                    } else if t.scheduled_height <= target_height {
-                        (lc, true, Some(MigrationTxAction::ProveAndBroadcast), None)
-                    } else {
-                        (lc, false, None, Some(MigrationTxBlocker::Schedule))
-                    }
-                }
-                MigrationTxState::Broadcast { .. } => {
-                    (MigrationTxLifecycle::Broadcast, false, None, None)
-                }
-                MigrationTxState::Mined { .. } => (MigrationTxLifecycle::Mined, false, None, None),
-            };
-            let txid = match t.state {
-                MigrationTxState::Broadcast { txid } => {
-                    let mut bytes = txid;
-                    bytes.reverse();
-                    Some(hex::encode(bytes))
-                }
-                _ => None,
-            };
-            let mined_height = match t.state {
-                MigrationTxState::Mined { height } => Some(height),
-                _ => None,
-            };
-            MigrationTransactionStatus {
-                id: t.id.0,
-                kind,
-                layer,
-                crossing,
-                state: lifecycle,
-                depends_on: t.depends_on.iter().map(|d| d.0).collect(),
-                scheduled_height: t.scheduled_height,
-                ready,
-                action,
-                blocked_on,
-                txid,
-                mined_height,
-            }
-        })
+        .transaction_statuses(target_height)
+        .into_iter()
+        .map(to_rpc_status)
         .collect()
 }
 
