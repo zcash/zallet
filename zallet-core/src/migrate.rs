@@ -101,9 +101,6 @@ impl MigrationBackend for SpendableSnapshot {
 pub enum CommitFailure {
     /// The account has no spendable source-pool balance to migrate.
     NothingToMigrate,
-    /// The plan needs multi-layer preparation, which the two-phase commit path does not yet
-    /// support.
-    UnsupportedMultiLayer,
     /// There is no committed migration to act on (nothing was loaded from the store).
     NoMigrationInProgress,
     /// A migration is already in progress; starting another would overwrite its pre-signed
@@ -134,10 +131,14 @@ fn map_plan_error<E: fmt::Display>(err: MigrationError<E>) -> CommitFailure {
 
 fn map_commit_error<E: fmt::Display>(err: CommitError<E>) -> CommitFailure {
     match err {
-        CommitError::UnsupportedMultiLayer => CommitFailure::UnsupportedMultiLayer,
         CommitError::NoMigrationInProgress => CommitFailure::NoMigrationInProgress,
         CommitError::Backend(e) => CommitFailure::Other(e.to_string()),
         CommitError::Build(m) => CommitFailure::Other(m),
+        // Multi-layer preparation is supported (committed layer by layer), so the engine no longer
+        // rejects it; any residual variant maps to a generic build failure.
+        CommitError::UnsupportedMultiLayer => {
+            CommitFailure::Other("unexpected multi-layer commit rejection".into())
+        }
     }
 }
 

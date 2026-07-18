@@ -1,18 +1,15 @@
 //! `z_previewpoolmigration`: preview the migration plan for a pool migration.
 //!
-//! Unlike the rest of the pool-migration surface (which is still a scaffold; see
-//! [`pool_migration`](super::pool_migration)), this method is fully wired: it enumerates the
-//! account's spendable source-pool (Orchard) notes and runs the backend-agnostic migration
-//! engine's PLANNING slice (`zcash_pool_migration_backend::engine::plan_migration`) to show how
-//! that balance would be decomposed into the self-funding notes that cross the Orchard -> Ironwood
-//! turnstile, when each note's transfer is scheduled to broadcast, and when it expires.
+//! This method enumerates the account's spendable source-pool (Orchard) notes and runs the
+//! backend-agnostic migration engine's PLANNING slice
+//! (`zcash_pool_migration_backend::engine::plan_migration`) to show how that balance would be
+//! decomposed into the self-funding notes that cross the Orchard -> Ironwood turnstile, when each
+//! note's transfer is scheduled to broadcast, and when it expires.
 //!
 //! It is READ-ONLY: it computes and returns a plan but schedules, builds, proves, and broadcasts
-//! nothing. Actually carrying out a migration needs the (still-unreleased) engine `commit` and
-//! reconcile slices that build, pre-sign, and persist the PCZTs, so that path stays behind
-//! [`not_implemented`](super::pool_migration::not_implemented) in `z_startpoolmigration`. This
-//! preview is the achievable planning slice today, and the preview a wallet shows the user for
-//! consent (ZIP 318 requires consent to the pool-crossing amounts before any funds leave the pool).
+//! nothing. `z_startpoolmigration` commits the plan (building and pre-signing the PCZTs) and
+//! `z_advancepoolmigration` drives it. This preview is the plan a wallet shows the user for consent
+//! (ZIP 318 requires consent to the pool-crossing amounts before any funds leave the pool).
 
 use documented::Documented;
 use jsonrpsee::core::{JsonValue, RpcResult};

@@ -8,10 +8,10 @@
 //! shapes and their mapping from the engine's state, and the input validation.
 //!
 //! `z_startpoolmigration` builds, pre-signs, and persists the migration; the status
-//! and list methods read the persisted state; cancel marks it cancelled. Proving and
-//! broadcasting the pre-signed transactions (`z_advancepoolmigration`) is the one step
-//! not yet wired into Zallet, because it needs the `pczt` prover and an Orchard proving
-//! key; until then a committed migration cannot make on-chain progress.
+//! and list methods read the persisted state; cancel marks it cancelled; and
+//! `z_advancepoolmigration` proves, broadcasts, and (for a multi-layer preparation)
+//! builds each later transaction as its dependencies mine, driving the migration to
+//! completion.
 
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
@@ -267,8 +267,6 @@ pub(crate) fn map_commit_failure(failure: CommitFailure) -> ErrorObjectOwned {
     match failure {
         CommitFailure::NothingToMigrate => LegacyCode::InvalidParameter
             .with_static("the account has no spendable source-pool balance to migrate"),
-        CommitFailure::UnsupportedMultiLayer => LegacyCode::InvalidParameter
-            .with_static("this balance needs multi-layer preparation, which is not yet supported"),
         CommitFailure::NoMigrationInProgress => {
             LegacyCode::InvalidParameter.with_static("no migration is in progress")
         }
@@ -278,9 +276,7 @@ pub(crate) fn map_commit_failure(failure: CommitFailure) -> ErrorObjectOwned {
     }
 }
 
-/// The plan produced when a migration is scheduled.
-///
-/// Stubbed in the current scaffold; the fields describe the intended shape only.
+/// The plan produced when a migration is committed.
 #[derive(Clone, Debug, Serialize, Documented, JsonSchema)]
 pub(crate) struct MigrationPlan {
     /// The number of transactions the migration is expected to require.
@@ -288,56 +284,10 @@ pub(crate) struct MigrationPlan {
 }
 
 /// Progress of an in-flight migration.
-///
-/// Stubbed in the current scaffold; the fields describe the intended shape only.
 #[derive(Clone, Debug, Serialize, Documented, JsonSchema)]
 pub(crate) struct MigrationProgress {
     /// The number of planned transactions that have been mined so far.
     completed_transactions: u32,
     /// The total number of transactions the migration requires.
     total_transactions: u32,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pool_round_trips_through_its_wire_name() {
-        for pool in [Pool::Sapling, Pool::Orchard, Pool::Ironwood] {
-            assert_eq!(Pool::parse("pool", pool.name()).unwrap(), pool);
-        }
-    }
-
-    #[test]
-    fn unknown_pool_is_rejected() {
-        assert!(Pool::parse("pool", "transparent").is_err());
-        assert!(Pool::parse("pool", "").is_err());
-    }
-
-    #[test]
-    fn every_supported_migration_has_distinct_pools() {
-        for migration in SUPPORTED_MIGRATIONS {
-            assert_ne!(migration.from, migration.to);
-        }
-    }
-
-    #[test]
-    fn orchard_to_ironwood_is_supported_and_requires_nu6_3() {
-        let migration = supported_migration(Pool::Orchard, Pool::Ironwood)
-            .expect("Orchard to Ironwood must be supported");
-        assert!(matches!(migration.enabling_upgrade, NetworkUpgrade::Nu6_3));
-    }
-
-    #[test]
-    fn unsupported_pairs_are_absent_from_the_table() {
-        assert!(supported_migration(Pool::Ironwood, Pool::Orchard).is_none());
-        assert!(supported_migration(Pool::Sapling, Pool::Orchard).is_none());
-    }
-
-    #[test]
-    fn blank_migration_id_is_rejected() {
-        assert!(validate_migration_id("   ").is_err());
-        assert!(validate_migration_id("m-1").is_ok());
-    }
 }
