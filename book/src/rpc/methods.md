@@ -151,6 +151,31 @@ instead, or you may lose access to funds.
 - `address` (string, required) The Sapling payment address corresponding to the
   spending key to export.
 
+## `z_exportviewingkey`
+
+*Only available in wallet builds of Zallet.*
+
+Reveals the viewing key corresponding to 'zaddr'.
+
+#### Arguments
+
+- `zaddr` (string, required) The Sapling payment address or unified
+  address.
+- `ivk` (boolean, optional, default=`false`) When `true`, export the
+  unified incoming viewing key (UIVK) for the account holding `zaddr`
+  instead of the full viewing key.
+
+#### Returns
+A string containing the viewing key:
+- For a Sapling payment address, the Sapling extended full viewing key
+  (`zxviews…`).
+- For a unified address, the unified full viewing key (`uview…`) of the
+  account holding the address.
+- When `ivk` is `true`, the unified incoming viewing key (`uivk…`) of
+  the account holding the address, for either address kind. Note that
+  a UIVK grants incoming viewing capability for every pool in the
+  account, even when `zaddr` is a Sapling address.
+
 ## `z_getaccount`
 
 Returns details about the given account.
