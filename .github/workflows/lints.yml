@@ -8,6 +8,12 @@ on:
 
 permissions: {}
 
+# Cancel superseded runs: a fresh push to a PR aborts the PR's in-flight run.
+# `main` pushes are never cancelled, so every landed commit is fully tested.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   clippy:
     name: Clippy (MSRV)
