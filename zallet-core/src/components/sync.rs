@@ -886,12 +886,13 @@ async fn data_requests<C: Chain>(
                     }
 
                     info!("Getting status of {txid}");
-                    let status = chain_view
-                        .get_transaction_status(txid)
-                        .await
-                        .map_err(SyncError::Chain)?;
-
-                    db_data.set_transaction_status(txid, status)?;
+                    match chain_view.get_transaction_status(txid).await {
+                        Ok(status) => db_data.set_transaction_status(txid, status)?,
+                        // Invalid data from the chain source indicates a bug, corruption,
+                        // or a version mismatch; retrying cannot help.
+                        Err(e @ ChainError::InvalidData(_)) => return Err(SyncError::Chain(e)),
+                        Err(e) => warn!("Failed to get status of {txid} (will retry): {e}"),
+                    }
                 }
                 TransactionDataRequest::Enhancement(txid) => {
                     if txid.is_null() {
@@ -899,23 +900,28 @@ async fn data_requests<C: Chain>(
                     }
 
                     info!("Enhancing {txid}");
-                    if let Some(tx) = chain_view
-                        .get_transaction(txid)
-                        .await
-                        .map_err(SyncError::Chain)?
-                    {
-                        // TODO: Route individual-transaction scanning through the batch
-                        // decryptor (`Handle::queue_tx`) once a single-tx store path
-                        // exists. See zcash/zallet#477.
-                        decrypt_and_store_transaction(
-                            params,
-                            db_data,
-                            tx.inner(),
-                            tx.mined_height(),
-                        )?;
-                    } else {
-                        db_data
-                            .set_transaction_status(txid, TransactionStatus::TxidNotRecognized)?;
+                    match chain_view.get_transaction(txid).await {
+                        Ok(Some(tx)) => {
+                            // TODO: Route individual-transaction scanning through the batch
+                            // decryptor (`Handle::queue_tx`) once a single-tx store path
+                            // exists. See zcash/zallet#477.
+                            decrypt_and_store_transaction(
+                                params,
+                                db_data,
+                                tx.inner(),
+                                tx.mined_height(),
+                            )?;
+                        }
+                        Ok(None) => {
+                            db_data.set_transaction_status(
+                                txid,
+                                TransactionStatus::TxidNotRecognized,
+                            )?;
+                        }
+                        // Invalid data from the chain source indicates a bug, corruption,
+                        // or a version mismatch; retrying cannot help.
+                        Err(e @ ChainError::InvalidData(_)) => return Err(SyncError::Chain(e)),
+                        Err(e) => warn!("Failed to enhance {txid} (will retry): {e}"),
                     }
                 }
                 // With `spend-index`, spend detection uses `GetSpendingTx` (below) and any
