@@ -190,6 +190,8 @@ err-keystore-already-initialized = Keystore age recipients already initialized
 err-keystore-key-material-mismatch =
     Decrypted key material does not match the fingerprint it is stored under. The wallet
     database is corrupted or has been tampered with.
+err-keystore-incorrect-passphrase = The wallet passphrase entered was incorrect.
+err-keystore-timeout-too-large = The requested unlock timeout is too large.
 err-wallet-locked = Wallet is locked
 
 ## Account errors

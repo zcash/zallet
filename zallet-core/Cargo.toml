@@ -38,6 +38,8 @@ sha2.workspace = true
 
 # Key storage
 age.workspace = true
+# Enables zeroize-on-drop for the native age identity secret keys held by `age`.
+x25519-dalek.workspace = true
 bip0039.workspace = true
 
 # Localization

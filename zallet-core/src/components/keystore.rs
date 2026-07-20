@@ -314,7 +314,14 @@ impl KeyStore {
         &self,
         passphrase: age::secrecy::SecretString,
         timeout: u64,
-    ) -> bool {
+    ) -> Result<(), KeystoreError> {
+        // Compute the absolute re-lock deadline up front, rejecting timeouts so large
+        // that the addition would overflow `SystemTime` (which would otherwise panic).
+        let duration = Duration::from_secs(timeout);
+        let relock_at = SystemTime::now()
+            .checked_add(duration)
+            .ok_or(KeystoreError::TimeoutTooLarge)?;
+
         // Prepare a callback that only responds to passphrase requests.
         #[derive(Clone)]
         struct PassphraseCallbacks(age::secrecy::SecretString);
@@ -336,12 +343,12 @@ impl KeyStore {
             .await
         {
             Ok(Some(identity_file)) => identity_file,
-            _ => return false,
+            _ => return Err(KeystoreError::IncorrectPassphrase),
         };
 
         let decrypted_identities = match identity_file.into_identities() {
             Ok(identities) => identities,
-            Err(_) => return false,
+            Err(_) => return Err(KeystoreError::IncorrectPassphrase),
         };
 
         // If there is an existing relock task, abort it so we don't race while writing
@@ -357,17 +364,16 @@ impl KeyStore {
         *self.identities.write().await = decrypted_identities;
 
         // Start a task to relock the keystore after the given timeout.
-        let duration = Duration::from_secs(timeout);
         let identities = self.identities.clone();
         *relock_task = Some((
-            SystemTime::now() + duration,
+            relock_at,
             crate::spawn!("Keystore relock", async move {
                 time::sleep(duration).await;
                 identities.write().await.clear();
             }),
         ));
 
-        true
+        Ok(())
     }
 
     /// Clears the in-memory cache of age identities, locking the keystore.
