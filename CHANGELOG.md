@@ -36,6 +36,17 @@ be considered breaking changes.
   methods are currently a scaffold: they validate their inputs (pool parsing, the
   supported-pair table, and network-upgrade activation) but the migration engine
   is not yet wired in, so they return a "not implemented yet" error.
+- An external-signer surface for the pool migration (wallet build), so a
+  hardware or offline signer can sign a migration's transactions out of band:
+  `z_startpoolmigration` takes an `external_signer` flag that builds the
+  preparation unsigned and returns its PCZTs; `z_buildpoolmigrationtransfers`
+  builds the phase-2 transfers unsigned once the preparation is mined;
+  `z_applypoolmigrationsignature` applies a signed PCZT to its transaction
+  (moving it to signed, after which `z_advancepoolmigration` proves and
+  broadcasts it unchanged); and `z_signpoolmigrationpczt` signs a migration PCZT
+  with the account's spend key for offline / air-gapped signing. Building still
+  runs in process (it needs only the viewing key and witnesses); only the
+  signature is external.
 - `z_previewpoolmigration` (wallet build), the fully-wired planning preview of
   the pool-migration surface. It enumerates the account's spendable source-pool
   notes and runs the engine's `plan_migration` to return the proposed plan for
