@@ -135,6 +135,43 @@ one step per call, so a caller polls it.
 - `migration_id` (string, required): The identifier returned by
   `z_startpoolmigration`.
 
+## `z_applypoolmigrationsignature`
+
+*Only available in wallet builds of Zallet.*
+
+Applies an externally-signed PCZT to a migration transaction.
+
+Stores the signed PCZT an external (hardware or offline) signer returned against the
+migration transaction it was built for, moving that transaction from awaiting-signature
+to signed so z_advancepoolmigration can prove and broadcast it. The PCZT is matched to
+its transaction by the id returned alongside the unsigned PCZT.
+
+#### Arguments
+- `migration_id` (string, required): The identifier returned by
+  `z_startpoolmigration`.
+- `transaction_id` (numeric, required): The id of the migration transaction the signed
+  PCZT is for, from the `unsigned_transactions` list.
+- `pczt` (string, required): The signed migration PCZT, base64 encoded.
+
+## `z_buildpoolmigrationtransfers`
+
+*Only available in wallet builds of Zallet.*
+
+Builds a migration's phase-2 transfers UNSIGNED, for an external signer.
+
+The external-signer counterpart of the transfer building that z_advancepoolmigration
+does in process: it detects newly mined preparation transactions and, once the whole
+preparation is mined, builds the transfers but leaves them unsigned, returning their
+PCZTs in `unsigned_transactions` to sign on the device and apply back with
+z_applypoolmigrationsignature. An external migration uses this rather than
+z_advancepoolmigration for the preparation-to-transfers step.
+
+#### Arguments
+- `account` (string or numeric, required): The UUID or ZIP 32 index of the account
+  whose migration transfers to build.
+- `migration_id` (string, required): The identifier returned by
+  `z_startpoolmigration`.
+
 ## `z_cancelpoolmigration`
 
 *Only available in wallet builds of Zallet.*
@@ -678,6 +715,23 @@ An object matching `zcashd`'s `z_shieldcoinbase` shape:
 - `shieldingValue` (numeric, ZEC): Total value being shielded.
 - `opid` (string): Operation id.
 
+## `z_signpoolmigrationpczt`
+
+*Only available in wallet builds of Zallet.*
+
+Signs a migration PCZT with the account's spend authorization.
+
+For offline / air-gapped signing, and the software stand-in for on-device signing: it
+takes an unsigned migration PCZT (from z_startpoolmigration with external_signer, or
+z_buildpoolmigrationtransfers), adds only the account's Orchard spend-authorization
+signature, and returns the signed PCZT to apply with z_applypoolmigrationsignature. It
+does not prove, extract, or broadcast. A hardware wallet signs on the device instead.
+
+#### Arguments
+- `account` (string or numeric, required): The UUID or ZIP 32 index of the account
+  whose spend key signs the PCZT.
+- `pczt` (string, required): The unsigned migration PCZT, base64 encoded.
+
 ## `z_startpoolmigration`
 
 *Only available in wallet builds of Zallet.*
@@ -698,6 +752,11 @@ migration; proving and broadcasting happen later via z_advancepoolmigration.
 - `from_pool` (string, required): The value pool to migrate funds from
   ("sapling", "orchard", or "ironwood").
 - `to_pool` (string, required): The value pool to migrate funds to.
+- `external_signer` (boolean, optional, default=false): When true, build the
+  preparation transactions UNSIGNED for an external (hardware or offline) signer
+  and return their PCZTs in `unsigned_transactions`, to sign on the device and
+  apply back with `z_applypoolmigrationsignature`. When false (the default) the
+  preparation is pre-signed in process.
 
 ## `z_viewtransaction`
 

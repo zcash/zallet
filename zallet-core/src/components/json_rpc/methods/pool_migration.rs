@@ -13,6 +13,7 @@
 //! builds each later transaction as its dependencies mine, driving the migration to
 //! completion.
 
+use base64ct::{Base64, Encoding};
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::types::ErrorObjectOwned;
@@ -23,7 +24,7 @@ use zcash_client_backend::data_api::{Account, WalletRead};
 use zcash_client_sqlite::AccountUuid;
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_pool_migration_backend::engine::{
-    MigrationState, MigrationStatus, MigrationTxKind, MigrationTxState,
+    MigrationState, MigrationStatus, MigrationTxKind, MigrationTxState, UnsignedMigrationTx,
 };
 use zcash_pool_migration_backend::state::{
     Blocker, NextAction, TransactionStatus as EngineTransactionStatus,
@@ -32,7 +33,7 @@ use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
 
 use crate::components::keystore::KeyStore;
 use crate::components::{database::DbConnection, json_rpc::server::LegacyCode};
-use crate::migrate::CommitFailure;
+use crate::migrate::{AdvanceError, CommitFailure};
 
 /// The identifier of the wallet's pool migration. The store holds at most one migration at a time,
 /// so a single fixed identifier names it: `z_startpoolmigration` returns this, and the status,
@@ -207,6 +208,32 @@ pub(crate) async fn decrypt_account_usk(
     .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))
 }
 
+/// One built-but-unsigned migration transaction, as returned to a client driving an EXTERNAL
+/// (hardware or offline) signer: its stable id within the migration and its unsigned PCZT, base64
+/// encoded. The client signs the PCZT out of band (on the device) and hands the signed PCZT back via
+/// `z_applypoolmigrationsignature`, matched to the transaction by this `id`.
+#[derive(Clone, Debug, Serialize, Documented, JsonSchema)]
+pub(crate) struct UnsignedMigrationTransaction {
+    /// The stable identifier of the transaction within the migration.
+    pub id: u32,
+    /// The unsigned PCZT to sign externally, base64 encoded.
+    pub pczt: String,
+}
+
+/// Base64-encodes the engine's unsigned PCZTs into the RPC response shape, preserving each
+/// transaction's id so the signed PCZT can be matched back on the way in.
+pub(crate) fn encode_unsigned(
+    unsigned: Vec<UnsignedMigrationTx>,
+) -> Vec<UnsignedMigrationTransaction> {
+    unsigned
+        .into_iter()
+        .map(|u| UnsignedMigrationTransaction {
+            id: u.id.0,
+            pczt: Base64::encode_string(&u.pczt),
+        })
+        .collect()
+}
+
 /// Validates that a migration identifier is well-formed (currently just non-empty).
 pub(crate) fn validate_migration_id(migration_id: &str) -> RpcResult<()> {
     if migration_id.trim().is_empty() {
@@ -277,6 +304,9 @@ pub(crate) enum MigrationTxRole {
 pub(crate) enum MigrationTxLifecycle {
     /// A placeholder that is not yet built or signed (it awaits its dependencies).
     Planned,
+    /// Built and awaiting an external signature: its unsigned PCZT has been exported to a hardware or
+    /// offline signer, and the wallet is waiting for the signed PCZT to be applied.
+    AwaitingSignature,
     /// Built and pre-signed, ready to prove and broadcast once it is due.
     Signed,
     /// Proved against a real anchor, ready to broadcast.
@@ -301,6 +331,9 @@ pub(crate) enum MigrationTxBlocker {
     /// Built and due only at a later height (the privacy broadcast schedule): waiting for the chain
     /// tip to reach its scheduled height.
     Schedule,
+    /// Built as an unsigned PCZT and waiting for an external (hardware or offline) signer to return
+    /// the signed PCZT, which the wallet then applies before proving and broadcasting.
+    Signature,
 }
 
 /// The action a wallet takes next on a ready migration transaction.
@@ -364,6 +397,7 @@ fn to_rpc_status(es: EngineTransactionStatus) -> MigrationTransactionStatus {
     };
     let state = match es.state {
         MigrationTxState::Planned => MigrationTxLifecycle::Planned,
+        MigrationTxState::AwaitingSignature => MigrationTxLifecycle::AwaitingSignature,
         MigrationTxState::Signed => MigrationTxLifecycle::Signed,
         MigrationTxState::Proved => MigrationTxLifecycle::Proved,
         MigrationTxState::Broadcast { .. } => MigrationTxLifecycle::Broadcast,
@@ -377,6 +411,7 @@ fn to_rpc_status(es: EngineTransactionStatus) -> MigrationTransactionStatus {
     let blocked_on = es.blocked_on.map(|b| match b {
         Blocker::Dependencies => MigrationTxBlocker::Dependencies,
         Blocker::Schedule => MigrationTxBlocker::Schedule,
+        Blocker::Signature => MigrationTxBlocker::Signature,
     });
     let txid = es.txid.map(|mut bytes| {
         bytes.reverse();
@@ -430,6 +465,17 @@ pub(crate) fn map_commit_failure(failure: CommitFailure) -> ErrorObjectOwned {
         CommitFailure::AlreadyInProgress => LegacyCode::InvalidParameter
             .with_static("a migration is already in progress; cancel it before starting another"),
         CommitFailure::Other(message) => LegacyCode::Misc.with_message(message),
+    }
+}
+
+/// Maps a migration advance/build failure to an RPC error.
+pub(crate) fn map_advance_error(err: AdvanceError) -> ErrorObjectOwned {
+    match err {
+        AdvanceError::NoMigration => no_such_migration(),
+        AdvanceError::Store(message) => LegacyCode::Database.with_message(message),
+        AdvanceError::Commit(failure) => map_commit_failure(failure),
+        AdvanceError::Prove(e) => LegacyCode::Misc.with_message(e.to_string()),
+        AdvanceError::Unsupported(message) => LegacyCode::InvalidParameter.with_message(message),
     }
 }
 

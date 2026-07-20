@@ -22,6 +22,10 @@ use {
 #[cfg(zallet_build = "wallet")]
 mod advance_pool_migration;
 #[cfg(zallet_build = "wallet")]
+mod apply_pool_migration_signature;
+#[cfg(zallet_build = "wallet")]
+mod build_pool_migration_transfers;
+#[cfg(zallet_build = "wallet")]
 mod cancel_pool_migration;
 mod convert_tex;
 mod decode_raw_transaction;
@@ -68,6 +72,8 @@ mod pool_migration;
 mod preview_pool_migration;
 #[cfg(zallet_build = "wallet")]
 mod recover_accounts;
+#[cfg(zallet_build = "wallet")]
+mod sign_pool_migration_pczt;
 #[cfg(zallet_build = "wallet")]
 mod start_pool_migration;
 mod stop;
@@ -770,12 +776,18 @@ pub(crate) trait WalletRpc {
     /// - `from_pool` (string, required): The value pool to migrate funds from
     ///   ("sapling", "orchard", or "ironwood").
     /// - `to_pool` (string, required): The value pool to migrate funds to.
+    /// - `external_signer` (boolean, optional, default=false): When true, build the
+    ///   preparation transactions UNSIGNED for an external (hardware or offline) signer
+    ///   and return their PCZTs in `unsigned_transactions`, to sign on the device and
+    ///   apply back with `z_applypoolmigrationsignature`. When false (the default) the
+    ///   preparation is pre-signed in process.
     #[method(name = "z_startpoolmigration")]
     async fn start_pool_migration(
         &self,
         account: JsonValue,
         from_pool: String,
         to_pool: String,
+        external_signer: Option<bool>,
     ) -> start_pool_migration::Response;
 
     /// Previews the migration plan for migrating an account's balance between two value
@@ -837,6 +849,67 @@ pub(crate) trait WalletRpc {
         account: JsonValue,
         migration_id: String,
     ) -> advance_pool_migration::Response;
+
+    /// Builds a migration's phase-2 transfers UNSIGNED, for an external signer.
+    ///
+    /// The external-signer counterpart of the transfer building that z_advancepoolmigration
+    /// does in process: it detects newly mined preparation transactions and, once the whole
+    /// preparation is mined, builds the transfers but leaves them unsigned, returning their
+    /// PCZTs in `unsigned_transactions` to sign on the device and apply back with
+    /// z_applypoolmigrationsignature. An external migration uses this rather than
+    /// z_advancepoolmigration for the preparation-to-transfers step.
+    ///
+    /// # Arguments
+    /// - `account` (string or numeric, required): The UUID or ZIP 32 index of the account
+    ///   whose migration transfers to build.
+    /// - `migration_id` (string, required): The identifier returned by
+    ///   `z_startpoolmigration`.
+    #[method(name = "z_buildpoolmigrationtransfers")]
+    async fn build_pool_migration_transfers(
+        &self,
+        account: JsonValue,
+        migration_id: String,
+    ) -> build_pool_migration_transfers::Response;
+
+    /// Signs a migration PCZT with the account's spend authorization.
+    ///
+    /// For offline / air-gapped signing, and the software stand-in for on-device signing: it
+    /// takes an unsigned migration PCZT (from z_startpoolmigration with external_signer, or
+    /// z_buildpoolmigrationtransfers), adds only the account's Orchard spend-authorization
+    /// signature, and returns the signed PCZT to apply with z_applypoolmigrationsignature. It
+    /// does not prove, extract, or broadcast. A hardware wallet signs on the device instead.
+    ///
+    /// # Arguments
+    /// - `account` (string or numeric, required): The UUID or ZIP 32 index of the account
+    ///   whose spend key signs the PCZT.
+    /// - `pczt` (string, required): The unsigned migration PCZT, base64 encoded.
+    #[method(name = "z_signpoolmigrationpczt")]
+    async fn sign_pool_migration_pczt(
+        &self,
+        account: JsonValue,
+        pczt: String,
+    ) -> sign_pool_migration_pczt::Response;
+
+    /// Applies an externally-signed PCZT to a migration transaction.
+    ///
+    /// Stores the signed PCZT an external (hardware or offline) signer returned against the
+    /// migration transaction it was built for, moving that transaction from awaiting-signature
+    /// to signed so z_advancepoolmigration can prove and broadcast it. The PCZT is matched to
+    /// its transaction by the id returned alongside the unsigned PCZT.
+    ///
+    /// # Arguments
+    /// - `migration_id` (string, required): The identifier returned by
+    ///   `z_startpoolmigration`.
+    /// - `transaction_id` (numeric, required): The id of the migration transaction the signed
+    ///   PCZT is for, from the `unsigned_transactions` list.
+    /// - `pczt` (string, required): The signed migration PCZT, base64 encoded.
+    #[method(name = "z_applypoolmigrationsignature")]
+    async fn apply_pool_migration_signature(
+        &self,
+        migration_id: String,
+        transaction_id: u32,
+        pczt: String,
+    ) -> apply_pool_migration_signature::Response;
 
     /// Cancels a previously-scheduled pool migration.
     ///
@@ -1282,6 +1355,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         account: JsonValue,
         from_pool: String,
         to_pool: String,
+        external_signer: Option<bool>,
     ) -> start_pool_migration::Response {
         start_pool_migration::call(
             self.wallet().await?.as_ref(),
@@ -1289,6 +1363,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             account,
             &from_pool,
             &to_pool,
+            external_signer,
         )
         .await
     }
@@ -1329,6 +1404,49 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             self.chain().await?,
             account,
             &migration_id,
+        )
+        .await
+    }
+
+    async fn build_pool_migration_transfers(
+        &self,
+        account: JsonValue,
+        migration_id: String,
+    ) -> build_pool_migration_transfers::Response {
+        build_pool_migration_transfers::call(
+            self.wallet().await?.as_ref(),
+            &self.keystore,
+            account,
+            &migration_id,
+        )
+        .await
+    }
+
+    async fn sign_pool_migration_pczt(
+        &self,
+        account: JsonValue,
+        pczt: String,
+    ) -> sign_pool_migration_pczt::Response {
+        sign_pool_migration_pczt::call(
+            self.wallet().await?.as_ref(),
+            &self.keystore,
+            account,
+            &pczt,
+        )
+        .await
+    }
+
+    async fn apply_pool_migration_signature(
+        &self,
+        migration_id: String,
+        transaction_id: u32,
+        pczt: String,
+    ) -> apply_pool_migration_signature::Response {
+        apply_pool_migration_signature::call(
+            self.wallet().await?.as_ref(),
+            &migration_id,
+            transaction_id,
+            &pczt,
         )
         .await
     }

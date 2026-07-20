@@ -28,6 +28,7 @@ use core::fmt;
 use std::sync::OnceLock;
 
 use orchard::circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey};
+use orchard::keys::SpendAuthorizingKey;
 use pczt::Pczt;
 use pczt::roles::prover::Prover;
 use pczt::roles::tx_extractor::TransactionExtractor;
@@ -36,10 +37,12 @@ use rusqlite::Connection;
 use zcash_client_backend::data_api::WalletRead;
 use zcash_client_sqlite::{AccountUuid, WalletDb, util::SystemClock};
 use zcash_keys::keys::UnifiedSpendingKey;
+use zcash_pool_migration_backend::build::sign_pczt;
 use zcash_pool_migration_backend::engine::{
     CommitError, MigrationBackend, MigrationError, MigrationState, MigrationStatus, MigrationTxId,
-    MigrationTxKind, MigrationTxState, PoolMigrationRead, PoolMigrationWrite,
-    commit_pending_preparation, commit_preparation, commit_transfers, plan_migration,
+    MigrationTxKind, MigrationTxState, PoolMigrationRead, PoolMigrationWrite, UnsignedMigrationTx,
+    build_preparation_unsigned, build_transfers_unsigned, commit_pending_preparation,
+    commit_preparation, commit_transfers, plan_migration,
 };
 // The migration state machine lives in the engine (the mobile wallet drives it the same way); zallet
 // only performs the wallet I/O around the engine's decisions. The decision and transition logic are
@@ -260,6 +263,79 @@ pub fn commit_pending_preparation_over_wallet(
         .map_err(map_commit_error)
 }
 
+/// Plans and builds the PREPARATION of a migration for an EXTERNAL signer: builds every layer-0
+/// preparation transaction but leaves it UNSIGNED, returning the resulting state (NOT persisted; the
+/// caller persists it) together with the unsigned PCZTs to route to the signing device. Mirrors
+/// [`commit_preparation_over_wallet`] but leaves the transactions in `AwaitingSignature`; the caller
+/// applies the signed PCZTs with [`MigrationState::apply_signature`]. Runs the engine synchronously;
+/// call inside the blocking database section.
+pub fn build_preparation_unsigned_over_wallet(
+    conn: &mut Connection,
+    network: &Network,
+    account: AccountUuid,
+    usk: UnifiedSpendingKey,
+    target_height: u32,
+) -> Result<(MigrationState, Vec<UnsignedMigrationTx>), CommitFailure> {
+    let mut wallet = WalletDb::from_connection(&mut *conn, *network, SystemClock, OsRng);
+    let mut migration = WalletMigration::new(&mut wallet, account, usk, InMemoryStore::default());
+    let mut rng = OsRng;
+    let plan = plan_migration(&migration, prep_fee_zatoshi(), &mut rng).map_err(map_plan_error)?;
+    build_preparation_unsigned(network, target_height, &mut migration, &plan, &mut rng)
+        .map_err(map_commit_error)
+}
+
+/// Builds the TRANSFERS of an in-progress migration for an EXTERNAL signer: builds the phase-2
+/// transfer transactions (whose funding notes the mined preparation created) but leaves them
+/// UNSIGNED, returning the updated state (NOT persisted; the caller persists it) together with the
+/// unsigned PCZTs to route to the signing device. Mirrors [`commit_transfers_over_wallet`] but leaves
+/// the transactions in `AwaitingSignature`. `loaded` is the migration read from the store. Runs the
+/// engine synchronously; call inside the blocking database section.
+pub fn build_transfers_unsigned_over_wallet(
+    conn: &mut Connection,
+    network: &Network,
+    account: AccountUuid,
+    usk: UnifiedSpendingKey,
+    target_height: u32,
+    loaded: MigrationState,
+) -> Result<(MigrationState, Vec<UnsignedMigrationTx>), CommitFailure> {
+    let mut wallet = WalletDb::from_connection(&mut *conn, *network, SystemClock, OsRng);
+    let store = InMemoryStore::seeded(Some(loaded));
+    let mut migration = WalletMigration::new(&mut wallet, account, usk, store);
+    let mut rng = OsRng;
+    build_transfers_unsigned(network, target_height, &mut migration, &mut rng)
+        .map_err(map_commit_error)
+}
+
+/// Signs a migration PCZT with the account's Orchard spend authorization, for offline / air-gapped or
+/// external-device signing. Parses the unsigned PCZT, adds only the spend-auth signature (the Signer
+/// role; it neither proves nor extracts), and returns the serialized signed PCZT to apply to the
+/// migration via [`MigrationState::apply_signature`]. This is the counterpart the external signer runs
+/// on the built PCZT that [`build_preparation_unsigned_over_wallet`] /
+/// [`build_transfers_unsigned_over_wallet`] produced; a hardware wallet performs the same step on the
+/// device.
+pub fn sign_migration_pczt(
+    usk: &UnifiedSpendingKey,
+    pczt_bytes: &[u8],
+) -> Result<Vec<u8>, SignFailure> {
+    let pczt =
+        Pczt::parse(pczt_bytes).map_err(|e| SignFailure(format!("parsing the PCZT: {e:?}")))?;
+    let ask = SpendAuthorizingKey::from(usk.orchard());
+    let signed =
+        sign_pczt(pczt, &ask).map_err(|e| SignFailure(format!("signing the PCZT: {e:?}")))?;
+    signed
+        .serialize()
+        .map_err(|e| SignFailure(format!("serializing the signed PCZT: {e:?}")))
+}
+
+/// A failure to sign a migration PCZT with the account's spend authorization.
+pub struct SignFailure(pub String);
+
+impl fmt::Display for SignFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Why proving or extracting a migration transaction failed.
 pub enum BroadcastError {
     /// The stored PCZT could not be parsed.
@@ -347,6 +423,9 @@ pub enum AdvanceError {
     Commit(CommitFailure),
     /// Proving or extracting a transaction failed.
     Prove(BroadcastError),
+    /// The requested step is not supported for this migration (for example external signing of a
+    /// multi-layer preparation, which the seam does not yet cover).
+    Unsupported(String),
 }
 
 /// The outcome of the blocking half of advancing a migration one step.
@@ -511,6 +590,102 @@ pub fn advance_blocking(
                 to_broadcast: None,
                 message,
             })
+        }
+    }
+}
+
+/// The blocking half of building an EXTERNAL migration's transfers, the external-signer counterpart of
+/// the transfer-building that [`advance_blocking`] does in process. It loads the migration, detects
+/// newly mined preparation transactions (the same detection `advance_blocking` performs, so an
+/// external client uses this instead of advancing and never triggers in-process transfer signing), and
+/// once the whole preparation is mined builds the phase-2 transfers UNSIGNED, returning their PCZTs to
+/// route to the signing device. If the preparation is not yet fully mined it returns no PCZTs and
+/// leaves the migration waiting; a multi-layer preparation whose next step is a later unbuilt layer is
+/// reported as unsupported for external signing (the seam covers layer-0 preparation and transfers).
+/// Persists the state. Runs inside the database write lock. `tip` is the current chain tip;
+/// transactions build at `tip + 1`.
+pub fn build_transfers_unsigned_blocking(
+    conn: &mut Connection,
+    network: &Network,
+    account: AccountUuid,
+    usk: UnifiedSpendingKey,
+    tip: u32,
+) -> Result<(MigrationState, Vec<UnsignedMigrationTx>, String), AdvanceError> {
+    let target_height = tip + 1;
+
+    let mut state = load_migration(conn)
+        .map_err(|e| AdvanceError::Store(e.to_string()))?
+        .ok_or(AdvanceError::NoMigration)?;
+
+    if state.is_terminal() {
+        return Ok((
+            state,
+            Vec::new(),
+            "the migration is no longer in progress".to_string(),
+        ));
+    }
+
+    // Detect newly mined transactions (identical to `advance_blocking`).
+    let mut newly_mined: Vec<(MigrationTxId, u32)> = Vec::new();
+    {
+        let wallet = WalletDb::from_connection(&mut *conn, *network, SystemClock, OsRng);
+        for tx in state.transactions.iter() {
+            if let MigrationTxState::Broadcast { txid } = tx.state {
+                if let Some(height) = wallet
+                    .get_tx_height(TxId::from_bytes(txid))
+                    .map_err(|e| AdvanceError::Store(e.to_string()))?
+                {
+                    newly_mined.push((tx.id, u32::from(height)));
+                }
+            }
+        }
+    }
+    for (id, height) in newly_mined {
+        state.mark_mined(id, height);
+    }
+
+    match state.next_step(target_height) {
+        // The whole preparation is mined: build the transfers unsigned for the external signer.
+        AdvanceStep::BuildTransfers => {
+            let (mut updated, unsigned) = build_transfers_unsigned_over_wallet(
+                conn,
+                network,
+                account,
+                usk,
+                target_height,
+                state,
+            )
+            .map_err(AdvanceError::Commit)?;
+            updated.recompute_status();
+            persist_migration(conn, &updated).map_err(|e| AdvanceError::Store(e.to_string()))?;
+            Ok((
+                updated,
+                unsigned,
+                "built the unsigned transfer transactions".to_string(),
+            ))
+        }
+        // A later preparation layer still needs building: external signing does not cover multi-layer
+        // preparation yet.
+        AdvanceStep::BuildPreparationLayer { layer } => Err(AdvanceError::Unsupported(format!(
+            "external signing of a multi-layer preparation is not yet supported (preparation layer \
+             {layer} still needs building)"
+        ))),
+        // The preparation is not yet fully mined (or nothing is ready to build): persist the mining
+        // updates and report what the migration is waiting for.
+        AdvanceStep::Broadcast { .. } | AdvanceStep::Waiting | AdvanceStep::Complete => {
+            persist_migration(conn, &state).map_err(|e| AdvanceError::Store(e.to_string()))?;
+            let pending_prep = state
+                .transactions
+                .iter()
+                .filter(|t| matches!(t.kind, MigrationTxKind::Preparation { .. }))
+                .filter(|t| !matches!(t.state, MigrationTxState::Mined { .. }))
+                .count();
+            let message = if pending_prep == 0 {
+                "the preparation is mined; no transfers are pending".to_string()
+            } else {
+                format!("waiting for {pending_prep} preparation transaction(s) to mine")
+            };
+            Ok((state, Vec::new(), message))
         }
     }
 }

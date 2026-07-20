@@ -7,13 +7,12 @@
 
 use documented::Documented;
 use jsonrpsee::core::{JsonValue, RpcResult};
-use jsonrpsee::types::ErrorObjectOwned;
 use schemars::JsonSchema;
 use serde::Serialize;
 use zcash_client_backend::data_api::WalletRead;
 
 use super::pool_migration::{
-    MIGRATION_ID, MigrationPhase, MigrationProgress, decrypt_account_usk, map_commit_failure,
+    MIGRATION_ID, MigrationPhase, MigrationProgress, decrypt_account_usk, map_advance_error,
     migration_progress, no_such_migration, validate_migration_id,
 };
 use crate::components::chain::Chain;
@@ -21,9 +20,7 @@ use crate::components::database::DbConnection;
 use crate::components::json_rpc::server::LegacyCode;
 use crate::components::json_rpc::utils::parse_account_parameter;
 use crate::components::keystore::KeyStore;
-use crate::migrate::{
-    AdvanceError, AdvanceOutcome, advance_blocking, record_broadcast, transaction_txid_bytes,
-};
+use crate::migrate::{AdvanceOutcome, advance_blocking, record_broadcast, transaction_txid_bytes};
 
 /// Response to a `z_advancepoolmigration` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -44,16 +41,6 @@ pub(crate) struct AdvancePoolMigration {
     progress: MigrationProgress,
     /// A short description of what this step did.
     status: String,
-}
-
-/// Maps an advance failure to an RPC error.
-fn map_advance_error(err: AdvanceError) -> ErrorObjectOwned {
-    match err {
-        AdvanceError::NoMigration => no_such_migration(),
-        AdvanceError::Store(message) => LegacyCode::Database.with_message(message),
-        AdvanceError::Commit(failure) => map_commit_failure(failure),
-        AdvanceError::Prove(e) => LegacyCode::Misc.with_message(e.to_string()),
-    }
 }
 
 pub(crate) async fn call<C: Chain>(

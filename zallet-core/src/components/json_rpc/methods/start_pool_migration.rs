@@ -12,15 +12,16 @@ use serde::Serialize;
 use zcash_client_backend::data_api::WalletRead;
 
 use super::pool_migration::{
-    MIGRATION_ID, MigrationPlan, Pool, decrypt_account_usk, map_commit_failure, migration_plan,
-    validate_pool_pair,
+    MIGRATION_ID, MigrationPlan, Pool, UnsignedMigrationTransaction, decrypt_account_usk,
+    encode_unsigned, map_commit_failure, migration_plan, validate_pool_pair,
 };
 use crate::components::database::DbConnection;
 use crate::components::json_rpc::server::LegacyCode;
 use crate::components::json_rpc::utils::parse_account_parameter;
 use crate::components::keystore::KeyStore;
 use crate::migrate::{
-    CommitFailure, commit_preparation_over_wallet, load_migration, persist_migration,
+    CommitFailure, build_preparation_unsigned_over_wallet, commit_preparation_over_wallet,
+    load_migration, persist_migration,
 };
 
 /// Response to a `z_startpoolmigration` RPC request.
@@ -33,6 +34,8 @@ pub(super) const PARAM_FROM_POOL_DESC: &str =
     "The value pool to migrate funds from (\"sapling\", \"orchard\", or \"ironwood\").";
 pub(super) const PARAM_TO_POOL_DESC: &str =
     "The value pool to migrate funds to (\"sapling\", \"orchard\", or \"ironwood\").";
+pub(super) const PARAM_EXTERNAL_SIGNER_DESC: &str = "When true, build the preparation transactions unsigned for an external (hardware or offline) \
+     signer and return their PCZTs to sign on the device; when false (default) pre-sign in process.";
 
 /// The result of starting a pool migration.
 #[derive(Clone, Debug, Serialize, Documented, JsonSchema)]
@@ -47,6 +50,12 @@ pub(crate) struct StartPoolMigration {
     enabling_upgrade: String,
     /// The plan describing how the migration will be carried out.
     plan: MigrationPlan,
+    /// When the migration was started for an EXTERNAL signer (`external_signer=true`), the unsigned
+    /// preparation PCZTs to sign on the device; each is applied back with
+    /// `z_applypoolmigrationsignature`. Absent for the default in-process-signing path (where the
+    /// preparation is already pre-signed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsigned_transactions: Option<Vec<UnsignedMigrationTransaction>>,
 }
 
 pub(crate) async fn call(
@@ -55,9 +64,11 @@ pub(crate) async fn call(
     account: JsonValue,
     from_pool: &str,
     to_pool: &str,
+    external_signer: Option<bool>,
 ) -> Response {
     let (from_pool, to_pool, enabling_upgrade) = validate_pool_pair(wallet, from_pool, to_pool)?;
     let account_id = parse_account_parameter(wallet, keystore, &account).await?;
+    let external_signer = external_signer.unwrap_or(false);
 
     // The transactions build at the height after the current chain tip.
     let chain_height = wallet
@@ -67,15 +78,19 @@ pub(crate) async fn call(
     let target_height = u32::from(chain_height) + 1;
 
     // Decrypt the account's spending key. This is the only async step, and it happens BEFORE the
-    // blocking build section (no `.await` may occur inside `with_raw_mut`).
+    // blocking build section (no `.await` may occur inside `with_raw_mut`). For an external signer,
+    // the key still builds the PCZTs (it derives the account's viewing key and witnesses); it just
+    // does not sign them, leaving that to the device.
     let usk = decrypt_account_usk(wallet, keystore, account_id).await?;
 
-    // Build + pre-sign the preparation over the wallet, then persist the resulting migration. Both
-    // the engine's wallet access and the store write run on one connection, sequentially.
-    let state = wallet
+    // Build the preparation over the wallet, then persist the resulting migration. Both the engine's
+    // wallet access and the store write run on one connection, sequentially. In the default path the
+    // transactions are pre-signed; for an external signer they are left unsigned (in
+    // `AwaitingSignature`) and their PCZTs are returned for the device to sign.
+    let (state, unsigned_transactions) = wallet
         .with_raw_mut(|conn, network| -> Result<_, CommitFailure> {
-            // Refuse to overwrite an in-progress migration: its pre-signed transactions would be
-            // lost. A terminal (complete or failed) migration may be replaced.
+            // Refuse to overwrite an in-progress migration: its transactions would be lost. A
+            // terminal (complete or failed) migration may be replaced.
             if let Some(existing) =
                 load_migration(conn).map_err(|e| CommitFailure::Other(e.to_string()))?
             {
@@ -83,10 +98,22 @@ pub(crate) async fn call(
                     return Err(CommitFailure::AlreadyInProgress);
                 }
             }
-            let state =
-                commit_preparation_over_wallet(conn, network, account_id, usk, target_height)?;
+            let (state, unsigned) = if external_signer {
+                let (state, unsigned) = build_preparation_unsigned_over_wallet(
+                    conn,
+                    network,
+                    account_id,
+                    usk,
+                    target_height,
+                )?;
+                (state, Some(encode_unsigned(unsigned)))
+            } else {
+                let state =
+                    commit_preparation_over_wallet(conn, network, account_id, usk, target_height)?;
+                (state, None)
+            };
             persist_migration(conn, &state).map_err(|e| CommitFailure::Other(e.to_string()))?;
-            Ok(state)
+            Ok((state, unsigned))
         })
         .map_err(map_commit_failure)?;
 
@@ -96,5 +123,6 @@ pub(crate) async fn call(
         to_pool,
         enabling_upgrade: enabling_upgrade.to_string(),
         plan: migration_plan(state.transactions.len() as u32),
+        unsigned_transactions,
     })
 }
