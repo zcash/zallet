@@ -120,6 +120,21 @@ Key external dependencies from the Zcash ecosystem:
 - `zebra-chain`, `zebra-state`, `zebra-rpc` -- chain data types and node RPC
 - `zaino-*` -- indexer integration
 
+## Code Conventions
+
+- **Never use magic numbers.** Do not inline a bare numeric (or string) literal
+  whose meaning is not obvious from context. Give it a `const` with a
+  doc-commented rationale, and reuse the named constants the `librustzcash`
+  crates already export rather than re-deriving their values:
+  - `zcash_protocol::value::COIN` (zatoshis per ZEC),
+  - `zcash_primitives::transaction::fees::zip317::MARGINAL_FEE` (the ZIP-317
+    marginal fee),
+  - the migration engine's constants from `zcash_pool_migration_backend`
+    (for example `MIGRATION_MAX_DENOMINATION_ZEC`,
+    `MIGRATION_MAX_PREPARED_NOTES_PER_RUN`, `RESIDUAL_MIGRATION_MIN_ZATOSHI`).
+
+  This applies to production code and tests alike.
+
 ## Build, Test, and Development Commands
 
 The three workspaces have separate lockfiles, so every check runs once **per
