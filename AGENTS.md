@@ -233,6 +233,80 @@ Note that the Dockerfile's apt pins rot on their own, with no change on our side
 
 If the diff is not benign, or you cannot establish what changed, STOP and say so in the PR rather than merging a version you have not audited.
 
+## Database Write Atomicity
+
+`rusqlite` autocommits every statement executed outside an explicit transaction. A
+sequence of writes that must land together will therefore commit one at a time unless
+it is wrapped, and a failure partway through (an I/O error, a full disk, a crash, or an
+error returned by a later step) leaves a subset committed. This has produced real bugs
+in Zallet, so it is checked on every change that touches the wallet database.
+
+**Before writing or reviewing any code that writes to the wallet database, answer these
+four questions in order.** Answer them in the PR description when the answer to the
+first is "more than one".
+
+1. **How many writes does this operation issue?** Count every `INSERT`, `UPDATE`, and
+   `DELETE`, including those inside loops and inside the functions it calls. If the
+   answer is one, stop here. Otherwise continue.
+2. **Must they land together?** Is there any subset of these rows that, if committed
+   alone, the rest of the wallet would treat as valid state? If so, they must share one
+   transaction.
+3. **What happens on retry?** Assume the operation failed after committing a subset and
+   the user runs it again. Does the retry repair the state, or does it refuse, diverge,
+   or duplicate? This is the question that decides whether a partial write is a
+   transient annoyance or a permanent one, and it is the one most often skipped.
+4. **Does any read path see only one side?** If one store is reachable through an API
+   that never consults the other, a partial write surfaces to the user as valid data.
+
+Two patterns turn a partial write into an unrecoverable one. Either of them present in
+a multi-write operation is a hard requirement for a transaction, not a judgement call:
+
+- **One-shot guards.** A check of the form "if this table is non-empty, refuse" turns a
+  partial commit into a permanent refusal to ever finish the operation. The guard MUST
+  also run inside the transaction, against the same connection. Reading it on a
+  separate connection is both outside the rollback and a check-then-act race.
+- **Asymmetric read paths.** When an export or read path consults one store while the
+  scanning or spending path consults another, a half-committed write leaves the user
+  holding material that looks present but does nothing.
+
+### Which primitive to use
+
+- Writes confined to Zallet's own `ext_zallet_*` tables: `conn.transaction()`, then
+  `commit()` on the success path. See
+  `KeyStore::store_encrypted_standalone_transparent_keys`.
+- A wallet-database write that must be paired with an `ext_zallet_*` write:
+  `WalletDb::transactionally_with_extension`, which runs both under one transaction and
+  restricts the extension handle to `ext_`-prefixed tables. See `z_importkey` in
+  `zallet-core/src/components/json_rpc/methods/import_key.rs`.
+- Several `WalletRead` or `WalletWrite` operations that must be atomic with each other:
+  `WalletDb::transactionally`.
+
+A `rusqlite` transaction cannot be held across an `.await`. Hoist async and
+non-database work (key encryption, chain queries, birthday lookups) to before the
+transaction is opened, and keep only the statements inside it. Where that hoisting
+moves a validity check outside the transaction, re-check inside it: the state it
+checked may have changed by the time the transaction opens.
+
+Inside a `transactionally` or `transactionally_with_extension` closure, every fallible
+call MUST propagate with `?`. The `zcash_client_sqlite` implementations take no
+savepoint per method, so a `WalletWrite` call that fails partway leaves its partial
+writes in the enclosing transaction; the rollback happens only because the error
+escapes the closure. Discarding an error there (`let _ = ...`, `.ok()`, or a `match`
+arm that logs and continues) commits that partial state while the operation still
+reports success.
+
+Compensating logic ("undo the first write if the second fails") is not a substitute for
+a transaction. It does not survive a crash, its undo path is rarely tested, and it is
+sometimes not expressible at all: `delete_account` does not restore the wallet-wide
+scan-queue and note-commitment-tree state that `add_account` rewinds.
+
+### Test evidence
+
+A change that adds or modifies a multi-statement write MUST come with a unit test that
+returns an error from inside the transaction and asserts that none of the writes
+persisted. Asserting that the success path commits is not sufficient; the bug being
+guarded against is on the failure path.
+
 ## Commit & Pull Request Guidelines
 
 ### Commit History
