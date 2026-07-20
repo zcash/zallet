@@ -16,6 +16,10 @@ be considered breaking changes.
     unified addresses (returning the account's unified full viewing key), and
     an optional `ivk` argument that exports the account's unified incoming
     viewing key instead.
+- `z_listunspent` transparent outputs now include a `generated` field
+  indicating coinbase origin (mirroring `zcashd`'s `listunspent`), so
+  integrators no longer need a `getrawtransaction` round-trip per UTXO to
+  distinguish coinbase from spendable-to-transparent funds.
 
 ### Changed
 
@@ -27,6 +31,15 @@ be considered breaking changes.
 
 ### Fixed
 
+- `z_getbalances` now reports the documented transparent balance split:
+  `regular` contains only non-coinbase funds and `coinbase` is populated with
+  coinbase funds (immature coinbase is reported as `pending` rather than
+  spendable). Previously `regular` silently included coinbase value and
+  `coinbase` was never present.
+- `z_getbalances` account `total` now includes transparent value in its
+  `spendable` and `pending` buckets. Previously only the shielded pools
+  contributed, so a wallet holding only transparent funds reported a zero
+  spendable total.
 - `z_sendmany` and `z_shieldcoinbase` now verify, after building a transaction
   and before broadcasting it, that every transparent output either exactly
   matches a requested payment or has an address that re-derives from the

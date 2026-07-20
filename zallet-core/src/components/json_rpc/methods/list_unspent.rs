@@ -20,7 +20,7 @@ use zcash_client_backend::{
     wallet::NoteId,
 };
 use zcash_keys::address::Address;
-use zcash_protocol::ShieldedPool;
+use zcash_protocol::{ShieldedPool, value::Zatoshis};
 use zip32::Scope;
 
 use crate::components::{
@@ -76,6 +76,12 @@ pub(crate) struct UnspentOutput {
     /// result of some wallet-internal operation.
     #[serde(rename = "walletInternal")]
     wallet_internal: bool,
+
+    /// `true` if the output was produced by a coinbase transaction.
+    ///
+    /// Omitted if this is a shielded output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generated: Option<bool>,
 
     /// The value of the output in ZEC.
     value: JsonZec,
@@ -191,26 +197,36 @@ pub(crate) fn call(
             })?
             .iter()
             .try_fold(vec![], |mut acc, (addr, _)| {
-                let mut outputs = wallet
-                    .get_spendable_transparent_outputs(
-                        addr,
-                        target_height,
-                        confirmations_policy,
-                        CoinbaseFilter::AllTransparentOutputs,
-                    )
-                    .map_err(|e| {
-                        RpcError::owned(
-                            LegacyCode::Database.into(),
-                            "WalletDb::get_spendable_transparent_outputs failed",
-                            Some(format!("{e}")),
+                // Query non-coinbase and coinbase outputs separately so that each UTXO
+                // can be tagged with its coinbase origin. The two filters partition the
+                // full set of spendable outputs: outputs with an unknown transaction
+                // index are treated as non-coinbase by `NonCoinbaseOnly` and excluded
+                // by `CoinbaseOnly`, so nothing is dropped or duplicated.
+                for (coinbase_filter, generated) in [
+                    (CoinbaseFilter::NonCoinbaseOnly, false),
+                    (CoinbaseFilter::CoinbaseOnly, true),
+                ] {
+                    let outputs = wallet
+                        .get_spendable_transparent_outputs(
+                            addr,
+                            target_height,
+                            confirmations_policy,
+                            coinbase_filter,
                         )
-                    })?;
+                        .map_err(|e| {
+                            RpcError::owned(
+                                LegacyCode::Database.into(),
+                                "WalletDb::get_spendable_transparent_outputs failed",
+                                Some(format!("{e}")),
+                            )
+                        })?;
 
-                acc.append(&mut outputs);
+                    acc.extend(outputs.into_iter().map(|utxo| (utxo, generated)));
+                }
                 Ok::<_, RpcError>(acc)
             })?;
 
-        for utxo in utxos {
+        for (utxo, generated) in utxos {
             let confirmations = utxo.mined_height().map(|h| target_height - h).unwrap_or(0);
 
             let wallet_internal = wallet
@@ -224,23 +240,19 @@ pub(crate) fn call(
                 })?
                 .is_some_and(|m| m.scope() == Some(TransparentKeyScope::INTERNAL));
 
-            unspent_outputs.push(UnspentOutput {
-                txid: utxo.outpoint().txid().to_string(),
-                pool: "transparent".into(),
-                outindex: utxo.outpoint().n(),
+            unspent_outputs.push(transparent_unspent_output(
+                utxo.outpoint().txid().to_string(),
+                utxo.outpoint().n(),
                 confirmations,
                 is_watch_only,
-                account_uuid: account_id.expose_uuid().to_string(),
-                address: utxo
-                    .txout()
+                utxo.txout()
                     .recipient_address()
                     .map(|addr| addr.encode(wallet.params())),
-                value: value_from_zatoshis(utxo.value()),
-                value_zat: u64::from(utxo.value()),
-                memo: None,
-                memo_str: None,
+                account_id.expose_uuid().to_string(),
                 wallet_internal,
-            })
+                utxo.value(),
+                generated,
+            ))
         }
 
         let notes = wallet
@@ -332,6 +344,7 @@ pub(crate) fn call(
                 memo: Some(memo),
                 memo_str,
                 wallet_internal: is_internal,
+                generated: None,
             })
         }
 
@@ -384,6 +397,7 @@ pub(crate) fn call(
                 memo: Some(memo),
                 memo_str,
                 wallet_internal,
+                generated: None,
             })
         }
 
@@ -440,9 +454,107 @@ pub(crate) fn call(
                 memo: Some(memo),
                 memo_str,
                 wallet_internal,
+                generated: None,
             })
         }
     }
 
     Ok(ResultType(unspent_outputs))
+}
+
+/// Builds the `z_listunspent` entry for a transparent UTXO.
+///
+/// Transparent outputs always report their coinbase origin via the `generated` field,
+/// have no memo, and belong to the `transparent` pool. This is a pure function over
+/// values already extracted from the wallet, so that its JSON rendering can be
+/// unit-tested without a database.
+#[allow(clippy::too_many_arguments)]
+fn transparent_unspent_output(
+    txid: String,
+    outindex: u32,
+    confirmations: u32,
+    is_watch_only: bool,
+    address: Option<String>,
+    account_uuid: String,
+    wallet_internal: bool,
+    value: Zatoshis,
+    generated: bool,
+) -> UnspentOutput {
+    UnspentOutput {
+        txid,
+        pool: "transparent".into(),
+        outindex,
+        confirmations,
+        is_watch_only,
+        address,
+        account_uuid,
+        wallet_internal,
+        generated: Some(generated),
+        value: value_from_zatoshis(value),
+        value_zat: u64::from(value),
+        memo: None,
+        memo_str: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zcash_protocol::value::Zatoshis;
+
+    use super::{UnspentOutput, transparent_unspent_output};
+    use crate::components::json_rpc::utils::value_from_zatoshis;
+
+    /// Renders a transparent UTXO entry with the given coinbase origin to its JSON
+    /// representation (the actual RPC output contract).
+    fn rendered_transparent(generated: bool) -> serde_json::Value {
+        serde_json::to_value(transparent_unspent_output(
+            "3ec4c1b4b1e61a13c11ec5b0ba1240cca66f0e0d5b1e0303403d0a44ae7d0219".into(),
+            0,
+            10,
+            false,
+            Some("t1UYsZVJkLPeMjxEtACvSxfWuNmddpWfxzs".into()),
+            "3ad46f88-8f11-407b-b768-a2d587e971c9".into(),
+            false,
+            Zatoshis::const_from_u64(625_000_000),
+            generated,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn transparent_coinbase_output_is_generated() {
+        let rendered = rendered_transparent(true);
+        assert_eq!(rendered["generated"], serde_json::json!(true));
+        assert_eq!(rendered["pool"], serde_json::json!("transparent"));
+    }
+
+    #[test]
+    fn transparent_non_coinbase_output_is_not_generated() {
+        let rendered = rendered_transparent(false);
+        assert_eq!(rendered["generated"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn shielded_output_omits_generated() {
+        // Shielded notes never set `generated`; the field must be omitted entirely
+        // rather than rendered as `null`.
+        let output = UnspentOutput {
+            txid: "3ec4c1b4b1e61a13c11ec5b0ba1240cca66f0e0d5b1e0303403d0a44ae7d0219".into(),
+            pool: "sapling".into(),
+            outindex: 0,
+            confirmations: 10,
+            is_watch_only: false,
+            address: None,
+            account_uuid: "3ad46f88-8f11-407b-b768-a2d587e971c9".into(),
+            wallet_internal: true,
+            generated: None,
+            value: value_from_zatoshis(Zatoshis::const_from_u64(100_000)),
+            value_zat: 100_000,
+            memo: Some("f600".into()),
+            memo_str: None,
+        };
+
+        let rendered = serde_json::to_value(output).unwrap();
+        assert!(rendered.get("generated").is_none());
+    }
 }

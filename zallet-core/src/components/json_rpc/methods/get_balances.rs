@@ -177,18 +177,7 @@ pub(crate) fn call(wallet: &DbConnection, minconf: Option<u32>) -> Response {
         .account_balances()
         .iter()
         .map(|(account_uuid, account)| {
-            // TODO: Separate out transparent coinbase and standalone balances.
-            let transparent_regular = account.unshielded_balance();
-
-            Ok(AccountBalance {
-                account_uuid: account_uuid.expose_uuid().to_string(),
-                transparent: opt_transparent_balance(transparent_regular)?,
-                transparent_watchonly: vec![],
-                sapling: opt_balance_from(account.sapling_balance())?,
-                orchard: opt_balance_from(account.orchard_balance())?,
-                ironwood: opt_balance_from(account.ironwood_balance())?,
-                total: balance_from(account)?,
-            })
+            account_balance_response(account_uuid.expose_uuid().to_string(), account)
         })
         .collect::<RpcResult<_>>()?;
 
@@ -201,26 +190,69 @@ pub(crate) fn call(wallet: &DbConnection, minconf: Option<u32>) -> Response {
     })
 }
 
+/// Builds the balance report for a single account.
+fn account_balance_response(
+    account_uuid: String,
+    account: &zcash_client_backend::data_api::AccountBalance,
+) -> RpcResult<AccountBalance> {
+    Ok(AccountBalance {
+        account_uuid,
+        transparent: opt_transparent_balance(
+            account.unshielded_regular_balance(),
+            account.unshielded_coinbase_balance(),
+        )?,
+        // TODO: Fetch balances for standalone/watch-only transparent addresses.
+        transparent_watchonly: vec![],
+        sapling: opt_balance_from(account.sapling_balance())?,
+        orchard: opt_balance_from(account.orchard_balance())?,
+        ironwood: opt_balance_from(account.ironwood_balance())?,
+        total: balance_from(account)?,
+    })
+}
+
 fn opt_transparent_balance(
     regular: &zcash_client_backend::data_api::Balance,
+    coinbase: &zcash_client_backend::data_api::Balance,
 ) -> RpcResult<Option<TransparentBalance>> {
-    if regular.total().is_zero() && regular.uneconomic_value().is_zero() {
+    let is_empty = |b: &zcash_client_backend::data_api::Balance| {
+        b.total().is_zero() && b.uneconomic_value().is_zero()
+    };
+    if is_empty(regular) && is_empty(coinbase) {
         Ok(None)
     } else {
         Ok(Some(TransparentBalance {
             regular: opt_balance_from(regular)?,
-            coinbase: None,
+            coinbase: opt_balance_from(coinbase)?,
         }))
     }
 }
 
 fn balance_from(b: &zcash_client_backend::data_api::AccountBalance) -> RpcResult<Balance> {
+    let regular = b.unshielded_regular_balance();
+    let coinbase = b.unshielded_coinbase_balance();
+
     Ok(balance(
-        b.spendable_value(),
-        (b.change_pending_confirmation() + b.value_pending_spendability()).ok_or(
+        // `AccountBalance::spendable_value` covers the shielded pools only.
+        (b.spendable_value() + regular.spendable_value() + coinbase.spendable_value()).ok_or(
             LegacyCode::Database
                 .with_static("Wallet database is corrupt: storing more than MAX_MONEY"),
         )?,
+        // `AccountBalance::change_pending_confirmation` and
+        // `AccountBalance::value_pending_spendability` cover the shielded pools only.
+        // Immature transparent coinbase funds are reported by the coinbase bucket's
+        // pending fields.
+        (b.change_pending_confirmation()
+            + b.value_pending_spendability()
+            + regular.change_pending_confirmation()
+            + regular.value_pending_spendability()
+            + coinbase.change_pending_confirmation()
+            + coinbase.value_pending_spendability())
+        .ok_or(
+            LegacyCode::Database
+                .with_static("Wallet database is corrupt: storing more than MAX_MONEY"),
+        )?,
+        // `AccountBalance::uneconomic_value` already includes both transparent buckets,
+        // so it must be used exactly once here.
         b.uneconomic_value(),
     ))
 }
@@ -264,4 +296,258 @@ fn opt_value(value: Zatoshis) -> Option<Value> {
     (!value.is_zero()).then(|| Value {
         value_zat: value.into_u64(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use zcash_client_backend::data_api::{self, AccountBalance};
+    use zcash_protocol::value::{BalanceError, Zatoshis};
+
+    use super::account_balance_response;
+
+    const UUID: &str = "test-uuid";
+
+    fn zat(value: u64) -> Zatoshis {
+        Zatoshis::const_from_u64(value)
+    }
+
+    /// Adds the given values (in zatoshis) to each bucket of a pool's [`data_api::Balance`].
+    fn fill(
+        balance: &mut data_api::Balance,
+        spendable: u64,
+        pending_change: u64,
+        pending_spendable: u64,
+        dust: u64,
+    ) -> Result<(), BalanceError> {
+        balance.add_spendable_value(zat(spendable))?;
+        balance.add_pending_change_value(zat(pending_change))?;
+        balance.add_pending_spendable_value(zat(pending_spendable))?;
+        balance.add_uneconomic_value(zat(dust))
+    }
+
+    /// Renders the response for an account balance to its JSON representation (the
+    /// actual RPC output contract).
+    fn rendered(account: &AccountBalance) -> serde_json::Value {
+        serde_json::to_value(account_balance_response(UUID.into(), account).unwrap()).unwrap()
+    }
+
+    // An account with no funds anywhere omits the `transparent` key entirely (along
+    // with all shielded pool keys), and reports a zero spendable total.
+    #[test]
+    fn empty_account_omits_transparent() {
+        assert_eq!(
+            rendered(&AccountBalance::ZERO),
+            json!({
+                "account_uuid": UUID,
+                "total": {"spendable": {"valueZat": 0}},
+            }),
+        );
+    }
+
+    // Regular-only transparent funds render under `transparent.regular`, with the
+    // `coinbase` key omitted.
+    #[test]
+    fn regular_only_omits_coinbase() {
+        let mut account = AccountBalance::ZERO;
+        account
+            .with_unshielded_regular_balance_mut::<_, BalanceError>(|b| {
+                b.add_spendable_value(zat(10_000))
+            })
+            .unwrap();
+
+        assert_eq!(
+            rendered(&account),
+            json!({
+                "account_uuid": UUID,
+                "transparent": {"regular": {"spendable": {"valueZat": 10_000}}},
+                "total": {"spendable": {"valueZat": 10_000}},
+            }),
+        );
+    }
+
+    // Coinbase-only transparent funds render under `transparent.coinbase`, with the
+    // `regular` key omitted. Mature (spendable) coinbase appears in both
+    // `coinbase.spendable` and `total.spendable`.
+    #[test]
+    fn mature_coinbase_only_is_spendable_and_omits_regular() {
+        let mut account = AccountBalance::ZERO;
+        account
+            .with_unshielded_coinbase_balance_mut::<_, BalanceError>(|b| {
+                b.add_spendable_value(zat(625_000_000))
+            })
+            .unwrap();
+
+        assert_eq!(
+            rendered(&account),
+            json!({
+                "account_uuid": UUID,
+                "transparent": {"coinbase": {"spendable": {"valueZat": 625_000_000u64}}},
+                "total": {"spendable": {"valueZat": 625_000_000u64}},
+            }),
+        );
+    }
+
+    // Immature coinbase funds are pending, not spendable: they appear in
+    // `coinbase.pending` and are included in `total.pending`.
+    #[test]
+    fn immature_coinbase_is_pending() {
+        let mut account = AccountBalance::ZERO;
+        account
+            .with_unshielded_coinbase_balance_mut::<_, BalanceError>(|b| {
+                b.add_pending_spendable_value(zat(625_000_000))
+            })
+            .unwrap();
+
+        assert_eq!(
+            rendered(&account),
+            json!({
+                "account_uuid": UUID,
+                "transparent": {
+                    "coinbase": {
+                        "spendable": {"valueZat": 0},
+                        "pending": {"valueZat": 625_000_000u64},
+                    },
+                },
+                "total": {
+                    "spendable": {"valueZat": 0},
+                    "pending": {"valueZat": 625_000_000u64},
+                },
+            }),
+        );
+    }
+
+    // When both buckets hold funds, `regular` and `coinbase` render side by side and
+    // both contribute to the account total.
+    #[test]
+    fn regular_and_coinbase_render_side_by_side() {
+        let mut account = AccountBalance::ZERO;
+        account
+            .with_unshielded_regular_balance_mut::<_, BalanceError>(|b| {
+                b.add_spendable_value(zat(10_000))
+            })
+            .unwrap();
+        account
+            .with_unshielded_coinbase_balance_mut::<_, BalanceError>(|b| {
+                b.add_spendable_value(zat(625_000_000))
+            })
+            .unwrap();
+
+        assert_eq!(
+            rendered(&account),
+            json!({
+                "account_uuid": UUID,
+                "transparent": {
+                    "regular": {"spendable": {"valueZat": 10_000}},
+                    "coinbase": {"spendable": {"valueZat": 625_000_000u64}},
+                },
+                "total": {"spendable": {"valueZat": 625_010_000u64}},
+            }),
+        );
+    }
+
+    // `AccountBalance::uneconomic_value` already includes the transparent buckets, so
+    // dust spread across shielded and both transparent buckets must be counted exactly
+    // once in `total.dust`.
+    #[test]
+    fn dust_across_pools_is_counted_once() {
+        let mut account = AccountBalance::ZERO;
+        account
+            .with_sapling_balance_mut::<_, BalanceError>(|b| b.add_uneconomic_value(zat(100)))
+            .unwrap();
+        account
+            .with_unshielded_regular_balance_mut::<_, BalanceError>(|b| {
+                b.add_uneconomic_value(zat(200))
+            })
+            .unwrap();
+        account
+            .with_unshielded_coinbase_balance_mut::<_, BalanceError>(|b| {
+                b.add_uneconomic_value(zat(300))
+            })
+            .unwrap();
+
+        assert_eq!(account.uneconomic_value(), zat(600));
+        assert_eq!(
+            rendered(&account),
+            json!({
+                "account_uuid": UUID,
+                "transparent": {
+                    "regular": {"spendable": {"valueZat": 0}, "dust": {"valueZat": 200}},
+                    "coinbase": {"spendable": {"valueZat": 0}, "dust": {"valueZat": 300}},
+                },
+                "sapling": {"spendable": {"valueZat": 0}, "dust": {"valueZat": 100}},
+                "total": {"spendable": {"valueZat": 0}, "dust": {"valueZat": 600}},
+            }),
+        );
+    }
+
+    // With every bucket of every pool nonzero, the account total's spendable, pending,
+    // and dust fields each equal the exact sum of the per-pool parts.
+    #[test]
+    fn total_is_sum_of_parts_across_all_pools() {
+        let mut account = AccountBalance::ZERO;
+        // Distinct powers of two so that every sum is unambiguous.
+        account
+            .with_sapling_balance_mut(|b| fill(b, 1, 2, 4, 8))
+            .unwrap();
+        account
+            .with_orchard_balance_mut(|b| fill(b, 16, 32, 64, 128))
+            .unwrap();
+        account
+            .with_ironwood_balance_mut(|b| fill(b, 256, 512, 1024, 2048))
+            .unwrap();
+        account
+            .with_unshielded_regular_balance_mut(|b| fill(b, 4096, 8192, 16384, 32768))
+            .unwrap();
+        account
+            .with_unshielded_coinbase_balance_mut(|b| fill(b, 65536, 131072, 262144, 524288))
+            .unwrap();
+
+        // Expected sums, computed by hand:
+        // spendable = 1 + 16 + 256 + 4096 + 65536
+        let spendable = 69_905u64;
+        // pending = (2+4) + (32+64) + (512+1024) + (8192+16384) + (131072+262144)
+        let pending = 6 + 96 + 1536 + 24576 + 393216u64;
+        // dust = 8 + 128 + 2048 + 32768 + 524288
+        let dust = 559_240u64;
+
+        assert_eq!(
+            rendered(&account),
+            json!({
+                "account_uuid": UUID,
+                "transparent": {
+                    "regular": {
+                        "spendable": {"valueZat": 4096},
+                        "pending": {"valueZat": 8192 + 16384},
+                        "dust": {"valueZat": 32768},
+                    },
+                    "coinbase": {
+                        "spendable": {"valueZat": 65536},
+                        "pending": {"valueZat": 131072 + 262144},
+                        "dust": {"valueZat": 524288},
+                    },
+                },
+                "sapling": {
+                    "spendable": {"valueZat": 1},
+                    "pending": {"valueZat": 6},
+                    "dust": {"valueZat": 8},
+                },
+                "orchard": {
+                    "spendable": {"valueZat": 16},
+                    "pending": {"valueZat": 96},
+                    "dust": {"valueZat": 128},
+                },
+                "ironwood": {
+                    "spendable": {"valueZat": 256},
+                    "pending": {"valueZat": 1536},
+                    "dust": {"valueZat": 2048},
+                },
+                "total": {
+                    "spendable": {"valueZat": spendable},
+                    "pending": {"valueZat": pending},
+                    "dust": {"valueZat": dust},
+                },
+            }),
+        );
+    }
 }

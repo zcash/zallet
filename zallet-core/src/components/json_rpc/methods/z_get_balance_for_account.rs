@@ -146,7 +146,7 @@ mod tests {
         let zat = Zatoshis::const_from_u64;
         let mut balance = AccountBalance::ZERO;
         balance
-            .with_unshielded_balance_mut::<_, BalanceError>(|b| {
+            .with_unshielded_regular_balance_mut::<_, BalanceError>(|b| {
                 b.add_spendable_value(zat(transparent))
             })
             .unwrap();
@@ -252,6 +252,33 @@ mod tests {
                     "transparent": {"valueZat": COIN},
                     "orchard": {"valueZat": 2 * COIN},
                 },
+                "minimum_confirmations": 1,
+            }),
+        );
+    }
+
+    // The `transparent` pool reports the combined spendable balance of regular
+    // (non-coinbase) and mature coinbase funds: this RPC does not distinguish the
+    // two buckets, so its transparent balance is their sum.
+    #[test]
+    fn transparent_pool_combines_regular_and_coinbase() {
+        let zat = Zatoshis::const_from_u64;
+        let mut balance = account_balance(0, 0, 0, 0);
+        balance
+            .with_unshielded_regular_balance_mut::<_, BalanceError>(|b| {
+                b.add_spendable_value(zat(2 * COIN))
+            })
+            .unwrap();
+        balance
+            .with_unshielded_coinbase_balance_mut::<_, BalanceError>(|b| {
+                b.add_spendable_value(zat(3 * COIN))
+            })
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(response_for_balance(&balance, None)).unwrap(),
+            json!({
+                "pools": {"transparent": {"valueZat": 5 * COIN}},
                 "minimum_confirmations": 1,
             }),
         );
