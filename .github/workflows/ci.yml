@@ -175,7 +175,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         id: toolchain
       - run: rustup override set ${RUST_TOOLCHAIN}
         shell: bash
@@ -223,6 +223,10 @@ jobs:
           private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
           owner: zcash
           repositories: integration-tests
+          # Scope the installation token to the minimum needed to POST a
+          # repository_dispatch event (below), instead of inheriting the app's
+          # full installation permissions.
+          permission-contents: write
 
       - name: Get requested test branch, if any
         id: test-branch
