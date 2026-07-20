@@ -2,3 +2,15 @@ rules:
   secrets-outside-env:
     ignore:
       - ci.yml
+  superfluous-actions:
+    ignore:
+      # softprops/action-gh-release does create-or-update + generate_release_notes
+      # + append_body + clobber in a single declarative step. `gh` has no
+      # equivalent for the update path: `gh release edit` lacks --generate-notes
+      # and any append, so a script replacement would have to reimplement notes
+      # generation via the releases/generate-notes API plus manual body concat,
+      # and hand-roll the create-vs-update idempotency the re-release flow relies
+      # on. The action is already SHA-pinned and runs under a job-scoped
+      # contents:write token, so the supply-chain gain from dropping it is small
+      # relative to that added, lossier script. Keep the action.
+      - binaries-and-deb-release.yml:754
