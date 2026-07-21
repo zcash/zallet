@@ -37,6 +37,10 @@ be considered breaking changes.
 
 ### Fixed
 
+- Async RPC operations whose task panics are now marked as failed, with the
+  panic message reported via `z_getoperationstatus` and `z_getoperationresult`.
+  Previously such operations remained in the `executing` state forever and
+  could not be pruned.
 - `z_getbalances` now reports the documented transparent balance split:
   `regular` contains only non-coinbase funds and `coinbase` is populated with
   coinbase funds (immature coinbase is reported as `pending` rather than

@@ -1,8 +1,10 @@
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use documented::Documented;
+use futures::FutureExt;
 use jsonrpsee::{
     core::{JsonValue, RpcResult},
     types::ErrorObjectOwned,
@@ -135,18 +137,29 @@ impl AsyncOperation {
                     data.start_time = Some(SystemTime::now());
                 }
 
-                // Run the async task.
-                let res = f.await;
-                let end_time = SystemTime::now();
-
-                // Map the concrete task result into a generic JSON blob.
-                let res = res.map(|ret| {
-                    serde_json::from_str(
-                        &serde_json::to_string(&ret)
-                            .expect("async return values should be serializable to JSON"),
-                    )
-                    .expect("round trip should succeed")
+                // Run the async task, mapping the concrete result into a generic JSON
+                // blob. A panic is recorded as a failure of the operation, so it does
+                // not remain in the `Executing` state forever.
+                let res = AssertUnwindSafe(async {
+                    f.await.and_then(|ret| {
+                        serde_json::to_value(ret).map_err(|e| {
+                            LegacyCode::Misc
+                                .with_message(format!("Failed to serialize operation result: {e}"))
+                        })
+                    })
+                })
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|panic| {
+                    let msg = panic
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .map(String::from)
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".into());
+                    Err(LegacyCode::Misc.with_message(format!("Async operation panicked: {msg}")))
                 });
+                let end_time = SystemTime::now();
 
                 // Record the result.
                 let mut data = handle.write().await;
@@ -268,4 +281,73 @@ struct OperationError {
     /// Optional data
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn wait_for_terminal(op: &AsyncOperation) {
+        for _ in 0..100 {
+            if !matches!(
+                op.state().await,
+                OperationState::Ready | OperationState::Executing
+            ) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("operation did not reach a terminal state");
+    }
+
+    #[tokio::test]
+    async fn task_panic_marks_operation_failed() {
+        let op = AsyncOperation::new(None, async {
+            panic!("something went wrong");
+            #[allow(unreachable_code)]
+            Ok(0_u32)
+        })
+        .await;
+
+        wait_for_terminal(&op).await;
+        assert_eq!(op.state().await, OperationState::Failed);
+
+        let status = op.to_status().await;
+        let error = status.error.expect("panic should be recorded as an error");
+        assert_eq!(error.code, LegacyCode::Misc as i32);
+        assert_eq!(
+            error.message,
+            "Async operation panicked: something went wrong",
+        );
+    }
+
+    #[tokio::test]
+    async fn unserializable_result_marks_operation_failed() {
+        let op = AsyncOperation::new(None, async {
+            Ok(std::collections::HashMap::from([(vec![0_u8], 0_u32)]))
+        })
+        .await;
+
+        wait_for_terminal(&op).await;
+        assert_eq!(op.state().await, OperationState::Failed);
+
+        let status = op.to_status().await;
+        let error = status
+            .error
+            .expect("serialization failure should be recorded as an error");
+        assert_eq!(error.code, LegacyCode::Misc as i32);
+        assert!(error.message.starts_with("Failed to serialize"));
+    }
+
+    #[tokio::test]
+    async fn successful_task_records_result() {
+        let op = AsyncOperation::new(None, async { Ok(42_u32) }).await;
+
+        wait_for_terminal(&op).await;
+        assert_eq!(op.state().await, OperationState::Success);
+
+        let status = op.to_status().await;
+        assert!(status.error.is_none());
+        assert_eq!(status.result, Some(Value::from(42_u32)));
+    }
 }
