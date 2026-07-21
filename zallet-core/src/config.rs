@@ -612,9 +612,14 @@ pub struct IndexerSection {
     ///
     /// When this section is present, Zallet opens the running zebrad's state database
     /// as a read-only RocksDB secondary instance and follows the non-finalized chain
-    /// tip via zebrad's gRPC indexer interface. The JSON-RPC settings above are still
-    /// required: they are used for mempool access, transaction submission, and any
-    /// non-best-chain block reads.
+    /// tip via zebrad's gRPC indexer interface. The JSON-RPC `[indexer]` settings above
+    /// are still required, for the mempool and transaction submission.
+    ///
+    /// Handling of non-best-chain (side-chain) blocks depends on the backend. The
+    /// `zebra` backend serves them from the local state (it issues any-chain read
+    /// requests, which zebrad's state answers directly). The `zaino` backend serves
+    /// only the best chain from the local state and falls back to JSON-RPC for
+    /// non-best-chain blocks.
     pub read_state_service: Option<ReadStateServiceSection>,
 }
 
