@@ -17,7 +17,7 @@ use pczt::{
     roles::{combiner, prover, signer, spend_finalizer, tx_extractor, updater},
 };
 
-use crate::components::json_rpc::server::LegacyCode;
+use crate::{components::json_rpc::server::LegacyCode, fl};
 
 /// Why a PCZT operation failed.
 #[derive(Debug)]
@@ -60,35 +60,34 @@ pub(super) enum PcztError {
 impl From<PcztError> for ErrorObjectOwned {
     fn from(e: PcztError) -> Self {
         match e {
-            PcztError::Parse(e) => {
-                LegacyCode::Deserialization.with_message(format!("Invalid PCZT: {e:?}"))
-            }
+            PcztError::Parse(e) => LegacyCode::Deserialization
+                .with_message(fl!("err-pczt-parse", error = format!("{e:?}"))),
             PcztError::Serialize(e) => {
-                LegacyCode::Misc.with_message(format!("Failed to serialize PCZT: {e:?}"))
+                LegacyCode::Misc.with_message(fl!("err-pczt-serialize", error = format!("{e:?}")))
             }
             PcztError::Combine(e) => {
-                LegacyCode::Verify.with_message(format!("Failed to combine PCZTs: {e:?}"))
+                LegacyCode::Verify.with_message(fl!("err-pczt-combine", error = format!("{e:?}")))
             }
-            PcztError::SaplingProve(e) => {
-                LegacyCode::Verify.with_message(format!("Failed to create Sapling proofs: {e:?}"))
-            }
-            PcztError::OrchardProve(e) => {
-                LegacyCode::Verify.with_message(format!("Failed to create Orchard proof: {e:?}"))
-            }
-            PcztError::FinalizeSpends(e) => {
-                LegacyCode::Verify.with_message(format!("Failed to finalize PCZT spends: {e:?}"))
-            }
+            PcztError::SaplingProve(e) => LegacyCode::Verify
+                .with_message(fl!("err-pczt-prove-sapling", error = format!("{e:?}"))),
+            PcztError::OrchardProve(e) => LegacyCode::Verify
+                .with_message(fl!("err-pczt-prove-orchard", error = format!("{e:?}"))),
+            PcztError::FinalizeSpends(e) => LegacyCode::Verify
+                .with_message(fl!("err-pczt-finalize-spends", error = format!("{e:?}"))),
             PcztError::Extract(e) => {
-                LegacyCode::Verify.with_message(format!("Failed to extract transaction: {e:?}"))
+                LegacyCode::Verify.with_message(fl!("err-pczt-extract", error = format!("{e:?}")))
             }
-            PcztError::SignerInit(e) => {
-                LegacyCode::Verify.with_message(format!("Failed to initialize signer: {e:?}"))
-            }
-            PcztError::RecordSigningHints(e) => LegacyCode::Wallet
-                .with_message(format!("Failed to record transparent signing hints: {e:?}")),
-            PcztError::TaskFailed { task, source } => {
-                LegacyCode::Misc.with_message(format!("The {task} task failed: {source}"))
-            }
+            PcztError::SignerInit(e) => LegacyCode::Verify
+                .with_message(fl!("err-pczt-signer-init", error = format!("{e:?}"))),
+            PcztError::RecordSigningHints(e) => LegacyCode::Wallet.with_message(fl!(
+                "err-pczt-record-signing-hints",
+                error = format!("{e:?}")
+            )),
+            PcztError::TaskFailed { task, source } => LegacyCode::Misc.with_message(fl!(
+                "err-pczt-task-failed",
+                task = task,
+                error = source.to_string(),
+            )),
         }
     }
 }

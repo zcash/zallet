@@ -209,6 +209,70 @@ err-transparent-payment-missing =
     The built transaction is missing a requested payment output (to {$address}). The wallet
     database is corrupted or has been tampered with. The transaction has not been broadcast.
 
+## PCZT errors
+
+# In each of these, {$error} is the failure reported by the `pczt` crate. It is
+# diagnostic text from a dependency and is not itself translated.
+err-pczt-parse = Invalid PCZT: {$error}
+err-pczt-serialize = Failed to serialize PCZT: {$error}
+err-pczt-combine = Failed to combine PCZTs: {$error}
+err-pczt-prove-sapling = Failed to create Sapling proofs: {$error}
+err-pczt-prove-orchard = Failed to create Orchard proof: {$error}
+err-pczt-finalize-spends = Failed to finalize PCZT spends: {$error}
+err-pczt-extract = Failed to extract transaction: {$error}
+err-pczt-signer-init = Failed to initialize signer: {$error}
+err-pczt-record-signing-hints = Failed to record transparent signing hints: {$error}
+# {$task} is the name of the blocking task that panicked or was cancelled, such
+# as `pczt_prove`; it is an internal identifier and is not translated.
+err-pczt-task-failed = The {$task} task failed: {$error}
+
+## PCZT request errors
+
+err-pczt-combine-none-given = At least one PCZT is required
+err-pczt-combine-too-many =
+    Too many PCZTs to combine: {$given} exceeds maximum of {$maximum}
+# Identifies which PCZT in the submitted array failed to decode. {$index} is its
+# zero-based position and {$error} is the decoding failure.
+err-pczt-combine-indexed = PCZT {$index}: {$error}
+err-pczt-too-large = PCZT exceeds maximum size limit
+err-pczt-invalid-base64 = Invalid base64 encoding: {$error}
+err-pczt-too-many-recipients =
+    Too many recipients: {$given} exceeds maximum of {$maximum}
+err-pczt-create-failed = Failed to create PCZT: {$error}
+err-pczt-transparent-metadata-lookup =
+    Failed to look up transparent address metadata: {$error}
+err-pczt-transparent-input-count-mismatch =
+    Internal error: transparent input count mismatch
+err-pczt-serialize-transaction = Failed to serialize transaction: {$error}
+
+## PCZT signing errors
+
+# {$hint} is the proprietary-field key that `pczt_create` should have written,
+# such as `zallet.v1.seed_fingerprint`; it is not translated.
+err-pczt-missing-signing-hint = Missing signing hint: {$hint}
+err-pczt-invalid-seed-fingerprint = Invalid seed fingerprint: expected 32 bytes
+err-pczt-invalid-account-index = Invalid account index: expected 4 bytes
+err-pczt-account-index-out-of-range =
+    Invalid account index: {$index} is out of range
+err-pczt-derive-spending-key = Failed to derive spending key: {$error}
+err-pczt-strict-unsigned =
+    Strict mode: {$transparent} transparent, {$sapling} sapling, {$orchard}
+    orchard inputs remain unsigned
+
+## Transaction proposal errors
+
+err-propose-transaction-failed = Failed to propose transaction: {$error}
+err-invalid-from-address =
+    Invalid from address: should be a taddr, zaddr, or UA.
+err-from-address-no-payment-source =
+    Invalid from address, no payment source found for address.
+err-privacy-policy-legacy-compat =
+    LegacyCompat privacy policy is unsupported in {-zallet}
+err-privacy-policy-unknown = Unknown privacy policy {$policy}
+err-confirmations-policy-invalid =
+    Configuration error: minimum confirmations for spending trusted TXOs cannot
+    exceed that for untrusted TXOs.
+
 # errors in migration of configuration data from the zcashd `zcash.conf` config file format
 
 err-migrate-allow-warnings = To allow a migration with warnings, use '{-allow-warnings}'

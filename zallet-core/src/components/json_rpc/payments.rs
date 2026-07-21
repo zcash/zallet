@@ -277,7 +277,10 @@ pub(super) fn propose_and_check(
         None,
     )
     // TODO: Map errors to `zcashd` shape.
-    .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
+    .map_err(|e| {
+        LegacyCode::Wallet
+            .with_message(fl!("err-propose-transaction-failed", error = e.to_string()))
+    })?;
 
     enforce_privacy_policy(&proposal, privacy_policy)?;
 

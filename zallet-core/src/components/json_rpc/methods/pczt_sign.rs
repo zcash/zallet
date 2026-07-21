@@ -15,7 +15,10 @@ use super::pczt_common::{
     decode_pczt_base64, encode_pczt_base64,
 };
 use super::pczt_error::PcztError;
-use crate::components::{database::DbHandle, json_rpc::server::LegacyCode, keystore::KeyStore};
+use crate::{
+    components::{database::DbHandle, json_rpc::server::LegacyCode, keystore::KeyStore},
+    fl,
+};
 
 pub(crate) type Response = RpcResult<ResultType>;
 
@@ -62,13 +65,15 @@ pub(crate) async fn call(
         .proprietary()
         .get(PROP_SEED_FINGERPRINT)
         .ok_or_else(|| {
-            LegacyCode::InvalidParameter
-                .with_message(format!("Missing signing hint: {PROP_SEED_FINGERPRINT}"))
+            LegacyCode::InvalidParameter.with_message(fl!(
+                "err-pczt-missing-signing-hint",
+                hint = PROP_SEED_FINGERPRINT
+            ))
         })?;
 
     let seed_fp =
         SeedFingerprint::from_bytes(seed_fp_bytes.as_slice().try_into().map_err(|_| {
-            LegacyCode::InvalidParameter.with_static("Invalid seed fingerprint: expected 32 bytes")
+            LegacyCode::InvalidParameter.with_message(fl!("err-pczt-invalid-seed-fingerprint"))
         })?);
 
     let account_idx_bytes = pczt
@@ -76,18 +81,21 @@ pub(crate) async fn call(
         .proprietary()
         .get(PROP_ACCOUNT_INDEX)
         .ok_or_else(|| {
-            LegacyCode::InvalidParameter
-                .with_message(format!("Missing signing hint: {PROP_ACCOUNT_INDEX}"))
+            LegacyCode::InvalidParameter.with_message(fl!(
+                "err-pczt-missing-signing-hint",
+                hint = PROP_ACCOUNT_INDEX
+            ))
         })?;
 
     let account_idx_u32 =
         u32::from_le_bytes(account_idx_bytes.as_slice().try_into().map_err(|_| {
-            LegacyCode::InvalidParameter.with_static("Invalid account index: expected 4 bytes")
+            LegacyCode::InvalidParameter.with_message(fl!("err-pczt-invalid-account-index"))
         })?);
 
     let account_idx = AccountId::try_from(account_idx_u32).map_err(|_| {
-        LegacyCode::InvalidParameter.with_message(format!(
-            "Invalid account index: {account_idx_u32} is out of range"
+        LegacyCode::InvalidParameter.with_message(fl!(
+            "err-pczt-account-index-out-of-range",
+            index = account_idx_u32,
         ))
     })?;
 
@@ -151,7 +159,7 @@ pub(crate) async fn call(
     let usk = UnifiedSpendingKey::from_seed(wallet.params(), seed.expose_secret(), account_idx)
         .map_err(|e| {
             LegacyCode::InvalidAddressOrKey
-                .with_message(format!("Failed to derive spending key: {e}"))
+                .with_message(fl!("err-pczt-derive-spending-key", error = e.to_string()))
         })?;
 
     let mut signer = Signer::new(pczt).map_err(PcztError::SignerInit)?;
@@ -218,11 +226,11 @@ pub(crate) async fn call(
             || !unsigned_sapling.is_empty()
             || !unsigned_orchard.is_empty())
     {
-        return Err(LegacyCode::Verify.with_message(format!(
-            "Strict mode: {} transparent, {} sapling, {} orchard inputs remain unsigned",
-            unsigned_transparent.len(),
-            unsigned_sapling.len(),
-            unsigned_orchard.len()
+        return Err(LegacyCode::Verify.with_message(fl!(
+            "err-pczt-strict-unsigned",
+            transparent = unsigned_transparent.len(),
+            sapling = unsigned_sapling.len(),
+            orchard = unsigned_orchard.len(),
         )));
     }
 

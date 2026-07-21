@@ -16,7 +16,7 @@ use zcash_proofs::prover::LocalTxProver;
 
 use super::pczt_common::decode_pczt_base64;
 use super::pczt_error::PcztError;
-use crate::components::json_rpc::server::LegacyCode;
+use crate::{components::json_rpc::server::LegacyCode, fl};
 
 pub(crate) type Response = RpcResult<ResultType>;
 
@@ -61,7 +61,7 @@ pub(crate) async fn call(pczt_base64: &str) -> Response {
             let mut tx_bytes = Vec::new();
             tx.write(&mut tx_bytes).map_err(|e| {
                 LegacyCode::Deserialization
-                    .with_message(format!("Failed to serialize transaction: {e}"))
+                    .with_message(fl!("err-pczt-serialize-transaction", error = e.to_string()))
             })?;
             Ok(tx_bytes)
         })

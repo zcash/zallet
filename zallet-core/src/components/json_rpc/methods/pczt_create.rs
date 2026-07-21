@@ -38,6 +38,7 @@ use crate::{
             server::LegacyCode,
         },
     },
+    fl,
     prelude::*,
 };
 
@@ -74,9 +75,10 @@ pub(crate) async fn call(
     privacy_policy: Option<String>,
 ) -> Response {
     if amounts.len() > MAX_RECIPIENTS {
-        return Err(LegacyCode::InvalidParameter.with_message(format!(
-            "Too many recipients: {} exceeds maximum of {MAX_RECIPIENTS}",
-            amounts.len(),
+        return Err(LegacyCode::InvalidParameter.with_message(fl!(
+            "err-pczt-too-many-recipients",
+            given = amounts.len(),
+            maximum = MAX_RECIPIENTS,
         )));
     }
 
@@ -85,18 +87,18 @@ pub(crate) async fn call(
     // Resolve `from_address` to an account.
     let account = {
         let address = Address::decode(wallet.params(), &from_address).ok_or_else(|| {
-            LegacyCode::InvalidAddressOrKey
-                .with_static("Invalid from address: should be a taddr, zaddr, or UA.")
+            LegacyCode::InvalidAddressOrKey.with_message(fl!("err-invalid-from-address"))
         })?;
 
         get_account_for_address(wallet.as_ref(), &address)
     }?;
 
     let privacy_policy = match privacy_policy.as_deref() {
-        Some("LegacyCompat") => Err(LegacyCode::InvalidParameter
-            .with_static("LegacyCompat privacy policy is unsupported in Zallet")),
+        Some("LegacyCompat") => {
+            Err(LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-legacy-compat")))
+        }
         Some(s) => PrivacyPolicy::from_str(s).ok_or_else(|| {
-            LegacyCode::InvalidParameter.with_message(format!("Unknown privacy policy {s}"))
+            LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-unknown", policy = s))
         }),
         None => Ok(PrivacyPolicy::FullPrivacy),
     }?;
@@ -107,8 +109,7 @@ pub(crate) async fn call(
             |c| ConfirmationsPolicy::new_symmetrical(c, false),
         ),
         None => APP.config().builder.confirmations_policy().map_err(|_| {
-            LegacyCode::Wallet.with_message(
-                "Configuration error: minimum confirmations for spending trusted TXOs cannot exceed that for untrusted TXOs.")
+            LegacyCode::Wallet.with_message(fl!("err-confirmations-policy-invalid"))
         })?,
     };
 
@@ -127,8 +128,7 @@ pub(crate) async fn call(
 
     // Derivation info used to populate the zallet signing hints below.
     let derivation = account.source().key_derivation().ok_or_else(|| {
-        LegacyCode::InvalidAddressOrKey
-            .with_static("Invalid from address, no payment source found for address.")
+        LegacyCode::InvalidAddressOrKey.with_message(fl!("err-from-address-no-payment-source"))
     })?;
 
     // Build the PCZT from the proposal. This selects inputs, computes change,
@@ -146,7 +146,9 @@ pub(crate) async fn call(
         // bundle type must be `DEFAULT` to match it.
         orchard::builder::BundleType::DEFAULT,
     )
-    .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to create PCZT: {e}")))?;
+    .map_err(|e| {
+        LegacyCode::Wallet.with_message(fl!("err-pczt-create-failed", error = e.to_string()))
+    })?;
 
     // Collect the per-input transparent derivation info from the proposal, in
     // the same order as the PCZT's transparent inputs.
@@ -157,8 +159,9 @@ pub(crate) async fn call(
             let meta = wallet
                 .get_transparent_address_metadata(account.id(), address)
                 .map_err(|e| {
-                    LegacyCode::Database.with_message(format!(
-                        "Failed to look up transparent address metadata: {e}"
+                    LegacyCode::Database.with_message(fl!(
+                        "err-pczt-transparent-metadata-lookup",
+                        error = e.to_string(),
                     ))
                 })?;
             input_metadata.push(meta);
@@ -166,9 +169,7 @@ pub(crate) async fn call(
     }
 
     if input_metadata.len() != pczt.transparent().inputs().len() {
-        return Err(
-            LegacyCode::Misc.with_static("Internal error: transparent input count mismatch")
-        );
+        return Err(LegacyCode::Misc.with_message(fl!("err-pczt-transparent-input-count-mismatch")));
     }
 
     // Record signing hints as proprietary fields. The PCZT format does carry

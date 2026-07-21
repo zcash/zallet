@@ -6,7 +6,7 @@ use pczt::Pczt;
 use transparent::keys::TransparentKeyScope;
 
 use super::pczt_error::PcztError;
-use crate::components::json_rpc::server::LegacyCode;
+use crate::{components::json_rpc::server::LegacyCode, fl};
 
 /// Maximum size, in bytes, accepted for a base64-encoded PCZT.
 ///
@@ -68,10 +68,11 @@ pub(super) fn decode_key_scope(value: u32) -> Option<TransparentKeyScope> {
 /// Decodes a base64-encoded PCZT, rejecting oversized inputs before allocating.
 pub(super) fn decode_pczt_base64(s: &str) -> Result<Pczt, ErrorObjectOwned> {
     if s.len() > MAX_PCZT_BASE64_LEN {
-        return Err(LegacyCode::InvalidParameter.with_static("PCZT exceeds maximum size limit"));
+        return Err(LegacyCode::InvalidParameter.with_message(fl!("err-pczt-too-large")));
     }
     let pczt_bytes = Base64::decode_vec(s).map_err(|e| {
-        LegacyCode::Deserialization.with_message(format!("Invalid base64 encoding: {e}"))
+        LegacyCode::Deserialization
+            .with_message(fl!("err-pczt-invalid-base64", error = e.to_string()))
     })?;
     // The parse error names which part of the encoding was malformed, which is
     // what a caller debugging a rejected PCZT needs.
@@ -95,6 +96,8 @@ mod tests {
 
     #[test]
     fn rejects_oversized_input() {
+        crate::i18n::load_languages(&[]);
+
         let oversized = "A".repeat(MAX_PCZT_BASE64_LEN + 1);
         let err = decode_pczt_base64(&oversized).unwrap_err();
         assert!(err.message().contains("maximum size limit"));
@@ -102,12 +105,20 @@ mod tests {
 
     #[test]
     fn rejects_invalid_base64() {
+        crate::i18n::load_languages(&[]);
+
         let err = decode_pczt_base64("not valid base64 !!!").unwrap_err();
         assert!(err.message().contains("base64"));
     }
 
     #[test]
     fn rejects_valid_base64_that_is_not_a_pczt() {
+        // These messages are localized, so the loader must be populated before
+        // asserting on them; `fl!` is inert until a language is loaded. It also
+        // disables the Unicode directionality isolation marks that would
+        // otherwise surround the interpolated cause.
+        crate::i18n::load_languages(&[]);
+
         // Valid base64, but not the PCZT magic/format.
         let err = decode_pczt_base64("AAAAAAAA").unwrap_err();
         let message = err.message();
