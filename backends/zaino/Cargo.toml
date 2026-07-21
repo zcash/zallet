@@ -73,18 +73,18 @@ tempfile = "3"
 
 [patch.crates-io]
 # Replace with the crates.io releases once they ship.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
-zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "f45d49b32392b9aed7ef017047b3995fe5fd6044" }
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
 
 # TEMPORARY: pin the zaino crates to zingolabs/zaino `dev` (currently 8048bf8d),
 # which surfaces the Ironwood (NU6.3) note commitment treestate from
