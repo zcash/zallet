@@ -1,0 +1,94 @@
+name: Trigger integration tests
+
+# Integration tests live in zcash/integration-tests and are kicked off by a
+# repository dispatch. Only dispatch for changes that could plausibly affect
+# their behavior: documentation, other CI/workflow, licensing, and
+# supply-chain tooling changes do not trigger a run.
+#
+# This is expressed with a `paths` include list rather than `paths-ignore`,
+# because GitHub only supports `!` negation (the carve-out below) in `paths`:
+# `**` selects everything, the `!` lines subtract the irrelevant paths, and the
+# trailing re-include means a change to this trigger workflow itself is always
+# integration-tested. Path filters apply to `pull_request` and `push` only, so
+# this workflow does not subscribe to `merge_group` (the merge queue is not
+# required here, and the follow-up push to `main` dispatches integration anyway).
+on:
+  pull_request:
+    paths:
+      - '**'
+      - '!book/**'
+      - '!**.md'             # README, CHANGELOG, CONTRIBUTING, AGENTS, …
+      - '!.github/**'        # other CI / workflows / repo meta
+      - '!LICENSE-*'
+      - '!flake.nix'
+      - '!flake.lock'
+      - '!deny.toml'
+      - '!supply-chain/**'
+      # A change to the integration trigger itself is always tested.
+      - '.github/workflows/integration.yml'
+  push:
+    branches: main
+    paths:
+      - '**'
+      - '!book/**'
+      - '!**.md'
+      - '!.github/**'
+      - '!LICENSE-*'
+      - '!flake.nix'
+      - '!flake.lock'
+      - '!deny.toml'
+      - '!supply-chain/**'
+      - '.github/workflows/integration.yml'
+
+permissions: {}
+
+# Supersede an earlier dispatch for the same PR/branch: a rapid follow-up push
+# cancels the pending trigger job (the remote integration run is cancelled by
+# the matching concurrency group in zcash/integration-tests, keyed on the
+# `source_ref` sent below). `main` pushes are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  trigger-integration:
+    name: Trigger integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        with:
+          app-id: ${{ secrets.DISPATCH_APP_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
+          owner: zcash
+          repositories: integration-tests
+          # Scope the installation token to the minimum needed to POST a
+          # repository_dispatch event (below), instead of inheriting the app's
+          # full installation permissions.
+          permission-contents: write
+
+      - name: Get requested test branch, if any
+        id: test-branch
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          TEST_SHA=$(gh pr -R zcash/zallet list --search "${HEAD_SHA}" --json body | jq '.[0].body' | sed '/[^ ]ZIT-Revision/!d' | sed -E 's/.*ZIT-Revision: ([^\\]*)\\.*/\1/')
+          echo "test_sha=${TEST_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Trigger integration tests
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TEST_SHA: ${{ steps.test-branch.outputs.test_sha }}
+          # Stable per-source key so the integration repo can cancel a
+          # superseded run: the PR number for pull requests, otherwise the
+          # branch name (e.g. `main`).
+          SOURCE_REF: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+        run: >
+          gh api repos/zcash/integration-tests/dispatches
+          --field event_type="zallet-interop-request"
+          --field client_payload[sha]="$GITHUB_SHA"
+          --field client_payload[test_sha]="${TEST_SHA}"
+          --field client_payload[source_ref]="${SOURCE_REF}"
