@@ -653,10 +653,11 @@ pub(super) fn required_privacy_policy<FeeRuleT, NoteRef>(
 #[allow(dead_code)]
 pub(super) fn parse_privacy_policy(privacy_policy: Option<&str>) -> RpcResult<PrivacyPolicy> {
     match privacy_policy {
-        Some("LegacyCompat") => Err(LegacyCode::InvalidParameter
-            .with_static("LegacyCompat privacy policy is unsupported in Zallet")),
+        Some("LegacyCompat") => {
+            Err(LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-legacy-compat")))
+        }
         Some(s) => PrivacyPolicy::from_str(s).ok_or_else(|| {
-            LegacyCode::InvalidParameter.with_message(format!("Unknown privacy policy {s}"))
+            LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-unknown", policy = s))
         }),
         None => Ok(PrivacyPolicy::FullPrivacy),
     }
@@ -954,8 +955,7 @@ pub(super) fn get_account_for_address(
         }
     }
 
-    Err(LegacyCode::InvalidAddressOrKey
-        .with_static("Invalid from address, no payment source found for address."))
+    Err(LegacyCode::InvalidAddressOrKey.with_message(fl!("err-from-address-no-payment-source")))
 }
 
 /// Whether an account with this ZIP 32 derivation holds the legacy `zcashd` pool of funds
@@ -1814,6 +1814,10 @@ mod privacy_policy_tests {
 
     #[test]
     fn parse_privacy_policy_rejects_legacy_compat() {
+        // These messages are localized, so the loader must be populated before
+        // asserting on them; `fl!` is inert until a language is loaded.
+        crate::i18n::load_languages(&[]);
+
         let err = parse_privacy_policy(Some("LegacyCompat"))
             .expect_err("LegacyCompat should be rejected");
         assert_eq!(
@@ -1824,6 +1828,8 @@ mod privacy_policy_tests {
 
     #[test]
     fn parse_privacy_policy_rejects_unknown_policy() {
+        crate::i18n::load_languages(&[]);
+
         let err =
             parse_privacy_policy(Some("Whatever")).expect_err("unknown policy should be rejected");
         assert_eq!(err.message(), "Unknown privacy policy Whatever");
@@ -1913,6 +1919,8 @@ mod privacy_policy_tests {
         /// is reported as an unknown policy.
         #[test]
         fn parse_privacy_policy_rejects_arbitrary_unknown_strings(s in "[A-Za-z]{0,24}") {
+            crate::i18n::load_languages(&[]);
+
             prop_assume!(PrivacyPolicy::from_str(&s).is_none() && s != "LegacyCompat");
             let err = parse_privacy_policy(Some(&s))
                 .expect_err("an unknown policy name should be rejected");

@@ -39,6 +39,7 @@ use crate::{
         },
         keystore::KeyStore,
     },
+    fl,
     prelude::*,
 };
 
@@ -148,10 +149,11 @@ pub(crate) async fn call<C: Chain>(
     };
 
     let privacy_policy = match privacy_policy.as_deref() {
-        Some("LegacyCompat") => Err(LegacyCode::InvalidParameter
-            .with_static("LegacyCompat privacy policy is unsupported in Zallet")),
+        Some("LegacyCompat") => {
+            Err(LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-legacy-compat")))
+        }
         Some(s) => PrivacyPolicy::from_str(s).ok_or_else(|| {
-            LegacyCode::InvalidParameter.with_message(format!("Unknown privacy policy {s}"))
+            LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-unknown", policy = s))
         }),
         None => Ok(PrivacyPolicy::FullPrivacy),
     }?;
@@ -164,12 +166,9 @@ pub(crate) async fn call<C: Chain>(
             ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, true),
             |c| ConfirmationsPolicy::new_symmetrical(c, false),
         ),
-        None => {
-            APP.config().builder.confirmations_policy().map_err(|_| {
-                LegacyCode::Wallet.with_message(
-                    "Configuration error: minimum confirmations for spending trusted TXOs cannot exceed that for untrusted TXOs.")
-            })?
-        }
+        None => APP.config().builder.confirmations_policy().map_err(|_| {
+            LegacyCode::Wallet.with_message(fl!("err-confirmations-policy-invalid"))
+        })?,
     };
 
     let params = *wallet.params();
@@ -184,8 +183,7 @@ pub(crate) async fn call<C: Chain>(
     )?;
 
     let derivation = account.source().key_derivation().ok_or_else(|| {
-        LegacyCode::InvalidAddressOrKey
-            .with_static("Invalid from address, no payment source found for address.")
+        LegacyCode::InvalidAddressOrKey.with_message(fl!("err-from-address-no-payment-source"))
     })?;
 
     // Fetch spending key last, to avoid a keystore decryption if unnecessary.

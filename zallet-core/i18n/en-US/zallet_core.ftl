@@ -266,8 +266,10 @@ err-invalid-from-address =
     Invalid from address: should be a taddr, zaddr, or UA.
 err-from-address-no-payment-source =
     Invalid from address, no payment source found for address.
+# “Zallet” here is the product name, so it is not the lowercase `{-zallet}`
+# command-name term.
 err-privacy-policy-legacy-compat =
-    LegacyCompat privacy policy is unsupported in {-zallet}
+    LegacyCompat privacy policy is unsupported in Zallet
 err-privacy-policy-unknown = Unknown privacy policy {$policy}
 err-confirmations-policy-invalid =
     Configuration error: minimum confirmations for spending trusted TXOs cannot
