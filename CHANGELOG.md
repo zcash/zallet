@@ -87,6 +87,13 @@ be considered breaking changes.
   resolve). Previously the failing request was regenerated from the wallet
   database on every startup, so one stale request could put the wallet into a
   permanent crash-loop.
+- The sync initialization loop no longer busy-loops (pinning a core and
+  logging tens of lines per second) when the wallet database has recorded a
+  higher chain tip than the current chain view serves, e.g. when Zebra's
+  read-only state lags what the wallet observed before a restart. Suggested
+  scan ranges are now clamped to the current chain tip; a range with nothing
+  scannable defers to the steady-state sync task, which waits for chain tip
+  changes.
 
 ## [0.1.0-beta.1] - 2026-07-12
 

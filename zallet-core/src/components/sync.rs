@@ -52,7 +52,8 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_backend::{
     data_api::{
-        TransactionDataRequest, TransactionStatus, WalletRead, WalletWrite, scanning::ScanPriority,
+        TransactionDataRequest, TransactionStatus, WalletRead, WalletWrite,
+        scanning::{ScanPriority, ScanRange},
         wallet::decrypt_and_store_transaction,
     },
     scanning::ScanningKeys,
@@ -203,6 +204,44 @@ fn update_boundary(current_boundary: BlockHeight, tip_height: BlockHeight) -> Bl
     current_boundary.max(tip_height - 100)
 }
 
+/// Selects the next scan range for [`initialize`]'s catch-up loop from the wallet's
+/// suggestions.
+///
+/// Every candidate is first clamped to `current_tip`: `suggest_scan_ranges` can return
+/// ranges beyond the current chain view's tip when the wallet database previously
+/// observed a higher tip than the view now serves (e.g. Zebra's read-only secondary
+/// exposing finalized state that lags what the wallet saw before a restart). Such
+/// ranges contain nothing scannable, and before this clamp existed, handing one to
+/// `scan_blocks` returned `Ok` with no progress and no state change, so the
+/// `initialize` loop spun at full speed — burning a core and logging tens of lines per
+/// second — until the chain view happened to advance past the range (#636). Clamping
+/// scans whatever prefix of a range is actually available now; a range entirely above
+/// the tip is dropped, and if nothing scannable remains the caller's no-range arm exits
+/// to `steady_state`, which waits for tip changes properly.
+///
+/// Beyond the clamp, `Verify` ranges are taken as-is, and ranges at `Historic` priority
+/// or above are truncated to start at `starting_boundary` (history below the boundary
+/// belongs to the `recover_history` task). Lower-priority ranges are not scanned here.
+fn select_initial_scan_range(
+    suggested: impl IntoIterator<Item = ScanRange>,
+    current_tip: BlockHeight,
+    starting_boundary: BlockHeight,
+) -> Option<ScanRange> {
+    suggested
+        .into_iter()
+        .filter_map(|r| {
+            let r = r.truncate_end(current_tip + 1)?;
+            if r.priority() == ScanPriority::Verify {
+                Some(r)
+            } else if r.priority() >= ScanPriority::Historic {
+                r.truncate_start(starting_boundary)
+            } else {
+                None
+            }
+        })
+        .next()
+}
+
 /// Prepares the wallet state for syncing.
 ///
 /// Returns the boundary block between [`steady_state`] and [`recover_history`] syncing.
@@ -238,20 +277,11 @@ async fn initialize<C: Chain>(
         // Set the starting boundary between the `steady_state` and `recover_history` tasks.
         let starting_boundary = update_boundary(BlockHeight::from_u32(0), current_tip.height());
 
-        let scan_range = match db_data
-            .suggest_scan_ranges()?
-            .into_iter()
-            .filter_map(|r| {
-                if r.priority() == ScanPriority::Verify {
-                    Some(r)
-                } else if r.priority() >= ScanPriority::Historic {
-                    r.truncate_start(starting_boundary)
-                } else {
-                    None
-                }
-            })
-            .next()
-        {
+        let scan_range = match select_initial_scan_range(
+            db_data.suggest_scan_ranges()?,
+            current_tip.height(),
+            starting_boundary,
+        ) {
             Some(r) => r,
             None => {
                 // The scan-range loop is about to exit without scanning the tip
@@ -996,11 +1026,105 @@ async fn batch_decryptor(
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainError, SyncError, is_retryable, rewind_step};
+    use super::{ChainError, SyncError, is_retryable, rewind_step, select_initial_scan_range};
+    use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
     use zcash_protocol::consensus::BlockHeight;
 
     fn h(height: u32) -> BlockHeight {
         BlockHeight::from_u32(height)
+    }
+
+    fn range(start: u32, end: u32, priority: ScanPriority) -> ScanRange {
+        ScanRange::from_parts(h(start)..h(end), priority)
+    }
+
+    // The #636 repro: the wallet DB has recorded a higher chain tip than the current
+    // chain view serves, so the only suggestion starts above the tip. It must be
+    // dropped entirely (letting `initialize` exit to `steady_state`) instead of being
+    // handed to `scan_blocks`, which would return `Ok` without progress and spin the
+    // loop at full speed.
+    #[test]
+    fn initial_scan_range_above_tip_is_dropped() {
+        let suggested = vec![range(3_413_618, 3_414_133, ScanPriority::Historic)];
+        assert_eq!(
+            select_initial_scan_range(suggested, h(3_413_617), h(3_413_517)),
+            None,
+        );
+    }
+
+    #[test]
+    fn initial_scan_range_straddling_tip_is_clamped() {
+        // Only the prefix up to and including the tip is scannable now.
+        let suggested = vec![range(1_000, 1_500, ScanPriority::ChainTip)];
+        assert_eq!(
+            select_initial_scan_range(suggested, h(1_200), h(900)),
+            Some(range(1_000, 1_201, ScanPriority::ChainTip)),
+        );
+    }
+
+    #[test]
+    fn initial_scan_range_at_or_below_tip_is_unchanged() {
+        // A range ending exactly at the tip (exclusive end == tip + 1) is untouched.
+        let suggested = vec![range(1_000, 1_201, ScanPriority::ChainTip)];
+        assert_eq!(
+            select_initial_scan_range(suggested, h(1_200), h(900)),
+            Some(range(1_000, 1_201, ScanPriority::ChainTip)),
+        );
+    }
+
+    #[test]
+    fn initial_scan_range_verify_is_kept_whole_but_clamped() {
+        // Verify ranges are not truncated at the starting boundary...
+        let suggested = vec![range(500, 600, ScanPriority::Verify)];
+        assert_eq!(
+            select_initial_scan_range(suggested, h(1_200), h(900)),
+            Some(range(500, 600, ScanPriority::Verify)),
+        );
+        // ...but are still clamped to the tip like everything else.
+        let suggested = vec![range(1_100, 1_500, ScanPriority::Verify)];
+        assert_eq!(
+            select_initial_scan_range(suggested, h(1_200), h(900)),
+            Some(range(1_100, 1_201, ScanPriority::Verify)),
+        );
+    }
+
+    #[test]
+    fn initial_scan_range_historic_is_truncated_to_boundary() {
+        let suggested = vec![range(500, 1_000, ScanPriority::Historic)];
+        assert_eq!(
+            select_initial_scan_range(suggested, h(1_200), h(900)),
+            Some(range(900, 1_000, ScanPriority::Historic)),
+        );
+        // Entirely below the boundary: nothing left for the initialize loop.
+        let suggested = vec![range(500, 800, ScanPriority::Historic)];
+        assert_eq!(select_initial_scan_range(suggested, h(1_200), h(900)), None);
+    }
+
+    #[test]
+    fn initial_scan_range_low_priority_is_skipped() {
+        let suggested = vec![
+            range(1_000, 1_100, ScanPriority::Scanned),
+            range(1_100, 1_150, ScanPriority::Ignored),
+            range(950, 1_000, ScanPriority::OpenAdjacent),
+        ];
+        // The two low-priority ranges are skipped; the first acceptable one wins.
+        assert_eq!(
+            select_initial_scan_range(suggested, h(1_200), h(900)),
+            Some(range(950, 1_000, ScanPriority::OpenAdjacent)),
+        );
+    }
+
+    #[test]
+    fn initial_scan_range_skips_above_tip_to_next_candidate() {
+        // An above-tip range must not mask a scannable one later in the list.
+        let suggested = vec![
+            range(1_300, 1_400, ScanPriority::ChainTip),
+            range(1_000, 1_100, ScanPriority::Historic),
+        ];
+        assert_eq!(
+            select_initial_scan_range(suggested, h(1_200), h(900)),
+            Some(range(1_000, 1_100, ScanPriority::Historic)),
+        );
     }
 
     #[test]
