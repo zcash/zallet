@@ -60,6 +60,7 @@ mod pczt_combine;
 mod pczt_common;
 #[cfg(zallet_build = "wallet")]
 mod pczt_create;
+mod pczt_error;
 mod pczt_extract;
 mod pczt_prove;
 #[cfg(zallet_build = "wallet")]

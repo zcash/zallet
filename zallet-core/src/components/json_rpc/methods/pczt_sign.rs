@@ -14,6 +14,7 @@ use super::pczt_common::{
     PROP_ACCOUNT_INDEX, PROP_ADDRESS_INDEX, PROP_SCOPE, PROP_SEED_FINGERPRINT, decode_key_scope,
     decode_pczt_base64, encode_pczt_base64,
 };
+use super::pczt_error::PcztError;
 use crate::components::{database::DbHandle, json_rpc::server::LegacyCode, keystore::KeyStore};
 
 pub(crate) type Response = RpcResult<ResultType>;
@@ -153,8 +154,7 @@ pub(crate) async fn call(
                 .with_message(format!("Failed to derive spending key: {e}"))
         })?;
 
-    let mut signer = Signer::new(pczt)
-        .map_err(|_| LegacyCode::Verify.with_static("Failed to initialize signer"))?;
+    let mut signer = Signer::new(pczt).map_err(PcztError::SignerInit)?;
 
     // Sign transparent inputs. An input we lack derivation info for, or whose
     // key derivation or signature fails, is recorded as unsigned: it may belong
@@ -167,9 +167,17 @@ pub(crate) async fn call(
                 match usk.transparent().derive_secret_key(*scope, *addr_idx) {
                     Ok(sk) => match signer.sign_transparent(i, &sk) {
                         Ok(()) => transparent_signed += 1,
-                        Err(_) => unsigned_transparent.push(i),
+                        Err(e) => {
+                            tracing::debug!("Transparent input {i} left unsigned: {e:?}");
+                            unsigned_transparent.push(i);
+                        }
                     },
-                    Err(_) => unsigned_transparent.push(i),
+                    Err(e) => {
+                        tracing::debug!(
+                            "Transparent input {i} left unsigned: key derivation failed: {e:?}"
+                        );
+                        unsigned_transparent.push(i);
+                    }
                 }
             }
             None => unsigned_transparent.push(i),
@@ -184,7 +192,10 @@ pub(crate) async fn call(
     for i in 0..sapling_count {
         match signer.sign_sapling(i, sapling_ask) {
             Ok(()) => sapling_signed += 1,
-            Err(_) => unsigned_sapling.push(i),
+            Err(e) => {
+                tracing::debug!("Sapling spend {i} left unsigned: {e:?}");
+                unsigned_sapling.push(i);
+            }
         }
     }
 
@@ -195,7 +206,10 @@ pub(crate) async fn call(
     for i in 0..orchard_count {
         match signer.sign_orchard(i, &orchard_ask) {
             Ok(()) => orchard_signed += 1,
-            Err(_) => unsigned_orchard.push(i),
+            Err(e) => {
+                tracing::debug!("Orchard action {i} left unsigned: {e:?}");
+                unsigned_orchard.push(i);
+            }
         }
     }
 

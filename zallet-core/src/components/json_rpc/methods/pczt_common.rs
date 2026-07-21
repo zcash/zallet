@@ -5,6 +5,7 @@ use jsonrpsee::types::ErrorObjectOwned;
 use pczt::Pczt;
 use transparent::keys::TransparentKeyScope;
 
+use super::pczt_error::PcztError;
 use crate::components::json_rpc::server::LegacyCode;
 
 /// Maximum size, in bytes, accepted for a base64-encoded PCZT.
@@ -72,20 +73,19 @@ pub(super) fn decode_pczt_base64(s: &str) -> Result<Pczt, ErrorObjectOwned> {
     let pczt_bytes = Base64::decode_vec(s).map_err(|e| {
         LegacyCode::Deserialization.with_message(format!("Invalid base64 encoding: {e}"))
     })?;
-    // The parse error describes the malformed bytes; we surface a generic
-    // message rather than its internals.
-    Pczt::parse(&pczt_bytes).map_err(|_| LegacyCode::Deserialization.with_static("Invalid PCZT"))
+    // The parse error names which part of the encoding was malformed, which is
+    // what a caller debugging a rejected PCZT needs.
+    Ok(Pczt::parse(&pczt_bytes).map_err(PcztError::Parse)?)
 }
 
 /// Serializes a PCZT and base64-encodes it for a JSON-RPC response.
 ///
 /// `Pczt::serialize` consumes the PCZT and can fail if it holds values that
 /// exceed the wire format's bounds; that would be an internal inconsistency
-/// rather than bad user input, so we surface it as a generic error.
+/// rather than bad user input, so it maps to a generic error code, with the
+/// cause carried in the message.
 pub(super) fn encode_pczt_base64(pczt: Pczt) -> Result<String, ErrorObjectOwned> {
-    let bytes = pczt
-        .serialize()
-        .map_err(|_| LegacyCode::Misc.with_static("Failed to serialize PCZT"))?;
+    let bytes = pczt.serialize().map_err(PcztError::Serialize)?;
     Ok(Base64::encode_string(&bytes))
 }
 
@@ -109,6 +109,16 @@ mod tests {
     #[test]
     fn rejects_valid_base64_that_is_not_a_pczt() {
         // Valid base64, but not the PCZT magic/format.
-        assert!(decode_pczt_base64("AAAAAAAA").is_err());
+        let err = decode_pczt_base64("AAAAAAAA").unwrap_err();
+        let message = err.message();
+
+        // The parse failure must name its cause, not just report that the PCZT
+        // was invalid; this is the regression guard for surfacing the error
+        // rather than discarding it.
+        let prefix = "Invalid PCZT: ";
+        let cause = message.strip_prefix(prefix).unwrap_or_else(|| {
+            panic!("expected message to start with {prefix:?}, got {message:?}")
+        });
+        assert!(!cause.is_empty(), "expected a cause after {prefix:?}");
     }
 }

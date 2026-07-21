@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use super::pczt_common::{MAX_PCZTS_TO_COMBINE, decode_pczt_base64, encode_pczt_base64};
+use super::pczt_error::PcztError;
 use crate::components::json_rpc::server::LegacyCode;
 
 pub(crate) type Response = RpcResult<ResultType>;
@@ -46,9 +47,7 @@ pub(crate) fn call(pczts_base64: Vec<String>) -> Response {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let combined = Combiner::new(pczts)
-        .combine()
-        .map_err(|_| LegacyCode::Verify.with_static("Failed to combine PCZTs"))?;
+    let combined = Combiner::new(pczts).combine().map_err(PcztError::Combine)?;
 
     Ok(CombineResult {
         pczt: encode_pczt_base64(combined)?,

@@ -16,7 +16,7 @@ use serde::Serialize;
 use zcash_proofs::prover::LocalTxProver;
 
 use super::pczt_common::{decode_pczt_base64, encode_pczt_base64};
-use crate::components::json_rpc::server::LegacyCode;
+use super::pczt_error::PcztError;
 
 pub(crate) type Response = RpcResult<ResultType>;
 
@@ -65,23 +65,24 @@ pub(crate) async fn call(pczt_base64: &str) -> Response {
 
             if need_sapling {
                 let local = LocalTxProver::bundled();
-                prover = prover.create_sapling_proofs(&local, &local).map_err(|_| {
-                    LegacyCode::Verify.with_static("Failed to create Sapling proofs")
-                })?;
+                prover = prover
+                    .create_sapling_proofs(&local, &local)
+                    .map_err(PcztError::SaplingProve)?;
             }
 
             if need_orchard {
                 prover = prover
                     .create_orchard_proof(orchard_proving_key())
-                    .map_err(|_| {
-                        LegacyCode::Verify.with_static("Failed to create Orchard proof")
-                    })?;
+                    .map_err(PcztError::OrchardProve)?;
             }
 
             Ok((prover.finish(), need_sapling, need_orchard))
         })
         .await
-        .map_err(|_| LegacyCode::Misc.with_static("Proving task failed"))??;
+        .map_err(|source| PcztError::TaskFailed {
+            task: "pczt_prove",
+            source,
+        })??;
 
     Ok(ProveResult {
         pczt: encode_pczt_base64(pczt)?,

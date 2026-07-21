@@ -26,6 +26,7 @@ use super::pczt_common::{
     PROP_ACCOUNT_INDEX, PROP_ADDRESS_INDEX, PROP_SCOPE, PROP_SEED_FINGERPRINT, encode_key_scope,
     encode_pczt_base64,
 };
+use super::pczt_error::PcztError;
 use crate::{
     components::{
         database::DbHandle,
@@ -155,8 +156,11 @@ pub(crate) async fn call(
             let address = transparent_input.recipient_address();
             let meta = wallet
                 .get_transparent_address_metadata(account.id(), address)
-                .ok()
-                .flatten();
+                .map_err(|e| {
+                    LegacyCode::Database.with_message(format!(
+                        "Failed to look up transparent address metadata: {e}"
+                    ))
+                })?;
             input_metadata.push(meta);
         }
     }
@@ -208,7 +212,7 @@ pub(crate) async fn call(
             }
             Ok(())
         })
-        .map_err(|_| LegacyCode::Wallet.with_static("Failed to record transparent signing hints"))?
+        .map_err(PcztError::RecordSigningHints)?
         .finish();
 
     Ok(CreateResult {

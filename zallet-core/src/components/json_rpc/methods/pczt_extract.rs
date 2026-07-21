@@ -15,6 +15,7 @@ use serde::Serialize;
 use zcash_proofs::prover::LocalTxProver;
 
 use super::pczt_common::decode_pczt_base64;
+use super::pczt_error::PcztError;
 use crate::components::json_rpc::server::LegacyCode;
 
 pub(crate) type Response = RpcResult<ResultType>;
@@ -46,7 +47,7 @@ pub(crate) async fn call(pczt_base64: &str) -> Response {
             // is a no-op when there are no transparent inputs.
             let pczt = SpendFinalizer::new(pczt)
                 .finalize_spends()
-                .map_err(|_| LegacyCode::Verify.with_static("Failed to finalize PCZT spends"))?;
+                .map_err(PcztError::FinalizeSpends)?;
 
             // Supplying the Sapling verifying keys is required to extract a PCZT
             // that has a Sapling bundle. The Orchard verifying key is generated
@@ -55,7 +56,7 @@ pub(crate) async fn call(pczt_base64: &str) -> Response {
             let tx = TransactionExtractor::new(pczt)
                 .with_sapling(&spend_vk, &output_vk)
                 .extract()
-                .map_err(|_| LegacyCode::Verify.with_static("Failed to extract transaction"))?;
+                .map_err(PcztError::Extract)?;
 
             let mut tx_bytes = Vec::new();
             tx.write(&mut tx_bytes).map_err(|e| {
@@ -65,7 +66,10 @@ pub(crate) async fn call(pczt_base64: &str) -> Response {
             Ok(tx_bytes)
         })
         .await
-        .map_err(|_| LegacyCode::Misc.with_static("Extraction task failed"))??;
+        .map_err(|source| PcztError::TaskFailed {
+            task: "pczt_extract",
+            source,
+        })??;
 
     Ok(ExtractResult {
         hex: hex::encode(tx_bytes),
