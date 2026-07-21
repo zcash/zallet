@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, hash_map::Entry};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::path::PathBuf;
 
 use abscissa_core::Runnable;
@@ -74,7 +74,6 @@ impl MigrateZcashdWalletCmd {
             keystore,
             chain,
             wallet,
-            self.buffer_wallet_transactions,
             self.allow_multiple_wallet_imports,
         )
         .await?;
@@ -206,7 +205,6 @@ impl MigrateZcashdWalletCmd {
         keystore: KeyStore,
         chain: Option<C>,
         wallet: ZcashdWallet,
-        buffer_wallet_transactions: bool,
         allow_multiple_wallet_imports: bool,
     ) -> Result<(), MigrateError> {
         let mut db_data = db.handle().await?;
@@ -424,7 +422,6 @@ impl MigrateZcashdWalletCmd {
             birthday_chain_state.as_ref(),
             recover_until,
             no_scan_birthday_estimate,
-            buffer_wallet_transactions,
         );
 
         // Persist all spending material in the keystore before any wallet-database
@@ -636,8 +633,11 @@ fn to_zewif_frontier<H, const DEPTH: u8>(
 ///   zcashd's post-v4.7.0 derivation semantics;
 /// * account birthdays are replaced with the chain-derived birthday state where one
 ///   was computed, and defaulted to the no-scan estimate where the document records
-///   nothing; and
-/// * transactions are dropped unless `--buffer-wallet-transactions` was given.
+///   nothing.
+///
+/// All of the document's transactions are carried through unchanged, to be imported
+/// directly rather than recovered by the post-import chain scan (which cannot recover
+/// transactions that were never mined into a main-chain block).
 fn enriched_document(
     document: &zewif::Zewif,
     secret_store: Option<zewif::SecretStore>,
@@ -645,7 +645,6 @@ fn enriched_document(
     birthday_chain_state: Option<&zewif::ChainState>,
     recover_until: Option<BlockHeight>,
     no_scan_birthday_estimate: Option<BlockHeight>,
-    buffer_wallet_transactions: bool,
 ) -> zewif::Zewif {
     let mut out = zewif::Zewif::new(
         document.export_height(),
@@ -693,11 +692,16 @@ fn enriched_document(
         out.add_wallet(out_wallet);
     }
 
-    if buffer_wallet_transactions {
-        out.set_transactions(document.transactions().clone());
-    } else {
-        out.set_transactions(BTreeMap::new());
-    }
+    // Carry every transaction through to be imported directly. The post-import chain
+    // scan only re-derives transactions from the main-chain blocks it scans, so it
+    // cannot recover a transaction that was never mined (a still-unmined send) or one
+    // recorded only against a non-main-chain block (a conflicted or reorged
+    // transaction). Importing them all here is what preserves that history.
+    //
+    // The importer stores each transaction as unmined (it has no mined height to
+    // record); for one that was in fact mined, the scan later re-encounters it and
+    // fills in its true height and block.
+    out.set_transactions(document.transactions().clone());
 
     if let Some(store) = secret_store {
         out.set_secrets(zewif::Secrets::Plain(store));
@@ -977,15 +981,27 @@ mod tests {
         wallet.add_account(legacy);
         document.add_wallet(wallet);
 
+        // A mined transaction: it carries a block position.
         let txid = zewif::TxId::from_bytes([4u8; 32]);
-        document.add_transaction(txid, zewif::Transaction::new(txid));
+        let mut tx = zewif::Transaction::new(txid);
+        tx.set_block_position(zewif::TxBlockPosition::new(
+            zewif::BlockHash::from_bytes([7u8; 32]),
+            0,
+        ));
+        document.add_transaction(txid, tx);
 
         (document, legacy_fp, mnemonic_fp)
     }
 
     #[test]
-    fn enrichment_normalizes_legacy_derivation_and_strips_transactions() {
-        let (document, _legacy_fp, mnemonic_fp) = test_document();
+    fn enrichment_normalizes_legacy_derivation_and_retains_transactions() {
+        let (mut document, _legacy_fp, mnemonic_fp) = test_document();
+
+        // Add a never-mined transaction (no block position) alongside the mined one
+        // from `test_document`; a chain scan cannot recover it, so enrichment must
+        // keep it.
+        let unmined_txid = zewif::TxId::from_bytes([5u8; 32]);
+        document.add_transaction(unmined_txid, zewif::Transaction::new(unmined_txid));
 
         let enriched = enriched_document(
             &document,
@@ -994,7 +1010,6 @@ mod tests {
             None,
             None,
             Some(BlockHeight::from_u32(1_900_000)),
-            false,
         );
 
         let account = &enriched.wallets()[0].accounts()[0];
@@ -1010,7 +1025,9 @@ mod tests {
             account.birthday_height(),
             Some(zewif::BlockHeight::from_u32(1_900_000))
         );
-        assert!(enriched.transactions().is_empty());
+        // Both the mined and the unmined transaction are retained for direct import.
+        assert_eq!(enriched.transactions().len(), 2);
+        assert!(enriched.transactions().contains_key(&unmined_txid));
     }
 
     #[test]
@@ -1027,7 +1044,6 @@ mod tests {
             Some(&chain_state),
             Some(BlockHeight::from_u32(2_000_000)),
             None,
-            true,
         );
 
         let account = &enriched.wallets()[0].accounts()[0];

@@ -174,12 +174,6 @@ pub(crate) struct MigrateZcashdWalletCmd {
     #[arg(long)]
     pub(crate) zcashd_datadir: Option<PathBuf>,
 
-    /// Buffer wallet transactions in-memory in the process of performing the wallet restore. For
-    /// very active wallets, this might exceed the available memory on your machine, so enable this
-    /// with caution.
-    #[arg(long)]
-    pub(crate) buffer_wallet_transactions: bool,
-
     /// Allow import of wallet data from multiple `zcashd` `wallet.dat` files. Each imported wallet
     /// will create a distinct set of accounts in `zallet`. Attempts to import wallet data
     /// corresponding to an already-imported wallet will result in an error.
