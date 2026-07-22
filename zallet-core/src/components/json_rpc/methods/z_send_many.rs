@@ -13,14 +13,10 @@ use zcash_client_backend::{
         Account,
         wallet::{
             ConfirmationsPolicy, create_proposed_transactions,
-            input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy},
-            propose_transfer,
+            input_selection::{SpendPolicy, TransparentSpendPolicy},
         },
     },
-    fees::{
-        DustOutputPolicy, StandardFeeRule, TransparentChangePolicy,
-        standard::MultiOutputChangeStrategy,
-    },
+    fees::StandardFeeRule,
     wallet::OvkPolicy,
 };
 use zcash_client_sqlite::{AccountUuid, ReceivedNoteId};
@@ -43,7 +39,8 @@ use crate::{
             payments::{
                 AmountParameter, IncompatiblePrivacyPolicy, PrivacyPolicy, SendResult,
                 build_request, enforce_privacy_policy, get_account_for_address,
-                get_legacy_pool_account, verify_and_broadcast_transactions,
+                get_legacy_pool_account, propose_transfer_with_policy,
+                proposed_transparent_payments, verify_and_broadcast_transactions,
             },
             server::LegacyCode,
         },
@@ -111,23 +108,6 @@ fn spend_policy_for(source: &Address) -> SpendPolicy {
 /// to `z_shieldcoinbase` for coinbase funds.
 fn legacy_pool_spend_policy() -> SpendPolicy {
     SpendPolicy::shielded_pools([]).with_transparent(TransparentSpendPolicy::any_account_addr())
-}
-
-/// Whether change may be returned to the transparent pool.
-///
-/// Permitted exactly when `spend_policy` can spend transparent funds in the first place, which
-/// keeps a fully transparent send transparent end to end rather than sweeping its change into a
-/// shielded pool. A shielded send therefore cannot acquire a transparent change output by this
-/// route.
-///
-/// The change strategy independently enforces the same thing (it emits transparent change only
-/// when the transaction's net flows are fully transparent, i.e. it has no shielded input or
-/// output at all), but that is its invariant, not ours.
-fn transparent_change_policy_for(spend_policy: &SpendPolicy) -> TransparentChangePolicy {
-    match spend_policy.transparent() {
-        Some(_) => TransparentChangePolicy::TransparentChangeAllowed,
-        None => TransparentChangePolicy::ShieldChange,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -268,102 +248,18 @@ pub(crate) async fn call<C: Chain>(
         }
     }
 
-    let transparent_change_policy = transparent_change_policy_for(&spend_policy);
-
-    // Where shielded change goes when the transaction has no shielded flows to infer a pool
-    // from. A transaction that does have shielded flows ignores this and keeps its change in
-    // the pool it is already using.
-    //
-    // This stays Orchard rather than Ironwood: the change strategy promotes it to Ironwood
-    // itself once NU6.3 is active (the turnstile forbids value from entering the Orchard
-    // pool, so change out of a purely transparent transaction has to land in Ironwood), and
-    // it does so against the transaction's target height, which is not known here. Naming
-    // Ironwood outright would instead send change to a pool that does not exist yet on a
-    // chain where NU6.3 has not activated.
-    let fallback_change_pool = ShieldedPool::Orchard;
-
-    // Shielded change is split across several notes, per the wallet's note-management
-    // configuration, so the account keeps a usable set of denominations.
-    let split_policy = APP.config().note_management.split_policy();
-
-    // Change too small to be worth its own output is added to the fee instead.
-    let dust_output_policy = DustOutputPolicy::default();
-
-    // No memo is attached to change. A change memo would force the change into a shielded
-    // pool, since a transparent output cannot carry one.
-    let change_memo = None;
-
-    let change_strategy = MultiOutputChangeStrategy::new(
-        StandardFeeRule::Zip317,
-        change_memo,
-        fallback_change_pool,
-        dust_output_policy,
-        split_policy,
-    )
-    .with_transparent_change_policy(transparent_change_policy);
-
-    let input_selector = GreedyInputSelector::new();
-
-    let proposal = propose_transfer::<_, _, _, _, Infallible>(
+    let proposal = propose_transfer_with_policy(
         wallet.as_mut(),
         &params,
         account.id(),
-        &input_selector,
-        &change_strategy,
         request,
         confirmations_policy,
         &spend_policy,
-        // Do not request a specific transaction version; building falls back to the version
-        // implied by the target height.
-        None,
-    )
-    // TODO: Map errors to `zcashd` shape.
-    .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
+    )?;
 
     enforce_privacy_policy(&proposal, privacy_policy)?;
 
-    let orchard_actions_limit = APP.config().builder.limits.orchard_actions().into();
-    for step in proposal.steps() {
-        let orchard_spends = step
-            .shielded_inputs()
-            .iter()
-            .flat_map(|inputs| inputs.notes())
-            .filter(|note| note.note().pool() == ShieldedPool::Orchard)
-            .count();
-
-        let orchard_outputs = step
-            .payment_pools()
-            .values()
-            .filter(|pool| pool == &&PoolType::ORCHARD)
-            .count()
-            + step
-                .balance()
-                .proposed_change()
-                .iter()
-                .filter(|change| change.output_pool() == PoolType::ORCHARD)
-                .count();
-
-        let orchard_actions = orchard_spends.max(orchard_outputs);
-
-        if orchard_actions > orchard_actions_limit {
-            let (count, kind) = if orchard_outputs <= orchard_actions_limit {
-                (orchard_spends, "inputs")
-            } else if orchard_spends <= orchard_actions_limit {
-                (orchard_outputs, "outputs")
-            } else {
-                (orchard_actions, "actions")
-            };
-
-            return Err(LegacyCode::Misc.with_message(fl!(
-                "err-excess-orchard-actions",
-                count = count,
-                kind = kind,
-                limit = orchard_actions_limit,
-                config = "-orchardactionlimit=N",
-                bound = format!("N >= %u"),
-            )));
-        }
-    }
+    check_orchard_actions_limit(&proposal)?;
 
     let derivation = account.source().key_derivation().ok_or_else(|| {
         LegacyCode::InvalidAddressOrKey
@@ -419,6 +315,64 @@ pub(crate) async fn call<C: Chain>(
     ))
 }
 
+/// Rejects a proposal whose Orchard action count exceeds the configured limit.
+///
+/// A step's action count is the greater of its Orchard spends and its Orchard outputs (an
+/// action carries at most one of each), so the limit is checked against that maximum, and the
+/// error names whichever of the two actually breached it.
+///
+/// Shared with the account-based transaction methods, which enforce the same limit on the
+/// proposals they build.
+pub(super) fn check_orchard_actions_limit<NoteRef>(
+    proposal: &Proposal<StandardFeeRule, NoteRef>,
+) -> RpcResult<()> {
+    let orchard_actions_limit = APP.config().builder.limits.orchard_actions().into();
+
+    for step in proposal.steps() {
+        let orchard_spends = step
+            .shielded_inputs()
+            .iter()
+            .flat_map(|inputs| inputs.notes())
+            .filter(|note| note.note().pool() == ShieldedPool::Orchard)
+            .count();
+
+        let orchard_outputs = step
+            .payment_pools()
+            .values()
+            .filter(|pool| pool == &&PoolType::ORCHARD)
+            .count()
+            + step
+                .balance()
+                .proposed_change()
+                .iter()
+                .filter(|change| change.output_pool() == PoolType::ORCHARD)
+                .count();
+
+        let orchard_actions = orchard_spends.max(orchard_outputs);
+
+        if orchard_actions > orchard_actions_limit {
+            let (count, kind) = if orchard_outputs <= orchard_actions_limit {
+                (orchard_spends, "inputs")
+            } else if orchard_spends <= orchard_actions_limit {
+                (orchard_outputs, "outputs")
+            } else {
+                (orchard_actions, "actions")
+            };
+
+            return Err(LegacyCode::Misc.with_message(fl!(
+                "err-excess-orchard-actions",
+                count = count,
+                kind = kind,
+                limit = orchard_actions_limit,
+                config = "-orchardactionlimit=N",
+                bound = format!("N >= %u"),
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Construct and send the transaction, returning the resulting txid.
 /// Errors in transaction construction will throw.
 ///
@@ -432,7 +386,7 @@ pub(crate) async fn call<C: Chain>(
 /// 2. #1360 Note selection is not optimal.
 /// 3. #1277 Spendable notes are not locked, so an operation running in parallel
 ///    could also try to use them.
-async fn run<C: Chain>(
+pub(super) async fn run<C: Chain>(
     mut wallet: DbHandle,
     chain: C,
     account_id: AccountUuid,
@@ -461,8 +415,16 @@ async fn run<C: Chain>(
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
 
-    verify_and_broadcast_transactions(&wallet, chain, account_id, &ufvk, &proposal, txids.into())
-        .await
+    let expected_payments = proposed_transparent_payments(wallet.params(), &proposal)?;
+    verify_and_broadcast_transactions(
+        &wallet,
+        chain,
+        account_id,
+        &ufvk,
+        Some(expected_payments),
+        txids.into(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -479,9 +441,9 @@ mod tests {
     use zcash_protocol::consensus::Network;
     use zip32::AccountId;
 
-    use super::{
-        SpendPolicy, legacy_pool_spend_policy, spend_policy_for, transparent_change_policy_for,
-    };
+    use crate::components::json_rpc::payments::transparent_change_policy_for;
+
+    use super::{SpendPolicy, legacy_pool_spend_policy, spend_policy_for};
 
     /// `ANY_TADDR` draws on the legacy pool's transparent funds, on any address within it, and
     /// on nothing else.

@@ -38,7 +38,10 @@ use crate::{
         database::{DbConnection, DbHandle},
         json_rpc::{
             asyncop::{ContextInfo, OperationId},
-            payments::{PrivacyPolicy, SendResult, parse_memo, verify_and_broadcast_transactions},
+            payments::{
+                PrivacyPolicy, SendResult, parse_memo, proposed_transparent_payments,
+                verify_and_broadcast_transactions,
+            },
             server::LegacyCode,
             utils::{JsonZec, value_from_zatoshis},
         },
@@ -540,8 +543,16 @@ async fn run<C: Chain>(
         LegacyCode::Wallet.with_message(format!("Failed to build shielding transaction: {e}"))
     })?;
 
-    verify_and_broadcast_transactions(&wallet, chain, account_id, &ufvk, &proposal, txids.into())
-        .await
+    let expected_payments = proposed_transparent_payments(wallet.params(), &proposal)?;
+    verify_and_broadcast_transactions(
+        &wallet,
+        chain,
+        account_id,
+        &ufvk,
+        Some(expected_payments),
+        txids.into(),
+    )
+    .await
 }
 
 #[cfg(test)]

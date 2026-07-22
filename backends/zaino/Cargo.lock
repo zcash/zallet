@@ -3702,6 +3702,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "pczt"
+version = "0.8.0-rc.1"
+source = "git+https://github.com/zcash/librustzcash.git?rev=0531f9d89450d5def16d4c320972e4ce960f9175#0531f9d89450d5def16d4c320972e4ce960f9175"
+dependencies = [
+ "blake2b_simd",
+ "bls12_381",
+ "document-features",
+ "ff",
+ "getset",
+ "jubjub",
+ "nonempty 0.11.0",
+ "orchard 0.15.0",
+ "pasta_curves",
+ "postcard",
+ "rand_core 0.6.4",
+ "redjubjub",
+ "sapling-crypto",
+ "secp256k1",
+ "serde",
+ "serde_with",
+ "zcash_note_encryption",
+ "zcash_primitives 0.29.0",
+ "zcash_protocol 0.10.0",
+ "zcash_script",
+ "zcash_transparent 0.9.0",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6192,6 +6220,7 @@ checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
@@ -6892,6 +6921,7 @@ dependencies = [
  "base64ct",
  "bech32 0.11.1",
  "bip0039",
+ "bip32",
  "blake2b_simd",
  "clap",
  "clap_complete",
@@ -6918,6 +6948,7 @@ dependencies = [
  "nix 0.29.0",
  "nonempty 0.11.0",
  "orchard 0.15.0",
+ "pczt",
  "phf",
  "quote",
  "rand 0.8.7",
@@ -7046,13 +7077,16 @@ dependencies = [
  "nonempty 0.11.0",
  "orchard 0.15.0",
  "pasta_curves",
+ "pczt",
  "percent-encoding",
+ "postcard",
  "prost",
  "rand_core 0.6.4",
  "rayon",
  "sapling-crypto",
  "secp256k1",
  "secrecy 0.8.0",
+ "serde",
  "shardtree",
  "subtle",
  "time",
@@ -7104,6 +7138,7 @@ dependencies = [
  "schemerz-rusqlite",
  "secp256k1",
  "secrecy 0.8.0",
+ "serde",
  "shardtree",
  "static_assertions",
  "subtle",

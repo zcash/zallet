@@ -30,6 +30,9 @@ audit-as-crates-io = false
 
 [policy.incrementalmerkletree]
 
+[policy.pczt]
+audit-as-crates-io = false
+
 [policy.shardtree]
 
 [policy.tower-batch-control]

@@ -65,11 +65,17 @@ mod view_transaction;
 #[cfg(zallet_build = "wallet")]
 mod z_export_viewing_key;
 #[cfg(zallet_build = "wallet")]
+mod z_finalize_transaction;
+#[cfg(zallet_build = "wallet")]
 mod z_get_balance_for_account;
 #[cfg(zallet_build = "wallet")]
 mod z_get_total_balance;
 #[cfg(zallet_build = "wallet")]
 mod z_import_address;
+#[cfg(zallet_build = "wallet")]
+mod z_propose_transaction;
+#[cfg(zallet_build = "wallet")]
+mod z_send_from_account;
 #[cfg(zallet_build = "wallet")]
 mod z_send_many;
 #[cfg(zallet_build = "wallet")]
@@ -633,6 +639,78 @@ pub(crate) trait WalletRpc {
     ///   - `"NoPrivacy"`: Allow the transaction to reveal any information necessary to
     ///     create it. This implies revealing information described under
     ///     `"AllowFullyTransparent"` and `"AllowLinkingAccountAddresses"`.
+    /// Proposes a transaction sending funds from an account, returning a PCZT for
+    /// inspection along with the privacy policy required to execute it.
+    ///
+    /// Unlike `z_sendmany`, the source of funds is an account UUID together with an
+    /// explicit fund source, rather than an address. This method does not sign or broadcast
+    /// the transaction, and does not generate proofs; pass the returned PCZT to
+    /// `z_finalizetransaction` to do so.
+    ///
+    /// # Arguments
+    /// - `account`: The UUID of the account to send the funds from.
+    /// - `fund_source`: Where funds may be drawn from. One of the strings `"orchard"`,
+    ///   `"sapling"`, `"any_transparent"`, or an array of transparent address strings.
+    /// - `recipients`: An array of JSON objects representing the amounts to send, with the
+    ///   same shape as `z_sendmany`'s `amounts`.
+    /// - `minconf` (numeric, optional): Only use funds confirmed at least this many times.
+    ///
+    /// The privacy policy required to execute the proposal is computed from the resulting
+    /// transaction and returned alongside the PCZT; the caller does not supply one.
+    /// Finalizes a proposed transaction, signing and broadcasting it.
+    ///
+    /// Takes a PCZT produced by `z_proposetransaction`, applies this account's spend
+    /// authorizing signatures and proofs, extracts the resulting transaction, and broadcasts
+    /// it, returning the resulting txid.
+    ///
+    /// # Arguments
+    /// - `account`: The UUID of the account whose keys should sign the transaction.
+    /// - `pczt`: The hex-encoded PCZT to finalize, as returned by `z_proposetransaction`.
+    /// - `privacy_policy`: Policy for what information leakage is acceptable, acknowledging
+    ///   the privacy implications reported by `z_proposetransaction`.
+    #[method(name = "z_finalizetransaction")]
+    async fn z_finalize_transaction(
+        &self,
+        account: JsonValue,
+        pczt: String,
+        privacy_policy: String,
+    ) -> z_finalize_transaction::Response;
+
+    #[method(name = "z_proposetransaction")]
+    async fn z_propose_transaction(
+        &self,
+        account: JsonValue,
+        fund_source: JsonValue,
+        recipients: Vec<AmountParameter>,
+        minconf: Option<u32>,
+    ) -> z_propose_transaction::Response;
+
+    /// Sends funds from an account in one shot, signing and broadcasting the transaction.
+    ///
+    /// Unlike `z_sendmany`, the source of funds is an account UUID together with an explicit
+    /// fund source, rather than an address. Unlike `z_proposetransaction`, the transaction is
+    /// executed immediately, so the caller must acknowledge its privacy implications up front
+    /// by supplying the policy to enforce.
+    ///
+    /// # Arguments
+    /// - `account`: The UUID of the account to send the funds from.
+    /// - `fund_source`: Where funds may be drawn from. One of the strings `"orchard"`,
+    ///   `"sapling"`, `"any_transparent"`, or an array of transparent address strings.
+    /// - `recipients`: An array of JSON objects representing the amounts to send, with the
+    ///   same shape as `z_sendmany`'s `amounts`.
+    /// - `minconf` (numeric, optional): Only use funds confirmed at least this many times.
+    /// - `privacy_policy`: Policy for what information leakage is acceptable, using the same
+    ///   values as `z_sendmany`. Required: the send is not proposed for review first.
+    #[method(name = "z_sendfromaccount")]
+    async fn z_send_from_account(
+        &self,
+        account: JsonValue,
+        fund_source: JsonValue,
+        recipients: Vec<AmountParameter>,
+        minconf: Option<u32>,
+        privacy_policy: String,
+    ) -> z_send_from_account::Response;
+
     #[method(name = "z_sendmany")]
     async fn z_send_many(
         &self,
@@ -1099,6 +1177,62 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             key,
             rescan,
             start_height,
+        )
+        .await
+    }
+
+    async fn z_finalize_transaction(
+        &self,
+        account: JsonValue,
+        pczt: String,
+        privacy_policy: String,
+    ) -> z_finalize_transaction::Response {
+        z_finalize_transaction::call(
+            self.wallet().await?,
+            self.keystore.clone(),
+            self.chain().await?,
+            account,
+            pczt,
+            privacy_policy,
+        )
+        .await
+    }
+
+    async fn z_propose_transaction(
+        &self,
+        account: JsonValue,
+        fund_source: JsonValue,
+        recipients: Vec<AmountParameter>,
+        minconf: Option<u32>,
+    ) -> z_propose_transaction::Response {
+        z_propose_transaction::call(
+            self.wallet().await?,
+            self.keystore.clone(),
+            account,
+            fund_source,
+            recipients,
+            minconf,
+        )
+        .await
+    }
+
+    async fn z_send_from_account(
+        &self,
+        account: JsonValue,
+        fund_source: JsonValue,
+        recipients: Vec<AmountParameter>,
+        minconf: Option<u32>,
+        privacy_policy: String,
+    ) -> z_send_from_account::Response {
+        z_send_from_account::call(
+            self.wallet().await?,
+            self.keystore.clone(),
+            self.chain().await?,
+            account,
+            fund_source,
+            recipients,
+            minconf,
+            privacy_policy,
         )
         .await
     }
