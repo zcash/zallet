@@ -165,18 +165,29 @@ tonic = "0.14"
 
 [patch.crates-io]
 # Replace with the crates.io releases once they ship.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+#
+# TEMPORARY PIN: the current rev is on the `danny/note-locking-testing` branch
+# of librustzcash (PR #2726), which carries the owner-keyed note-locking API
+# (`LockOwner`/`LockRequest` on the propose_* functions, the `WalletWrite` lock
+# methods, `Balance::locked_value`). Move back to a main-branch rev (or the
+# released crates) once PR #2726 merges.
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "2e140f402cc72f0f483d686d46b5f18e07971fcd" }
+# The pinned librustzcash rev builds against the git `orchard` (the ZIP 374 /
+# NU6.3 deferred-anchor builder API: `Builder::new_with_anchor_deferred`,
+# `add_spend_unwitnessed`), not the crates.io release; patch it to the same rev
+# librustzcash pins. Drop alongside the librustzcash pin above.
+orchard = { git = "https://github.com/zcash/orchard.git", rev = "3bd2b736d1273226595773265313fc3f3428af16" }
 
 [profile.release]
 debug = "line-tables-only"

@@ -233,10 +233,33 @@ pub struct BuilderSection {
     /// Values smaller than `trusted_confirmations` are ignored.
     pub untrusted_confirmations: Option<u32>,
 
+    /// The number of blocks for which the inputs selected by a spend proposal are locked.
+    ///
+    /// While a spend operation (e.g. `z_sendmany`, `z_shieldcoinbase`) is in flight, the
+    /// notes and UTXOs it selected are locked so that a concurrent operation on the same
+    /// account cannot select (and double-spend) them. The lock is released when the
+    /// operation's transactions are stored for broadcast, released explicitly if the
+    /// operation fails, and expires on its own once the chain advances this many blocks
+    /// past the operation's target height (self-healing if the wallet crashes while an
+    /// operation is in flight).
+    ///
+    /// Set to `0` to disable input locking entirely.
+    pub note_lock_blocks: Option<u32>,
+
     /// Configurable limits on transaction builder operation (to prevent e.g. memory
     /// exhaustion).
     pub limits: BuilderLimitsSection,
 }
+
+/// The default number of blocks for which a spend proposal's inputs stay locked.
+///
+/// The lock must outlive the worst-case time between input selection and the transactions
+/// being stored for broadcast, which is dominated by proving (seconds to a few minutes per
+/// transaction, longer on constrained hardware or for multi-step proposals). 40 blocks is
+/// 50 minutes at a 75-second block target: comfortably above worst-case proving time, and
+/// the same window as the default `tx_expiry_delta`, so an in-flight transaction's inputs
+/// stay locked at least as long as the transaction itself could still be mined.
+const DEFAULT_NOTE_LOCK_BLOCKS: u32 = 40;
 
 impl BuilderSection {
     /// Whether to spend unconfirmed transparent change when sending transactions.
@@ -289,6 +312,24 @@ impl BuilderSection {
     /// Default is 10.
     pub fn untrusted_confirmations(&self) -> u32 {
         self.untrusted_confirmations.unwrap_or(10)
+    }
+
+    /// The number of blocks for which the inputs selected by a spend proposal are locked,
+    /// or `None` if input locking is disabled (a configured value of `0`).
+    ///
+    /// Default is 40 (about 50 minutes of block time): comfortably above the worst-case
+    /// build-and-prove time of a spend operation, and equal to the default
+    /// `tx_expiry_delta`. See `DEFAULT_NOTE_LOCK_BLOCKS` for the full rationale.
+    ///
+    /// Locks self-expire once the chain advances past the lock height, so a crashed
+    /// operation's inputs become spendable again without intervention; a lock window
+    /// shorter than the worst-case proving time re-opens the double-spend race that
+    /// locking exists to prevent.
+    pub fn note_lock_blocks(&self) -> Option<u32> {
+        match self.note_lock_blocks.unwrap_or(DEFAULT_NOTE_LOCK_BLOCKS) {
+            0 => None,
+            n => Some(n),
+        }
     }
 
     /// Returns the confirmations policy used for spending, based on number of trusted and
@@ -856,6 +897,7 @@ impl ZalletConfig {
                 "trusted_confirmations",
                 conf.builder.trusted_confirmations(),
             ),
+            builder("note_lock_blocks", conf.builder.note_lock_blocks()),
             builder("tx_expiry_delta", conf.builder.tx_expiry_delta()),
             builder(
                 "untrusted_confirmations",

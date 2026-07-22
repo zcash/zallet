@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use transparent::{address::TransparentAddress, keys::AccountPubKey};
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
-    data_api::{Account as _, WalletRead},
+    data_api::{Account as _, WalletRead, wallet::unlock_proposal_inputs},
     proposal::Proposal,
-    wallet::TransparentAddressSource,
+    wallet::{LockOwner, TransparentAddressSource},
     zip321::{Payment, TransactionRequest},
 };
 use zcash_client_sqlite::{AccountUuid, wallet::Account};
@@ -63,6 +63,45 @@ impl AmountParameter {
 ///
 /// Rejects an empty array, duplicate recipient addresses, malformed addresses, and total
 /// output value overflow.
+/// The retryable error returned when a spend operation loses a note-lock conflict.
+///
+/// A lock conflict means a DIFFERENT lock owner (a concurrent operation, each of which
+/// locks under its own random `LockOwner` token) holds one of the inputs this operation
+/// selected; re-locking under the same owner is idempotent and never conflicts. The
+/// condition is transient: the caller should retry once the other operation completes,
+/// fails, or its locks expire.
+pub(super) fn account_busy_error() -> ErrorObjectOwned {
+    LegacyCode::Wallet.with_static(
+        "Account is busy: another in-flight transaction has locked one or more of the \
+         inputs selected by this operation. Retry shortly.",
+    )
+}
+
+/// Releases a locking proposal's input locks after a failure between proposal creation and
+/// the storage of its transactions.
+///
+/// Locks are otherwise released only when `store_transactions_to_be_sent` records the
+/// inputs as spent, or when the lock window expires; without this, a build/prove/sign
+/// failure would leave the account's inputs unspendable until expiry. `lock_owner` is the
+/// owner token the operation locked with; only that owner's locks are released, so a
+/// concurrent operation's locks on other outputs are never disturbed. A failure to unlock
+/// is logged rather than propagated (the original error is what the caller must see, and
+/// the locks self-expire), and `None` (locking disabled or not performed) is a no-op.
+pub(super) fn unlock_proposal_inputs_after_failure<FeeRuleT, NoteRef>(
+    wallet: &mut DbConnection,
+    proposal: &Proposal<FeeRuleT, NoteRef>,
+    lock_owner: Option<LockOwner>,
+) {
+    if let Some(owner) = lock_owner {
+        if let Err(e) = unlock_proposal_inputs(wallet, proposal, owner) {
+            tracing::warn!(
+                "Failed to release a failed operation's input locks (they will expire on \
+                 their own at the lock expiry height): {e}",
+            );
+        }
+    }
+}
+
 pub(super) fn build_request(amounts: &[AmountParameter]) -> RpcResult<TransactionRequest> {
     if amounts.is_empty() {
         return Err(

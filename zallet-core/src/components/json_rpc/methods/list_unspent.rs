@@ -186,6 +186,10 @@ pub(crate) fn call(
 
         let is_watch_only = !matches!(account.purpose(), AccountPurpose::Spending { .. });
 
+        // `z_listunspent` reports unspent outputs and notes; a lock defers selection but
+        // does not spend, so locked entries are listed.
+        let include_locked = true;
+
         let utxos = wallet
             .get_transparent_receivers(account_id, true, true)
             .map_err(|e| {
@@ -212,6 +216,7 @@ pub(crate) fn call(
                             target_height,
                             confirmations_policy,
                             coinbase_filter,
+                            include_locked,
                         )
                         .map_err(|e| {
                             RpcError::owned(
@@ -265,6 +270,7 @@ pub(crate) fn call(
                 ],
                 target_height,
                 &[],
+                include_locked,
             )
             .map_err(|e| {
                 RpcError::owned(
