@@ -119,6 +119,35 @@ that require the availability of private keys, such as sending funds.
 Issuing the `walletpassphrase` command while the wallet is already unlocked will
 set a new unlock time that overrides the old one.
 
+## `z_clearlockedoutputs`
+
+*Only available in wallet builds of Zallet.*
+
+Releases every note lock held for the given account.
+
+While a spend operation (`z_sendmany`, `z_shieldcoinbase`) is in flight, the notes
+and UTXOs it selected are locked so that no concurrent operation can select them;
+the locks are released when the operation completes or fails, and otherwise expire
+on their own once the chain advances past their lock height (the
+`builder.note_lock_blocks` config option, 40 blocks by default).
+
+This method is a recovery mechanism for the case where the wallet has lost track of
+an in-flight operation (for example, the process was killed between creating a
+proposal and building its transactions) and its locks would otherwise make the
+account's funds unspendable until they expire.
+
+#### Warning
+
+This releases every lock for the account, including locks held by operations that
+are still legitimately in flight; their inputs immediately become selectable by new
+operations, re-creating the double-spend conflict that locking exists to prevent.
+Only call this when no in-flight operation (spend, shielding, proposal, or PCZT)
+for the account remains. When in doubt, wait: locks expire on their own.
+
+#### Arguments
+- `account` (string or numeric, required): Either the UUID or the ZIP 32 account
+  index of the account, as returned by `z_getnewaccount`.
+
 ## `z_converttex`
 
 Converts a transparent P2PKH Zcash address to a TEX address.
