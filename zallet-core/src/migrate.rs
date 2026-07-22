@@ -27,28 +27,29 @@ use core::convert::Infallible;
 use core::fmt;
 use std::sync::OnceLock;
 
-use orchard::circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey};
-use orchard::keys::SpendAuthorizingKey;
+use orchard::circuit::{OrchardCircuitVersion, VerifyingKey};
+use orchard::keys::{FullViewingKey, SpendAuthorizingKey};
 use pczt::Pczt;
-use pczt::roles::prover::Prover;
 use pczt::roles::tx_extractor::TransactionExtractor;
 use rand::rngs::OsRng;
 use rusqlite::Connection;
-use zcash_client_backend::data_api::WalletRead;
+use shardtree::error::ShardTreeError;
+use zcash_client_backend::data_api::{WalletCommitmentTrees, WalletRead};
 use zcash_client_sqlite::{AccountUuid, WalletDb, util::SystemClock};
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_pool_migration_backend::build::sign_pczt;
 use zcash_pool_migration_backend::engine::{
     CommitError, MigrationBackend, MigrationError, MigrationState, MigrationStatus, MigrationTxId,
     MigrationTxKind, MigrationTxState, PoolMigrationRead, PoolMigrationWrite, UnsignedMigrationTx,
-    build_preparation_unsigned, commit_preparation, plan_migration,
+    build_preparation_unsigned, commit_preparation, plan_migration, prove_preparation,
+    prove_transfer,
 };
 // The migration state machine lives in the engine (the mobile wallet drives it the same way); zallet
 // only performs the wallet I/O around the engine's decisions. The decision and transition logic are
 // methods on `MigrationState` (`next_step`, `mark_mined`, `mark_broadcast`, `is_terminal`, ...).
 use zcash_client_sqlite::pool_migration::orchard_ironwood::PoolMigrations;
 use zcash_pool_migration_backend::state::AdvanceStep;
-use zcash_pool_migration_backend::wallet::WalletMigration;
+use zcash_pool_migration_backend::wallet::{WalletMigration, WalletMigrationProver};
 use zcash_primitives::transaction::components::orchard::bundle_version_for_branch;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, BranchId};
@@ -328,14 +329,6 @@ fn orchard_circuit_version(params: &Network, height: BlockHeight) -> OrchardCirc
         .circuit_version()
 }
 
-/// The Orchard proving key, built once and cached (building it is expensive). The same key proves
-/// both the Orchard preparation bundles and the Ironwood transfer bundles. All of a migration's
-/// transactions share one circuit version (its consensus branch), so caching a single key is sound.
-fn orchard_proving_key(version: OrchardCircuitVersion) -> &'static ProvingKey {
-    static PROVING_KEY: OnceLock<ProvingKey> = OnceLock::new();
-    PROVING_KEY.get_or_init(|| ProvingKey::build(version))
-}
-
 /// The Orchard verifying key, built once and cached. It verifies both the Orchard and the Ironwood
 /// bundles when the transaction is extracted.
 fn orchard_verifying_key(version: OrchardCircuitVersion) -> &'static VerifyingKey {
@@ -343,33 +336,53 @@ fn orchard_verifying_key(version: OrchardCircuitVersion) -> &'static VerifyingKe
     VERIFYING_KEY.get_or_init(|| VerifyingKey::build(version))
 }
 
-/// Proves a stored, pre-signed but unproven migration PCZT and extracts the broadcastable
-/// transaction. `height` selects the circuit version (the migration's consensus branch). Proving is
-/// CPU-heavy, so call this inside the blocking database section; the extracted transaction is then
-/// broadcast asynchronously by the caller.
-pub fn prove_and_extract(
+/// Extracts the broadcastable transaction from an already-proven migration PCZT, verifying its
+/// Orchard (and, for a transfer, Ironwood) proofs against the circuit's verifying key. `height`
+/// selects the circuit version (the migration's consensus branch). Proving itself is done through
+/// the engine (`prove_preparation` / `prove_transfer`), which installs the deferred anchor and
+/// witnesses from the wallet's own commitment tree before proving.
+fn extract_proven(
     params: &Network,
     height: BlockHeight,
     pczt_bytes: &[u8],
 ) -> Result<Transaction, BroadcastError> {
     let version = orchard_circuit_version(params, height);
     let pczt = Pczt::parse(pczt_bytes).map_err(|e| BroadcastError::Parse(format!("{e:?}")))?;
-    let mut prover = Prover::new(pczt);
-    if prover.requires_orchard_proof() {
-        prover = prover
-            .create_orchard_proof(orchard_proving_key(version))
-            .map_err(|e| BroadcastError::Prove(format!("{e:?}")))?;
-    }
-    if prover.requires_ironwood_proof() {
-        prover = prover
-            .create_ironwood_proof(orchard_proving_key(version))
-            .map_err(|e| BroadcastError::Prove(format!("{e:?}")))?;
-    }
-    let pczt = prover.finish();
     TransactionExtractor::new(pczt)
         .with_orchard(orchard_verifying_key(version))
         .extract()
         .map_err(|e| BroadcastError::Extract(format!("{e:?}")))
+}
+
+/// The highest Orchard checkpoint at or below `from` whose commitment-tree root is available, or
+/// `None` if there is none. A migration preparation spends the wallet's existing Orchard notes, so
+/// it anchors to the newest settled (rooted) checkpoint; right after scanning, the tip checkpoint is
+/// not yet rooted, so this walks down from `from` to the newest checkpoint with a root. This mirrors
+/// the anchor selection the mobile wallet performs.
+fn highest_rooted_orchard_checkpoint<W>(
+    db: &mut W,
+    from: BlockHeight,
+) -> Result<Option<BlockHeight>, AdvanceError>
+where
+    W: WalletCommitmentTrees,
+    <W as WalletCommitmentTrees>::Error: fmt::Debug,
+{
+    let mut height = u32::from(from);
+    loop {
+        let bh = BlockHeight::from_u32(height);
+        let rooted = db
+            .with_orchard_tree_mut::<_, _, ShardTreeError<<W as WalletCommitmentTrees>::Error>>(
+                |tree| Ok(tree.root_at_checkpoint_id(&bh)?.is_some()),
+            )
+            .map_err(|e| AdvanceError::Store(format!("{e:?}")))?;
+        if rooted {
+            return Ok(Some(bh));
+        }
+        if height == 0 {
+            return Ok(None);
+        }
+        height -= 1;
+    }
 }
 
 /// Why advancing a migration one step failed.
@@ -427,8 +440,8 @@ pub fn record_broadcast(
 pub fn advance_blocking(
     conn: &mut Connection,
     network: &Network,
-    _account: AccountUuid,
-    _usk: UnifiedSpendingKey,
+    account: AccountUuid,
+    usk: UnifiedSpendingKey,
     tip: u32,
 ) -> Result<AdvanceOutcome, AdvanceError> {
     let target_height = tip + 1;
@@ -476,19 +489,91 @@ pub fn advance_blocking(
     // Decide the next step from state alone (the same decision the mobile wallet makes), then perform
     // the wallet I/O it calls for.
     match state.next_step(BlockHeight::from_u32(target_height)) {
-        // Prove and extract the next ready transaction; the caller broadcasts it.
+        // Prove and extract the next ready transaction; the caller broadcasts it. Proving runs
+        // through the engine, which installs each spend's deferred Orchard anchor and witnesses from
+        // the wallet's own commitment tree (the transaction was built and signed with the anchor
+        // absent, per ZIP 374), then produces the proofs.
+        // Prove the next due transaction (`Signed -> Proved`) and store the proven PCZT, WITHOUT
+        // broadcasting. Proving installs the deferred Orchard anchor and every spend's witness from
+        // the wallet's own commitment tree; for a transfer this must happen while its drawn anchor
+        // boundary is still within the wallet's checkpoint-pruning window, so proving is a step
+        // separate from (and earlier than) broadcasting, which waits for the privacy broadcast
+        // schedule. The proven state is persisted here; the caller broadcasts it in a later step.
+        AdvanceStep::Prove { id } => {
+            let (is_transfer, kind) = {
+                let tx_ref = state
+                    .transactions()
+                    .iter()
+                    .find(|t| t.id() == id)
+                    .ok_or_else(|| AdvanceError::Store("the next transaction is missing".into()))?;
+                match tx_ref.kind() {
+                    MigrationTxKind::Preparation { .. } => (false, "preparation"),
+                    MigrationTxKind::Transfer { .. } => (true, "transfer"),
+                }
+            };
+            // Prove in place, scoping the wallet's mutable borrow of `conn`.
+            {
+                let mut walletdb =
+                    WalletDb::from_connection(&mut *conn, *network, SystemClock, OsRng);
+                let fvk = FullViewingKey::from(usk.orchard());
+                if is_transfer {
+                    // A transfer proves against the anchor boundary drawn for it at plan time. The
+                    // state machine only offers a transfer to prove once that boundary has settled
+                    // below the tip, so its checkpoint exists and is still within the pruning window.
+                    let mut prover = WalletMigrationProver::new(&mut walletdb, account, fvk);
+                    prove_transfer(&mut prover, &mut state, id).map_err(|e| {
+                        AdvanceError::Prove(BroadcastError::Prove(format!("{e:?}")))
+                    })?;
+                } else {
+                    // A preparation spends the wallet's existing Orchard notes; anchor it to the
+                    // newest rooted checkpoint at or below the tip.
+                    let anchor = highest_rooted_orchard_checkpoint(
+                        &mut walletdb,
+                        BlockHeight::from_u32(tip),
+                    )?
+                    .ok_or_else(|| {
+                        AdvanceError::Prove(BroadcastError::Prove(
+                            "no rooted Orchard checkpoint is available to anchor the \
+                                     preparation"
+                                .into(),
+                        ))
+                    })?;
+                    let mut prover = WalletMigrationProver::new(&mut walletdb, account, fvk);
+                    prove_preparation(&mut prover, &mut state, id, anchor).map_err(|e| {
+                        AdvanceError::Prove(BroadcastError::Prove(format!("{e:?}")))
+                    })?;
+                }
+            }
+            // The transaction is now `Proved`; persist it (no broadcast this step).
+            persist_migration(conn, &state).map_err(|e| AdvanceError::Store(e.to_string()))?;
+            Ok(AdvanceOutcome {
+                state,
+                to_broadcast: None,
+                message: format!("proving a {kind} transaction"),
+            })
+        }
+        // Broadcast an ALREADY-PROVEN transaction: extract the stored proven PCZT and hand it to the
+        // caller. Proving happened in an earlier `Prove` step, so this needs no wallet-tree access.
         AdvanceStep::Broadcast { id } => {
-            let tx_ref = state
+            let kind = {
+                let tx_ref = state
+                    .transactions()
+                    .iter()
+                    .find(|t| t.id() == id)
+                    .ok_or_else(|| AdvanceError::Store("the next transaction is missing".into()))?;
+                match tx_ref.kind() {
+                    MigrationTxKind::Preparation { .. } => "preparation",
+                    MigrationTxKind::Transfer { .. } => "transfer",
+                }
+            };
+            let proven_bytes = state
                 .transactions()
                 .iter()
                 .find(|t| t.id() == id)
-                .ok_or_else(|| AdvanceError::Store("the next transaction is missing".into()))?;
-            let bytes = tx_ref.pczt().clone();
-            let kind = match tx_ref.kind() {
-                MigrationTxKind::Preparation { .. } => "preparation",
-                MigrationTxKind::Transfer { .. } => "transfer",
-            };
-            let tx = prove_and_extract(network, BlockHeight::from(tip), &bytes)
+                .ok_or_else(|| AdvanceError::Store("the proven transaction is missing".into()))?
+                .pczt()
+                .clone();
+            let tx = extract_proven(network, BlockHeight::from(tip), &proven_bytes)
                 .map_err(AdvanceError::Prove)?;
             Ok(AdvanceOutcome {
                 state,

@@ -78,18 +78,18 @@ tempfile = "3"
 # their path-dep siblings from git while their crates.io copies remain; pinning
 # the whole stack to one rev avoids duplicating it. Replace with the crates.io
 # releases once they ship.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
-zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "0ab556bf07aae48a7547af2565ccd08c06262525" }
 orchard = { git = "https://github.com/zcash/orchard.git", rev = "3bd2b736d1273226595773265313fc3f3428af16" }
 
 # TEMPORARY: pin the zaino crates to zingolabs/zaino `dev` (currently 8048bf8d),

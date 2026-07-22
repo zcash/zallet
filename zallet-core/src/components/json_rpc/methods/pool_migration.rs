@@ -349,6 +349,10 @@ pub(crate) enum MigrationTxBlocker {
     /// Built and due only at a later height (the privacy broadcast schedule): waiting for the chain
     /// tip to reach its scheduled height.
     Schedule,
+    /// A transfer whose drawn anchor boundary has not yet settled: waiting for the chain tip to move
+    /// strictly past the boundary block so its checkpoint exists and the transfer can be proved
+    /// against it (while it is still within the wallet's checkpoint-pruning window).
+    AnchorBoundary,
     /// Built as an unsigned PCZT and waiting for an external (hardware or offline) signer to return
     /// the signed PCZT, which the wallet then applies before proving and broadcasting.
     Signature,
@@ -358,10 +362,12 @@ pub(crate) enum MigrationTxBlocker {
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MigrationTxAction {
-    /// Prove and broadcast this pre-signed transaction now that its dependencies are mined and it is
-    /// due. This is the only action a wallet ever takes: the whole migration is built and pre-signed
-    /// in one pass at start, so there is no separate build-and-sign step.
-    ProveAndBroadcast,
+    /// Prove this pre-signed transaction now (install its deferred anchor and witnesses and store the
+    /// proven PCZT): its dependencies are mined and, for a transfer, its anchor boundary has settled
+    /// within the wallet's checkpoint-pruning window. It is not broadcast yet.
+    Prove,
+    /// Broadcast this already-proven transaction now that its scheduled broadcast height has arrived.
+    Broadcast,
 }
 
 /// The status of one migration transaction, as a wallet renders it and decides the next step. This
@@ -422,14 +428,16 @@ fn to_rpc_status(es: EngineTransactionStatus) -> MigrationTransactionStatus {
         MigrationTxState::Broadcast { .. } => MigrationTxLifecycle::Broadcast,
         MigrationTxState::Mined { .. } => MigrationTxLifecycle::Mined,
     };
-    // With everything built up front, the only remaining per-transaction action is to prove and
-    // broadcast it; the old `BuildAndSign` action no longer exists.
+    // Everything is built up front, so a transaction is either proved (installing its anchor and
+    // witnesses) or, once proved, broadcast; the old `BuildAndSign` action no longer exists.
     let action = es.action().map(|a| match a {
-        NextAction::ProveAndBroadcast => MigrationTxAction::ProveAndBroadcast,
+        NextAction::Prove => MigrationTxAction::Prove,
+        NextAction::Broadcast => MigrationTxAction::Broadcast,
     });
     let blocked_on = es.blocked_on().map(|b| match b {
         Blocker::Dependencies => MigrationTxBlocker::Dependencies,
         Blocker::Schedule => MigrationTxBlocker::Schedule,
+        Blocker::AnchorBoundary => MigrationTxBlocker::AnchorBoundary,
         Blocker::Signature => MigrationTxBlocker::Signature,
     });
     let txid = es.txid().map(|txid| {
