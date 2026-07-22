@@ -65,7 +65,7 @@ pub(crate) fn call(wallet: &DbConnection, migration_id: &str) -> Response {
         from_pool: MIGRATION_FROM_POOL,
         to_pool: MIGRATION_TO_POOL,
         enabling_upgrade: MIGRATION_ENABLING_UPGRADE.to_string(),
-        phase: MigrationPhase::from_status(state.status),
+        phase: MigrationPhase::from_status(state.status()),
         progress: migration_progress(&state),
         transactions: migration_transactions(&state, target_height),
     })

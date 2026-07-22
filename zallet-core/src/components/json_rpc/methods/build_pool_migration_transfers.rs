@@ -16,8 +16,8 @@ use zcash_client_backend::data_api::WalletRead;
 
 use super::pool_migration::{
     MIGRATION_ID, MigrationPhase, MigrationProgress, UnsignedMigrationTransaction,
-    decrypt_account_usk, encode_unsigned, map_advance_error, migration_progress, no_such_migration,
-    validate_migration_id,
+    decrypt_account_usk, encode_unsigned_pairs, map_advance_error, migration_progress,
+    no_such_migration, validate_migration_id,
 };
 use crate::components::database::DbConnection;
 use crate::components::json_rpc::server::LegacyCode;
@@ -79,9 +79,9 @@ pub(crate) async fn call(
 
     Ok(BuildPoolMigrationTransfers {
         migration_id: MIGRATION_ID.to_string(),
-        phase: MigrationPhase::from_status(state.status),
+        phase: MigrationPhase::from_status(state.status()),
         progress: migration_progress(&state),
-        unsigned_transactions: encode_unsigned(unsigned),
+        unsigned_transactions: encode_unsigned_pairs(unsigned)?,
         status: message,
     })
 }

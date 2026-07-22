@@ -122,7 +122,7 @@ pub(crate) async fn call(
         from_pool,
         to_pool,
         enabling_upgrade: enabling_upgrade.to_string(),
-        plan: migration_plan(state.transactions.len() as u32),
+        plan: migration_plan(state.transactions().len() as u32),
         unsigned_transactions,
     })
 }

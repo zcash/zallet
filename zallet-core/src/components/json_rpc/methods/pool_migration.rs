@@ -17,6 +17,7 @@ use base64ct::{Base64, Encoding};
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::types::ErrorObjectOwned;
+use pczt::Pczt;
 use schemars::JsonSchema;
 use secrecy::ExposeSecret;
 use serde::Serialize;
@@ -24,12 +25,13 @@ use zcash_client_backend::data_api::{Account, WalletRead};
 use zcash_client_sqlite::AccountUuid;
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_pool_migration_backend::engine::{
-    MigrationState, MigrationStatus, MigrationTxKind, MigrationTxState, UnsignedMigrationTx,
+    MigrationState, MigrationStatus, MigrationTxId, MigrationTxKind, MigrationTxState,
+    UnsignedMigrationTx,
 };
 use zcash_pool_migration_backend::state::{
     Blocker, NextAction, TransactionStatus as EngineTransactionStatus,
 };
-use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
+use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use crate::components::keystore::KeyStore;
 use crate::components::{database::DbConnection, json_rpc::server::LegacyCode};
@@ -228,8 +230,28 @@ pub(crate) fn encode_unsigned(
     unsigned
         .into_iter()
         .map(|u| UnsignedMigrationTransaction {
-            id: u.id.0,
-            pczt: Base64::encode_string(&u.pczt),
+            id: u32::from(u.id()),
+            pczt: Base64::encode_string(u.pczt()),
+        })
+        .collect()
+}
+
+/// Base64-encodes `(id, PCZT)` pairs into the RPC response shape. Used where the unsigned PCZTs are
+/// read straight from a stored [`MigrationState`] (its transactions already hold them) rather than
+/// freshly returned by the engine as [`UnsignedMigrationTx`].
+pub(crate) fn encode_unsigned_pairs(
+    unsigned: Vec<(MigrationTxId, Pczt)>,
+) -> Result<Vec<UnsignedMigrationTransaction>, ErrorObjectOwned> {
+    unsigned
+        .into_iter()
+        .map(|(id, pczt)| {
+            let bytes = pczt.serialize().map_err(|e| {
+                LegacyCode::Misc.with_message(format!("serializing a migration PCZT failed: {e:?}"))
+            })?;
+            Ok(UnsignedMigrationTransaction {
+                id: u32::from(id),
+                pczt: Base64::encode_string(&bytes),
+            })
         })
         .collect()
 }
@@ -276,11 +298,11 @@ pub(crate) fn migration_plan(transaction_count: u32) -> MigrationPlan {
 /// Summarizes a migration's progress: how many of its transactions have been mined, out of the
 /// total the migration comprises.
 pub(crate) fn migration_progress(state: &MigrationState) -> MigrationProgress {
-    let total_transactions = state.transactions.len() as u32;
+    let total_transactions = state.transactions().len() as u32;
     let completed_transactions = state
-        .transactions
+        .transactions()
         .iter()
-        .filter(|t| matches!(t.state, MigrationTxState::Mined { .. }))
+        .filter(|t| matches!(t.state(), MigrationTxState::Mined { .. }))
         .count() as u32;
     MigrationProgress {
         completed_transactions,
@@ -302,8 +324,6 @@ pub(crate) enum MigrationTxRole {
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MigrationTxLifecycle {
-    /// A placeholder that is not yet built or signed (it awaits its dependencies).
-    Planned,
     /// Built and awaiting an external signature: its unsigned PCZT has been exported to a hardware or
     /// offline signer, and the wallet is waiting for the signed PCZT to be applied.
     AwaitingSignature,
@@ -315,8 +335,6 @@ pub(crate) enum MigrationTxLifecycle {
     Broadcast,
     /// Mined into a block.
     Mined,
-    /// Expired before it could be mined; the wallet rebuilds and re-signs it.
-    Expired,
 }
 
 /// Why a migration transaction is not yet actionable.
@@ -340,11 +358,9 @@ pub(crate) enum MigrationTxBlocker {
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MigrationTxAction {
-    /// Build and pre-sign this placeholder now that its dependencies are mined (a later preparation
-    /// layer, or the transfers once the whole preparation is mined).
-    BuildAndSign,
     /// Prove and broadcast this pre-signed transaction now that its dependencies are mined and it is
-    /// due.
+    /// due. This is the only action a wallet ever takes: the whole migration is built and pre-signed
+    /// in one pass at start, so there is no separate build-and-sign step.
     ProveAndBroadcast,
 }
 
@@ -387,7 +403,7 @@ pub(crate) struct MigrationTransactionStatus {
 /// `layer`/`crossing`, maps the lifecycle and reason enums to their serde-friendly counterparts, and
 /// renders the txid as a big-endian hex string.
 fn to_rpc_status(es: EngineTransactionStatus) -> MigrationTransactionStatus {
-    let (kind, layer, crossing) = match es.kind {
+    let (kind, layer, crossing) = match es.kind() {
         MigrationTxKind::Preparation { layer, .. } => {
             (MigrationTxRole::Preparation, Some(layer as u32), None)
         }
@@ -395,41 +411,45 @@ fn to_rpc_status(es: EngineTransactionStatus) -> MigrationTransactionStatus {
             (MigrationTxRole::Transfer, None, Some(crossing as u32))
         }
     };
-    let state = match es.state {
-        MigrationTxState::Planned => MigrationTxLifecycle::Planned,
+    // The engine dropped the `Planned` and `Expired` lifecycle states: a single commit pass now
+    // builds and pre-signs every transaction up front (so none is ever merely `Planned`), and expiry
+    // handling is not yet modelled. The RPC's `MigrationTxLifecycle` still defines those variants;
+    // they are simply never produced now.
+    let state = match es.state() {
         MigrationTxState::AwaitingSignature => MigrationTxLifecycle::AwaitingSignature,
         MigrationTxState::Signed => MigrationTxLifecycle::Signed,
         MigrationTxState::Proved => MigrationTxLifecycle::Proved,
         MigrationTxState::Broadcast { .. } => MigrationTxLifecycle::Broadcast,
         MigrationTxState::Mined { .. } => MigrationTxLifecycle::Mined,
-        MigrationTxState::Expired => MigrationTxLifecycle::Expired,
     };
-    let action = es.action.map(|a| match a {
-        NextAction::BuildAndSign => MigrationTxAction::BuildAndSign,
+    // With everything built up front, the only remaining per-transaction action is to prove and
+    // broadcast it; the old `BuildAndSign` action no longer exists.
+    let action = es.action().map(|a| match a {
         NextAction::ProveAndBroadcast => MigrationTxAction::ProveAndBroadcast,
     });
-    let blocked_on = es.blocked_on.map(|b| match b {
+    let blocked_on = es.blocked_on().map(|b| match b {
         Blocker::Dependencies => MigrationTxBlocker::Dependencies,
         Blocker::Schedule => MigrationTxBlocker::Schedule,
         Blocker::Signature => MigrationTxBlocker::Signature,
     });
-    let txid = es.txid.map(|mut bytes| {
+    let txid = es.txid().map(|txid| {
+        let mut bytes = *txid.as_ref();
         bytes.reverse();
         hex::encode(bytes)
     });
     MigrationTransactionStatus {
-        id: es.id.0,
+        id: u32::from(es.id()),
         kind,
         layer,
         crossing,
         state,
-        depends_on: es.depends_on.iter().map(|d| d.0).collect(),
-        scheduled_height: es.scheduled_height,
-        ready: es.ready,
+        depends_on: es.depends_on().iter().map(|d| u32::from(*d)).collect(),
+        scheduled_height: es.scheduled_height().into(),
+        ready: es.ready(),
         action,
         blocked_on,
         txid,
-        mined_height: es.mined_height,
+        mined_height: es.mined_height().map(u32::from),
     }
 }
 
@@ -442,7 +462,7 @@ pub(crate) fn migration_transactions(
     target_height: u32,
 ) -> Vec<MigrationTransactionStatus> {
     state
-        .transaction_statuses(target_height)
+        .transaction_statuses(BlockHeight::from_u32(target_height))
         .into_iter()
         .map(to_rpc_status)
         .collect()

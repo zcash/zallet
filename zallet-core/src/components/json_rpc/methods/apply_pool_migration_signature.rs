@@ -62,7 +62,7 @@ pub(crate) async fn call(
         let mut state = load_migration(conn)
             .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
             .ok_or_else(no_such_migration)?;
-        if !state.apply_signature(MigrationTxId(transaction_id), bytes) {
+        if !state.apply_signature(MigrationTxId::new(transaction_id), bytes) {
             return Err(LegacyCode::InvalidParameter
                 .with_static("no migration transaction with that id is awaiting a signature"));
         }
@@ -73,7 +73,7 @@ pub(crate) async fn call(
 
     Ok(ApplyPoolMigrationSignature {
         migration_id: MIGRATION_ID.to_string(),
-        phase: MigrationPhase::from_status(state.status),
+        phase: MigrationPhase::from_status(state.status()),
         progress: migration_progress(&state),
         status: "applied the external signature".to_string(),
     })

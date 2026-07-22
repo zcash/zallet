@@ -90,6 +90,7 @@ zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba9
 zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
 zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
 zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
+orchard = { git = "https://github.com/zcash/orchard.git", rev = "3bd2b736d1273226595773265313fc3f3428af16" }
 
 # TEMPORARY: pin the zaino crates to zingolabs/zaino `dev` (currently 8048bf8d),
 # which surfaces the Ironwood (NU6.3) note commitment treestate from

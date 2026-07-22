@@ -45,7 +45,7 @@ pub(crate) fn call(wallet: &DbConnection) -> Response {
                 migration_id: MIGRATION_ID.to_string(),
                 from_pool: MIGRATION_FROM_POOL,
                 to_pool: MIGRATION_TO_POOL,
-                phase: MigrationPhase::from_status(state.status),
+                phase: MigrationPhase::from_status(state.status()),
             }]
         })
         .unwrap_or_default();

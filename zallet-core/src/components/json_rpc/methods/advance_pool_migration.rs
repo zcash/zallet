@@ -87,7 +87,7 @@ pub(crate) async fn call<C: Chain>(
 
     Ok(AdvancePoolMigration {
         migration_id: MIGRATION_ID.to_string(),
-        phase: MigrationPhase::from_status(state.status),
+        phase: MigrationPhase::from_status(state.status()),
         progress: migration_progress(&state),
         status: message,
     })

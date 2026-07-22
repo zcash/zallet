@@ -156,7 +156,7 @@ bip32 = "0.2"
 
 # Backend-agnostic value-pool migration engine (Orchard -> Ironwood, NU6.3).
 # This crate is not yet published to crates.io; it lives on the
-# `feat/pool-migration-engine` branch of librustzcash while its API is still
+# `prove/pool-migration-transfer` branch of librustzcash while its API is still
 # evolving (it was `zcash_ironwood_migration_backend`, renamed upstream to the
 # pool-agnostic `zcash_pool_migration_backend`).
 #
@@ -164,15 +164,18 @@ bip32 = "0.2"
 # this integration uses: the `MigrationBackend` trait (spendable notes + chain
 # tip), the `PoolMigrationRead`/`PoolMigrationWrite` store traits, the
 # `WalletMigration` wallet-backed adapter (the `wallet` feature), and
-# `engine::{plan_migration, commit_preparation, commit_transfers}`. Bump the rev
-# when the integration needs a newer engine API.
-zcash_pool_migration_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "f6dbc06b9311689ede149f883bb427805e590a42", features = ["wallet"] }
-# The SQLite store for the migration (the pool_migrations tables + the
-# PoolMigrationRead/Write impls over the wallet database). Same rev as the engine.
-zcash_pool_migration_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "f6dbc06b9311689ede149f883bb427805e590a42" }
+# `engine::{plan_migration, commit_preparation}` (a single pass now builds every
+# preparation layer AND every transfer). Bump the rev when the integration needs
+# a newer engine API.
+#
+# The migration's SQLite store (the pool_migrations tables + the
+# PoolMigrationRead/Write impls over the wallet database) is no longer a separate
+# crate: it now lives in `zcash_client_sqlite::pool_migration::orchard_ironwood`
+# (pinned to the same rev via the `[patch.crates-io]` block below).
+zcash_pool_migration_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8", features = ["wallet"] }
 # PCZT roles used to prove and extract the migration's pre-signed transactions before broadcasting
 # them (z_advancepoolmigration). Same rev as the engine, which produces the pre-signed PCZTs.
-pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "f6dbc06b9311689ede149f883bb427805e590a42", features = [
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8", features = [
     "prover",
     "tx-extractor",
     "orchard",
@@ -206,6 +209,10 @@ zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba9
 zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
 zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
 zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "00ba902c0b756329857036fed4dc9db20ed72bd8" }
+# The pinned librustzcash rev builds against the git `orchard` (the NU6.3 / Ironwood deferred-anchor
+# builder API: `Builder::new_with_anchor_deferred`, `add_spend_unwitnessed`), not the crates.io
+# release; patch it to the same rev librustzcash pins.
+orchard = { git = "https://github.com/zcash/orchard.git", rev = "3bd2b736d1273226595773265313fc3f3428af16" }
 
 [profile.release]
 debug = "line-tables-only"

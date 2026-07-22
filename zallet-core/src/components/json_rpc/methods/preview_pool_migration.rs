@@ -33,8 +33,7 @@ use crate::{
         SpendableSnapshot,
         engine::{
             engine::{MigrationError, MigrationPlan, plan_migration},
-            note_splitting::{FeePolicy, Zip317FeePolicy},
-            preparation::{PREP_TX_ACTIONS, PreparationPlan},
+            preparation::PreparationPlan,
         },
     },
 };
@@ -177,14 +176,13 @@ pub(crate) async fn call(
 
     let account_balance_zat: u64 = orchard_note_values.iter().sum();
 
-    // The ZIP-317 fee of a padded note-preparation transaction, which the note split and the
-    // preparation planner both reserve. Built from the crate's own constants (no magic numbers).
-    let prep_fee_zat = PREP_TX_ACTIONS as u64 * Zip317FeePolicy.marginal_fee_zatoshi();
-
-    // No `.await` past this point: build the snapshot backend and run the pure planner synchronously.
+    // No `.await` past this point: build the snapshot backend and run the pure planner
+    // synchronously. The engine now owns the preparation fee internally (its ZIP-317 fee policy), so
+    // planning takes only the network and the spendable-note snapshot.
+    let network = wallet.params();
     let backend = SpendableSnapshot::new(orchard_note_values, u32::from(chain_height));
     let mut rng = OsRng;
-    let plan = plan_migration(&backend, prep_fee_zat, &mut rng).map_err(map_plan_error)?;
+    let plan = plan_migration(network, &backend, &mut rng).map_err(map_plan_error)?;
 
     Ok(preview_from_plan(
         from_pool,
@@ -205,6 +203,12 @@ fn map_plan_error(
         MigrationError::Preparation(e) => LegacyCode::InvalidParameter.with_message(format!(
             "the spendable notes cannot fund the migration: {e}"
         )),
+        MigrationError::InvalidBalance(e) => LegacyCode::InvalidParameter
+            .with_message(format!("the account balance is invalid: {e}")),
+        MigrationError::Fee(e) => LegacyCode::InvalidParameter
+            .with_message(format!("the migration fee could not be computed: {e}")),
+        MigrationError::Nu63NotActive => LegacyCode::InvalidParameter
+            .with_static("NU6.3 (the Ironwood pool) is not active at the target height"),
         // The planning snapshot's read methods are infallible, so this arm is unreachable.
         MigrationError::Backend(e) => match e {},
     }
@@ -222,17 +226,20 @@ fn preview_from_plan(
 ) -> PoolMigrationPreview {
     // Each funding note holds its crossing value plus a fixed transfer fee buffer, so the crossing
     // value is the funding note less that buffer.
-    let buffer = Zip317FeePolicy.transfer_fee_buffer_zatoshi();
+    let buffer = u64::from(plan.note_split().note_fee_buffer());
 
     let funding_notes = plan
         .funding_notes()
         .iter()
         .zip(plan.schedule())
-        .map(|(&output_zat, schedule)| PreviewFundingNote {
-            output_zat,
-            crossing_zat: output_zat.saturating_sub(buffer),
-            broadcast_height: schedule.broadcast_height(),
-            expiry_height: schedule.expiry_height(),
+        .map(|(&output_zat, schedule)| {
+            let output_zat = u64::from(output_zat);
+            PreviewFundingNote {
+                output_zat,
+                crossing_zat: output_zat.saturating_sub(buffer),
+                broadcast_height: u32::from(schedule.broadcast_height()),
+                expiry_height: u32::from(schedule.expiry_height()),
+            }
         })
         .collect::<Vec<_>>();
 
@@ -243,15 +250,20 @@ fn preview_from_plan(
         to_pool,
         enabling_upgrade,
         account_balance_zat,
-        prep_fee_zat: plan.note_split().prep_fee_zatoshi(),
+        prep_fee_zat: u64::from(plan.note_split().prep_fees()),
         total_migratable_zat,
-        source_change_zat: plan.note_split().change().unwrap_or(0),
+        source_change_zat: plan.note_split().change().map(u64::from).unwrap_or(0),
         funding_note_count: funding_notes.len() as u32,
         funding_notes,
         note_split: PreviewNoteSplit {
             note_count: plan.note_split().crossing_values().len() as u32,
-            total_migratable_zat: plan.note_split().total_migratable_zatoshi(),
-            crossing_values: plan.note_split().crossing_values().to_vec(),
+            total_migratable_zat: u64::from(plan.note_split().total_migratable()),
+            crossing_values: plan
+                .note_split()
+                .crossing_values()
+                .iter()
+                .map(|&z| u64::from(z))
+                .collect(),
         },
         preparation: preparation_summary(plan.preparation()),
     }
@@ -273,6 +285,9 @@ mod tests {
 
     use super::*;
     use crate::migrate::engine::engine::MigrationBackend;
+    use crate::network::{Network, RegTestNuParam};
+    use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkType};
+    use zcash_protocol::value::Zatoshis;
 
     /// A minimal planning backend for tests: a fixed set of spendable note values and a chain tip.
     /// Mirrors `SpendableSnapshot`; planning is infallible.
@@ -284,18 +299,27 @@ mod tests {
     impl MigrationBackend for MockBackend {
         type Error = core::convert::Infallible;
 
-        fn spendable_orchard_note_values(&self) -> Result<Vec<u64>, Self::Error> {
-            Ok(self.notes.clone())
+        fn spendable_orchard_note_values(&self) -> Result<Vec<Zatoshis>, Self::Error> {
+            Ok(self
+                .notes
+                .iter()
+                .map(|&v| Zatoshis::from_u64(v).expect("a test note value is valid"))
+                .collect())
         }
 
-        fn chain_tip_height(&self) -> Result<u32, Self::Error> {
-            Ok(self.tip)
+        fn chain_tip_height(&self) -> Result<BlockHeight, Self::Error> {
+            Ok(BlockHeight::from_u32(self.tip))
         }
     }
 
-    /// The ZIP-317 fee the preview reserves, as `call` computes it.
-    fn prep_fee() -> u64 {
-        PREP_TX_ACTIONS as u64 * Zip317FeePolicy.marginal_fee_zatoshi()
+    /// A regtest network with NU6.3 (the Ironwood pool) active from height 1, so a migration plans
+    /// against any chain tip.
+    fn regtest_nu63() -> Network {
+        let params = [
+            RegTestNuParam::try_from(format!("{:08x}:1", u32::from(BranchId::Nu6_3)))
+                .expect("a valid regtest nuparam"),
+        ];
+        Network::from_type(NetworkType::Regtest, &params)
     }
 
     #[test]
@@ -309,8 +333,9 @@ mod tests {
             notes,
             tip: 2_000_000,
         };
+        let network = regtest_nu63();
         let mut rng = OsRng;
-        let plan = plan_migration(&backend, prep_fee(), &mut rng).expect("a funded balance plans");
+        let plan = plan_migration(&network, &backend, &mut rng).expect("a funded balance plans");
 
         let preview = preview_from_plan(
             Pool::Orchard,
@@ -321,7 +346,10 @@ mod tests {
         );
 
         assert_eq!(preview.account_balance_zat, account_balance_zat);
-        assert_eq!(preview.prep_fee_zat, prep_fee());
+        assert_eq!(
+            preview.prep_fee_zat,
+            u64::from(plan.note_split().prep_fees())
+        );
         assert_eq!(
             preview.funding_note_count as usize,
             preview.funding_notes.len()
@@ -331,7 +359,7 @@ mod tests {
         // One schedule entry per funding note (the engine guarantees this).
         assert_eq!(preview.funding_notes.len(), plan.schedule().len());
 
-        let buffer = Zip317FeePolicy.transfer_fee_buffer_zatoshi();
+        let buffer = u64::from(plan.note_split().note_fee_buffer());
         let mut crossings_sum = 0u64;
         for note in &preview.funding_notes {
             assert!(note.crossing_zat > 0, "every crossing value is positive");
@@ -360,9 +388,10 @@ mod tests {
             notes: Vec::new(),
             tip: 2_000_000,
         };
+        let network = regtest_nu63();
         let mut rng = OsRng;
         assert!(matches!(
-            plan_migration(&backend, prep_fee(), &mut rng),
+            plan_migration(&network, &backend, &mut rng),
             Err(MigrationError::NothingToMigrate)
         ));
     }
