@@ -20,6 +20,40 @@ be considered breaking changes.
   indicating coinbase origin (mirroring `zcashd`'s `listunspent`), so
   integrators no longer need a `getrawtransaction` round-trip per UTXO to
   distinguish coinbase from spendable-to-transparent funds.
+- `zallet_core::migrate`, an integration point that wires in the
+  backend-agnostic value-pool migration engine (`zcash_pool_migration_backend`).
+  It re-exports the engine and provides `SpendableSnapshot`, Zallet's
+  implementation of the engine's `MigrationBackend` trait for the planning
+  slice. The engine is still evolving upstream and is pinned to a librustzcash
+  feature branch, so only the planning path is wired; committing a migration
+  (building, signing, and persisting the PCZTs) awaits later engine slices.
+- A generic pool-to-pool migration JSON-RPC surface (wallet build): the
+  `z_startpoolmigration`, `z_getpoolmigrationstatus`, `z_advancepoolmigration`,
+  `z_cancelpoolmigration`, and `z_listpoolmigrations` methods. The surface is
+  parameterised by a `from_pool`/`to_pool` pair rather than hardcoding a
+  specific migration; a single supported-migrations table maps each pool pair to
+  the network upgrade that enables it (Orchard to Ironwood requires NU6.3). These
+  methods are currently a scaffold: they validate their inputs (pool parsing, the
+  supported-pair table, and network-upgrade activation) but the migration engine
+  is not yet wired in, so they return a "not implemented yet" error.
+- An external-signer surface for the pool migration (wallet build), so a
+  hardware or offline signer can sign a migration's transactions out of band:
+  `z_startpoolmigration` takes an `external_signer` flag that builds the
+  preparation unsigned and returns its PCZTs; `z_buildpoolmigrationtransfers`
+  builds the phase-2 transfers unsigned once the preparation is mined;
+  `z_applypoolmigrationsignature` applies a signed PCZT to its transaction
+  (moving it to signed, after which `z_advancepoolmigration` proves and
+  broadcasts it unchanged); and `z_signpoolmigrationpczt` signs a migration PCZT
+  with the account's spend key for offline / air-gapped signing. Building still
+  runs in process (it needs only the viewing key and witnesses); only the
+  signature is external.
+- `z_previewpoolmigration` (wallet build), the fully-wired planning preview of
+  the pool-migration surface. It enumerates the account's spendable source-pool
+  notes and runs the engine's `plan_migration` to return the proposed plan for
+  user consent (ZIP 318): the funding notes and their crossing denominations,
+  each note's transfer broadcast height and expiry, the note-preparation
+  transaction summary, and the residual left in the source pool. It is
+  read-only; nothing is built, proved, or broadcast.
 
 ### Removed
 

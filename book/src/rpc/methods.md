@@ -119,6 +119,72 @@ that require the availability of private keys, such as sending funds.
 Issuing the `walletpassphrase` command while the wallet is already unlocked will
 set a new unlock time that overrides the old one.
 
+## `z_advancepoolmigration`
+
+*Only available in wallet builds of Zallet.*
+
+Advances a previously-scheduled pool migration by one step.
+
+Detects newly mined transactions, proves and broadcasts the next due pre-signed
+transaction, and once the preparation is mined builds the phase-2 transfers. Advances
+one step per call, so a caller polls it.
+
+#### Arguments
+- `account` (string or numeric, required): The UUID or ZIP 32 index of the account
+  whose migration to advance.
+- `migration_id` (string, required): The identifier returned by
+  `z_startpoolmigration`.
+
+## `z_applypoolmigrationsignature`
+
+*Only available in wallet builds of Zallet.*
+
+Applies an externally-signed PCZT to a migration transaction.
+
+Stores the signed PCZT an external (hardware or offline) signer returned against the
+migration transaction it was built for, moving that transaction from awaiting-signature
+to signed so z_advancepoolmigration can prove and broadcast it. The PCZT is matched to
+its transaction by the id returned alongside the unsigned PCZT.
+
+#### Arguments
+- `migration_id` (string, required): The identifier returned by
+  `z_startpoolmigration`.
+- `transaction_id` (numeric, required): The id of the migration transaction the signed
+  PCZT is for, from the `unsigned_transactions` list.
+- `pczt` (string, required): The signed migration PCZT, base64 encoded.
+
+## `z_buildpoolmigrationtransfers`
+
+*Only available in wallet builds of Zallet.*
+
+Builds a migration's phase-2 transfers UNSIGNED, for an external signer.
+
+The external-signer counterpart of the transfer building that z_advancepoolmigration
+does in process: it detects newly mined preparation transactions and, once the whole
+preparation is mined, builds the transfers but leaves them unsigned, returning their
+PCZTs in `unsigned_transactions` to sign on the device and apply back with
+z_applypoolmigrationsignature. An external migration uses this rather than
+z_advancepoolmigration for the preparation-to-transfers step.
+
+#### Arguments
+- `account` (string or numeric, required): The UUID or ZIP 32 index of the account
+  whose migration transfers to build.
+- `migration_id` (string, required): The identifier returned by
+  `z_startpoolmigration`.
+
+## `z_cancelpoolmigration`
+
+*Only available in wallet builds of Zallet.*
+
+Cancels a previously-scheduled pool migration.
+
+NOTE: This is currently a scaffold. The identifier is validated, but the migration
+engine is not yet wired in, so the call returns a "not implemented yet" error.
+
+#### Arguments
+- `migration_id` (string, required): The identifier returned by
+  `z_startpoolmigration`.
+
 ## `z_converttex`
 
 Converts a transparent P2PKH Zcash address to a TEX address.
@@ -306,6 +372,19 @@ The operation will remain in memory.
 - `operationid` (array, optional) A list of operation ids we are interested in.
   If not provided, examine all operations known to the node.
 
+## `z_getpoolmigrationstatus`
+
+*Only available in wallet builds of Zallet.*
+
+Returns the status of a previously-scheduled pool migration.
+
+NOTE: This is currently a scaffold. The identifier is validated, but the migration
+engine is not yet wired in, so the call returns a "not implemented yet" error.
+
+#### Arguments
+- `migration_id` (string, required): The identifier returned by
+  `z_startpoolmigration`.
+
 ## `z_gettotalbalance`
 
 *Only available in wallet builds of Zallet.*
@@ -375,6 +454,15 @@ Returns the list of operation ids currently known to the wallet.
 #### Arguments
 - `status` (string, optional) Filter result by the operation's state e.g. "success".
 
+## `z_listpoolmigrations`
+
+*Only available in wallet builds of Zallet.*
+
+Lists the pool migrations known to the wallet.
+
+NOTE: This is currently a scaffold. The migration engine is not yet wired in, so
+the call returns a "not implemented yet" error.
+
 ## `z_listtransactions`
 
 Returns a list of the wallet's transactions, optionally filtered by account and block
@@ -438,6 +526,30 @@ returned, even though they are not immediately spendable.
   aware of. -1 can be used as in other RPC calls to indicate the current height (including
   the mempool), but this does not support negative values in general. A “future” height will
   fall back to the current height.
+
+## `z_previewpoolmigration`
+
+*Only available in wallet builds of Zallet.*
+
+Previews the migration plan for migrating an account's balance between two value
+pools, without scheduling or broadcasting anything.
+
+Enumerates the account's spendable notes in `from_pool` and runs the migration
+engine's planning slice to show how the balance would be decomposed into the
+self-funding notes that cross the turnstile (the crossing denominations and their
+transfer schedule), the note-preparation transactions that would mint them, and
+the residual left behind. This is a read-only planning preview: unlike the rest of
+the migration surface it is fully wired, because it only plans and does not build,
+prove, or broadcast any transaction.
+
+#### Arguments
+- `account` (string or numeric, required): Either the UUID or the ZIP 32 account
+  index of the account, as returned by `z_getnewaccount`.
+- `from_pool` (string, required): The value pool to migrate funds from
+  ("sapling", "orchard", or "ironwood").
+- `to_pool` (string, required): The value pool to migrate funds to.
+- `minconf` (numeric, optional, default=1): Only include source-pool notes
+  confirmed at least this many times.
 
 ## `z_recoveraccounts`
 
@@ -602,6 +714,49 @@ An object matching `zcashd`'s `z_shieldcoinbase` shape:
   shielded by this operation.
 - `shieldingValue` (numeric, ZEC): Total value being shielded.
 - `opid` (string): Operation id.
+
+## `z_signpoolmigrationpczt`
+
+*Only available in wallet builds of Zallet.*
+
+Signs a migration PCZT with the account's spend authorization.
+
+For offline / air-gapped signing, and the software stand-in for on-device signing: it
+takes an unsigned migration PCZT (from z_startpoolmigration with external_signer, or
+z_buildpoolmigrationtransfers), adds only the account's Orchard spend-authorization
+signature, and returns the signed PCZT to apply with z_applypoolmigrationsignature. It
+does not prove, extract, or broadcast. A hardware wallet signs on the device instead.
+
+#### Arguments
+- `account` (string or numeric, required): The UUID or ZIP 32 index of the account
+  whose spend key signs the PCZT.
+- `pczt` (string, required): The unsigned migration PCZT, base64 encoded.
+
+## `z_startpoolmigration`
+
+*Only available in wallet builds of Zallet.*
+
+Schedules a migration of shielded funds from one value pool to another.
+
+The migration is generic pool-to-pool: the supported pool pairs, and the network
+upgrade that enables each one, are declared in a single table (migrating from the
+Orchard pool to the Ironwood pool requires NU6.3). The pool pair is validated
+against that table and the enabling upgrade is required to be active.
+
+Builds and pre-signs the note-preparation transactions and persists the committed
+migration; proving and broadcasting happen later via z_advancepoolmigration.
+
+#### Arguments
+- `account` (string or numeric, required): Either the UUID or the ZIP 32 account index
+  of the account whose balance to migrate.
+- `from_pool` (string, required): The value pool to migrate funds from
+  ("sapling", "orchard", or "ironwood").
+- `to_pool` (string, required): The value pool to migrate funds to.
+- `external_signer` (boolean, optional, default=false): When true, build the
+  preparation transactions UNSIGNED for an external (hardware or offline) signer
+  and return their PCZTs in `unsigned_transactions`, to sign on the device and
+  apply back with `z_applypoolmigrationsignature`. When false (the default) the
+  preparation is pre-signed in process.
 
 ## `z_viewtransaction`
 
