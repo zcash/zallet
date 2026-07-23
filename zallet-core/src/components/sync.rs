@@ -77,6 +77,9 @@ use crate::{config::ZalletConfig, error::Error, fl, network::Network};
 mod error;
 pub(crate) use error::SyncError;
 
+pub(crate) mod status;
+pub(crate) use status::{SyncStatus, SyncStatusReader, SyncStatusWriter};
+
 mod locator;
 mod steps;
 
@@ -105,6 +108,7 @@ impl WalletSync {
         shutdown_height: Option<BlockHeight>,
         decryptor: WalletDecryptorHandle,
         decryptor_engine: WalletDecryptorEngine,
+        status: SyncStatusWriter,
     ) -> Result<(TaskHandle, TaskHandle, TaskHandle, TaskHandle), Error> {
         let params = config.consensus.network();
         let recover_batch_size = config.sync.recover_batch_size();
@@ -126,6 +130,7 @@ impl WalletSync {
             db_data.as_mut(),
             decryptor.clone(),
             shutdown_height,
+            &status,
         )
         .await?;
 
@@ -144,6 +149,7 @@ impl WalletSync {
             let chain = chain.clone();
             let lower_boundary = current_boundary.clone();
             let decryptor = decryptor.clone();
+            let status = status.clone();
             crate::spawn!("Steady state sync", async move {
                 steady_state(
                     chain,
@@ -154,6 +160,7 @@ impl WalletSync {
                     tip_change_signal_source,
                     decryptor,
                     shutdown_height,
+                    status,
                 )
                 .await?;
                 Ok(())
@@ -173,6 +180,7 @@ impl WalletSync {
                     decryptor,
                     recover_batch_size,
                     shutdown_height,
+                    status,
                 )
                 .await?;
                 Ok(())
@@ -252,6 +260,7 @@ async fn initialize<C: Chain>(
     db_data: &mut DbConnection,
     decryptor: WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
+    status: &SyncStatusWriter,
 ) -> Result<(ChainBlock, BlockHeight), SyncError> {
     info!("Initializing wallet for syncing");
 
@@ -273,6 +282,7 @@ async fn initialize<C: Chain>(
         let current_tip = chain_view.tip().await.map_err(SyncError::Chain)?;
         info!("Latest block height is {}", current_tip.height());
         db_data.update_chain_tip(current_tip.height())?;
+        status.set_tip(current_tip.height());
 
         // Set the starting boundary between the `steady_state` and `recover_history` tasks.
         let starting_boundary = update_boundary(BlockHeight::from_u32(0), current_tip.height());
@@ -369,6 +379,10 @@ async fn initialize<C: Chain>(
             Err(error) => return Err(error),
         }
     };
+
+    // Publish the height to which the wallet is now fully scanned, so the RPC layer can
+    // tell whether the wallet has caught up enough to be usable.
+    status.set_fully_synced(db_data.block_fully_scanned()?.map(|m| m.block_height()));
 
     info!(
         "Initial boundary between recovery and steady-state sync is {}",
@@ -502,6 +516,7 @@ async fn steady_state<C: Chain>(
     tip_change_signal: Arc<Notify>,
     decryptor: WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
+    status: SyncStatusWriter,
 ) -> Result<(), SyncError> {
     info!("Steady-state sync task started");
 
@@ -519,6 +534,7 @@ async fn steady_state<C: Chain>(
             &tip_change_signal,
             &decryptor,
             shutdown_height,
+            &status,
         )
         .await
         {
@@ -574,6 +590,9 @@ async fn steady_state<C: Chain>(
                     );
                     let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
                     let fork_point = locate_fork_point(&chain_view, db_data, candidate_tip).await?;
+                    // Enter the recovering (safe-mode) state for the rewind and rescan;
+                    // `steady_state_iteration` clears it once we reach the chain tip again.
+                    status.begin_recovery(fork_point.height());
                     db_data.truncate_to_height(fork_point.height())?;
                     prev_tip = fork_point;
                     continue;
@@ -597,6 +616,7 @@ async fn steady_state_iteration<C: Chain>(
     tip_change_signal: &Notify,
     decryptor: &WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
+    status: &SyncStatusWriter,
 ) -> Result<ControlFlow<BlockHeight>, SyncError> {
     let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
     let current_tip = chain_view.tip().await.map_err(SyncError::Chain)?;
@@ -620,6 +640,7 @@ async fn steady_state_iteration<C: Chain>(
             })
             .expect("closure always returns Some");
         tip_change_signal.notify_one();
+        status.set_tip(current_tip.height());
 
         // Find where the wallet's history rejoins the backend's best chain.
         let fork_point = locate_fork_point(&chain_view, db_data, *prev_tip).await?;
@@ -642,6 +663,9 @@ async fn steady_state_iteration<C: Chain>(
                 fork_point.height(),
                 fork_point.hash()
             );
+            // Enter the recovering (safe-mode) state for the duration of the rewind and
+            // rescan; it is cleared below once we reach the chain tip again.
+            status.begin_recovery(fork_point.height());
             db_data.truncate_to_height(fork_point.height())?;
             *prev_tip = fork_point;
         };
@@ -685,6 +709,17 @@ async fn steady_state_iteration<C: Chain>(
         return Ok(ControlFlow::Break(boundary));
     }
 
+    // The wallet has applied every block up to the current tip. Publish how far it is
+    // fully scanned (which also reflects `recover_history`'s backfill), mark that steady
+    // state has reached the tip, and clear any recovering state now that the rewind (if
+    // any) has been rescanned.
+    status.set_fully_synced(db_data.block_fully_scanned()?.map(|m| m.block_height()));
+    status.mark_tip_reached();
+    // TODO(zcash/zallet#195): when this actually clears an in-progress recovery (i.e. on
+    // the `Recovering` → synced edge, not on every tip-reached), trigger an online backup
+    // so the recovered state is durably captured before any subsequent failure.
+    status.end_recovery();
+
     // If we have caught up to the chain tip, stream the mempool state into the wallet.
     match chain_view
         .get_mempool_stream()
@@ -720,6 +755,7 @@ async fn steady_state_iteration<C: Chain>(
 ///
 /// This function only operates on finalized chain state, and does not handle reorgs.
 #[tracing::instrument(skip_all)]
+#[allow(clippy::too_many_arguments)]
 async fn recover_history<C: Chain>(
     chain: C,
     params: &Network,
@@ -728,6 +764,7 @@ async fn recover_history<C: Chain>(
     decryptor: WalletDecryptorHandle,
     batch_size: u32,
     shutdown_height: Option<BlockHeight>,
+    status: SyncStatusWriter,
 ) -> Result<(), SyncError> {
     info!("History recovery sync task started");
 
@@ -787,6 +824,10 @@ async fn recover_history<C: Chain>(
                 // this range and let the next loop re-evaluate.
                 break;
             }
+
+            // Backfilling historic ranges advances the fully-scanned height; republish it
+            // so the RPC layer sees the wallet approach a complete view of the chain.
+            status.set_fully_synced(db_data.block_fully_scanned()?.map(|m| m.block_height()));
 
             // If scanning these blocks caused a suggested range to be added that has a
             // higher priority than the current range, invalidate the current ranges.

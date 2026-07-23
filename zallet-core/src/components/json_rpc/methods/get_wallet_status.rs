@@ -13,6 +13,7 @@ use crate::{
         chain::{Chain, ChainView},
         database::DbConnection,
         json_rpc::server::LegacyCode,
+        sync::{SyncStatus, SyncStatusReader},
     },
     network::Network,
 };
@@ -53,6 +54,14 @@ pub(crate) struct GetWalletStatus {
     /// is equal to `wallet_tip.height`).
     #[serde(skip_serializing_if = "Option::is_none")]
     sync_work_remaining: Option<SyncWorkRemaining>,
+
+    /// Whether the wallet is currently locked because it is not synced with the chain.
+    ///
+    /// While locked, the balance and spend JSON-RPC methods return an error instead of
+    /// operating on an incomplete or untrustworthy view of the chain. This is the case
+    /// both while the wallet is still catching up to the chain tip and while it is
+    /// recovering from a detected chain reorganization.
+    locked: bool,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -85,7 +94,11 @@ struct Progress {
     denominator: u64,
 }
 
-pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C) -> Response {
+pub(crate) async fn call<C: Chain>(
+    wallet: &DbConnection,
+    chain: C,
+    sync_status: SyncStatusReader,
+) -> Response {
     let node_tip = chain
         .snapshot()
         .await
@@ -99,6 +112,10 @@ pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C) -> Response 
         .with(status_data)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
+    // The wallet is locked whenever the sync engine reports it is not fully synced
+    // (catching up to the tip, or recovering from a detected divergence).
+    let locked = !matches!(sync_status.status(), SyncStatus::Synced);
+
     Ok(GetWalletStatus {
         node_tip: ChainTip {
             blockhash: node_tip.hash().to_string(),
@@ -107,6 +124,7 @@ pub(crate) async fn call<C: Chain>(wallet: &DbConnection, chain: C) -> Response 
         wallet_tip: wallet_data.as_ref().map(|d| d.chain_tip()),
         fully_synced_height: wallet_data.as_ref().and_then(|d| d.fully_synced_height()),
         sync_work_remaining: wallet_data.as_ref().and_then(|d| d.sync_work_remaining()),
+        locked,
     })
 }
 

@@ -10,7 +10,7 @@ use crate::{
         chain::{ChainFactory, check_consensus_compatibility},
         database::Database,
         json_rpc::JsonRpc,
-        sync::WalletSync,
+        sync::{WalletSync, status},
     },
     config::ZalletConfig,
     error::Error,
@@ -59,6 +59,11 @@ impl StartCmd {
         // Build the decryptor up front so the RPC server has its handle before the initial scan.
         let (decryptor_handle, decryptor_engine) = WalletSync::build_decryptor();
 
+        // The sync engine publishes its status over this channel; the RPC server reads it
+        // to gate balance and spend methods while the wallet is not trustworthy.
+        let (sync_status_writer, sync_status_reader) =
+            status::channel(config.sync.lock_threshold());
+
         // Launch RPC server.
         let rpc_task_handle = JsonRpc::spawn(
             &config,
@@ -68,6 +73,7 @@ impl StartCmd {
             chain.clone(),
             #[cfg(zallet_build = "wallet")]
             decryptor_handle.clone(),
+            sync_status_reader,
         )
         .await?;
 
@@ -84,6 +90,7 @@ impl StartCmd {
             shutdown_height,
             decryptor_handle,
             decryptor_engine,
+            sync_status_writer,
         )
         .await?;
 

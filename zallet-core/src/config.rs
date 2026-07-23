@@ -827,6 +827,15 @@ pub struct SyncSection {
     /// Mainnet blocks can currently be up to 2 MiB each, so a batch of N blocks can require
     /// on the order of N * 2 MiB of memory.
     pub recover_batch_size: Option<NonZeroU32>,
+
+    /// The maximum number of blocks the wallet may lag behind the chain tip while still
+    /// being considered synced.
+    ///
+    /// While the wallet is further than this behind the tip (or has not yet reached the
+    /// tip for the first time), it is treated as still catching up, and the balance and
+    /// spend JSON-RPC methods return an error rather than operating on an incomplete view
+    /// of the chain. The default matches the reorg/finality boundary the sync engine uses.
+    pub lock_threshold: Option<u32>,
 }
 
 impl SyncSection {
@@ -836,6 +845,14 @@ impl SyncSection {
     /// Default is 1000.
     pub fn recover_batch_size(&self) -> u32 {
         self.recover_batch_size.map_or(1000, NonZeroU32::get)
+    }
+
+    /// The maximum number of blocks the wallet may lag behind the chain tip while still
+    /// being considered synced.
+    ///
+    /// Default is 100.
+    pub fn lock_threshold(&self) -> u32 {
+        self.lock_threshold.unwrap_or(100)
     }
 }
 
@@ -897,6 +914,7 @@ impl ZalletConfig {
             rpc("bind", &conf.rpc.bind),
             rpc("timeout", conf.rpc.timeout().as_secs()),
             sync("recover_batch_size", conf.sync.recover_batch_size()),
+            sync("lock_threshold", conf.sync.lock_threshold()),
         ]
         .into_iter()
         .collect::<HashMap<_, _>>();
@@ -1305,5 +1323,25 @@ zebra_state_path = "/home/user/.cache/zebra"
     #[test]
     fn sync_section_rejects_zero_batch_size() {
         assert!(toml::from_str::<super::SyncSection>("recover_batch_size = 0").is_err());
+    }
+
+    #[test]
+    fn sync_section_uses_default_lock_threshold_when_unset() {
+        let section: super::SyncSection = toml::from_str("").unwrap();
+        assert_eq!(section.lock_threshold(), 100);
+    }
+
+    #[test]
+    fn sync_section_parses_lock_threshold_override() {
+        let section: super::SyncSection = toml::from_str("lock_threshold = 42").unwrap();
+        assert_eq!(section.lock_threshold(), 42);
+    }
+
+    #[test]
+    fn sync_section_accepts_zero_lock_threshold() {
+        // Unlike `recover_batch_size`, a threshold of 0 is meaningful (synced only when
+        // fully scanned exactly to the tip), so it must be accepted.
+        let section: super::SyncSection = toml::from_str("lock_threshold = 0").unwrap();
+        assert_eq!(section.lock_threshold(), 0);
     }
 }
