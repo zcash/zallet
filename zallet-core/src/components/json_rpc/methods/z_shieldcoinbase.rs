@@ -3,25 +3,30 @@
 use std::convert::Infallible;
 use std::future::Future;
 
+use abscissa_core::Application;
 use documented::Documented;
 use jsonrpsee::core::{JsonValue, RpcResult};
+use rand::rngs::OsRng;
 use schemars::JsonSchema;
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use transparent::address::TransparentAddress;
 use uuid::Uuid;
 use zcash_address::ZcashAddress;
+use zcash_client_backend::{data_api::error::Error as WalletError, proposal::ProposalError};
 use zcash_client_backend::{
     data_api::{
         Account as _, CoinbaseFilter, InputSource, WalletRead,
         wallet::{
-            ConfirmationsPolicy, SpendingKeys, TargetHeight, create_proposed_transactions,
-            input_selection::GreedyInputSelector, propose_shielding_coinbase,
+            ConfirmationsPolicy, LockRequest, SpendingKeys, TargetHeight,
+            create_proposed_transactions,
+            input_selection::{GreedyInputSelector, LockFilter, LockedInputPolicy},
+            propose_shielding_coinbase,
         },
     },
     fees::StandardFeeRule,
     proposal::Proposal,
-    wallet::OvkPolicy,
+    wallet::{LockOwner, OvkPolicy},
 };
 use zcash_client_sqlite::AccountUuid;
 use zcash_keys::{
@@ -31,7 +36,9 @@ use zcash_keys::{
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::value::Zatoshis;
 
-use crate::components::json_rpc::payments::enforce_privacy_policy;
+use crate::components::json_rpc::payments::{
+    account_busy_error, enforce_privacy_policy, unlock_proposal_inputs_after_failure,
+};
 use crate::{
     components::{
         chain::Chain,
@@ -204,6 +211,19 @@ pub(crate) async fn call<C: Chain>(
     let params = *wallet.params();
     let input_selector = GreedyInputSelector::new();
 
+    // Lock the proposal's transparent inputs for the configured window, so a concurrent
+    // operation on the same UTXOs cannot select (and double-spend) them while this one
+    // builds. The operation locks under its own fresh random owner token, so releasing
+    // its locks can never disturb a concurrent operation's, and a conflict always means a
+    // different in-flight operation holds the input: the transient "account busy"
+    // condition, which the caller should retry.
+    let lock_inputs = APP
+        .config()
+        .builder
+        .note_lock_blocks()
+        .map(|for_blocks| LockRequest::new(LockOwner::random(&mut OsRng), for_blocks));
+    let lock_owner = lock_inputs.as_ref().map(|request| request.owner());
+
     // Create the shielding proposal. Uses Zatoshis::ZERO as the shielding
     // threshold to shield all available coinbase UTXOs (or all up to `limit`
     // when supplied). `propose_shielding_coinbase` hard-codes
@@ -221,92 +241,142 @@ pub(crate) async fn call<C: Chain>(
         to_zcash_address,
         memo,
         limit_usize,
+        lock_inputs,
     )
-    .map_err(|e| {
-        LegacyCode::Wallet.with_message(format!("Failed to propose shielding transaction: {e}"))
+    .map_err(|e| match &e {
+        // A lock conflict is transient: a concurrent operation holds one of the selected
+        // inputs. Surface it as a retryable "account busy" error rather than a failure.
+        WalletError::Proposal(ProposalError::InputsLocked(_)) => account_busy_error(),
+        _ => {
+            LegacyCode::Wallet.with_message(format!("Failed to propose shielding transaction: {e}"))
+        }
     })?;
 
     // Coinbase shielding always reveals the transparent sender(s); when the proposal selects
     // from multiple source addresses (an account UUID expanded to >1 receivers that all hold
     // eligible coinbase UTXOs) it also links those addresses on-chain. The privacy policy
     // parsed above bounds which of these leakages the caller is willing to accept;
-    // `enforce_privacy_policy` rejects the proposal if it requires more than the caller permitted.
-    enforce_privacy_policy(&proposal, privacy_policy)?;
-
-    // Pre-flight numerics. We compute `remaining_*` by enumerating all eligible coinbase UTXOs
-    // (`total_*`) and subtracting the ones the proposal selected (`shielding_*`). The
-    // enumeration is fragile (chain races; see the `checked_sub` errors below) and only exists
-    // because the wallet backend does not yet expose "give me only the unlocked outputs".
-    //
-    // TODO: once note/utxo locking lands upstream (blocked on
-    // https://github.com/zcash/librustzcash/issues/2161), drop the enumeration + subtraction
-    // and read `remaining_utxos`/`remaining_value` directly by querying the wallet for the
-    // outputs that the proposal left unlocked.
-    let (shielding_utxos, shielding_value_zats) = sum_selected_inputs(&proposal)?;
-    let target_height = proposal.min_target_height();
-    let (total_utxos, total_value_zats) =
-        enumerate_eligible(wallet.as_mut(), &from_addrs, target_height)?;
-
-    let remaining_utxos = total_utxos.checked_sub(shielding_utxos).ok_or_else(|| {
-        LegacyCode::Wallet.with_static(
-            "Internal accounting error: proposal selected more UTXOs than \
-             enumeration found (likely a chain race during shielding setup).",
-        )
-    })?;
-    let remaining_value_zats = (total_value_zats - shielding_value_zats).ok_or_else(|| {
-        LegacyCode::Wallet.with_static(
-            "Internal accounting error: proposal value exceeds enumerated total \
-             (likely a chain race during shielding setup).",
-        )
-    })?;
-
-    // Only warn when the caller did not constrain the batch themselves; if
-    // `limit` was supplied, the caller has already opted into a specific batch
-    // size and the warning is noise.
-    if limit.is_none() && shielding_utxos > COINBASE_INPUTS_WARN_THRESHOLD {
-        warn!(
-            "z_shieldcoinbase: proposal selected {} coinbase UTXOs, which exceeds the \
-             soft warning threshold of {}. The resulting transaction may exceed \
-             network/mempool size limits at broadcast time. If broadcast fails, retry \
-             with a `limit` parameter to shield in smaller batches.",
-            shielding_utxos, COINBASE_INPUTS_WARN_THRESHOLD,
-        );
+    // `enforce_privacy_policy` rejects the proposal if it requires more than the caller
+    // permitted. The proposal's inputs are already locked at this point, so a rejection
+    // must release them.
+    if let Err(e) = enforce_privacy_policy(&proposal, privacy_policy) {
+        unlock_proposal_inputs_after_failure(wallet.as_mut(), &proposal, lock_owner);
+        return Err(e.into());
     }
 
-    let preflight = Preflight {
-        remaining_utxos,
-        remaining_value: value_from_zatoshis(remaining_value_zats),
-        shielding_utxos,
-        shielding_value: value_from_zatoshis(shielding_value_zats),
-    };
+    // Whether the proposal's inputs were locked (the request was moved into the propose
+    // call; the retained owner token is the handle for releasing them).
+    let lock_inputs_taken = lock_owner.is_some();
 
-    // Derive the spending key for the source account.
-    let derivation = account.source().key_derivation().ok_or_else(|| {
-        LegacyCode::InvalidAddressOrKey.with_message(format!(
-            "No payment source found for account {}.",
-            account_id.expose_uuid(),
-        ))
-    })?;
-    let seed = keystore
-        .decrypt_seed(derivation.seed_fingerprint())
-        .await
-        .map_err(|e| match e.kind() {
-            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
-                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
-            }
-            _ => LegacyCode::Database.with_message(e.to_string()),
+    // From here until `create_proposed_transactions` stores the built transaction, this
+    // function owns the proposal's input locks: every error on this path must release
+    // them, or the UTXOs would stay unspendable until the lock window expires.
+    let post_proposal = async {
+        // Pre-flight numerics. We compute `remaining_*` by enumerating all eligible coinbase
+        // UTXOs (`total_*`) and subtracting the ones the proposal selected (`shielding_*`).
+        // The enumeration excludes locked outputs, including the ones this proposal just
+        // locked, so the subtraction runs against the pre-lock view: `enumerate_eligible`
+        // adds the proposal's own (now locked) selection back by construction, because
+        // `total_*` is computed from `shielding_*` plus the remaining unlocked outputs.
+        let (shielding_utxos, shielding_value_zats) = sum_selected_inputs(&proposal)?;
+        let target_height = proposal.min_target_height();
+        let (unlocked_utxos, unlocked_value_zats) =
+            enumerate_eligible(wallet.as_mut(), &from_addrs, target_height)?;
+        let (total_utxos, total_value_zats) = if lock_inputs_taken {
+            // The proposal's own inputs were just locked, so the enumeration no longer
+            // sees them; the eligible total is the remaining unlocked outputs plus the
+            // proposal's selection.
+            (
+                unlocked_utxos.saturating_add(shielding_utxos),
+                (unlocked_value_zats + shielding_value_zats).ok_or_else(|| {
+                    LegacyCode::Wallet.with_static(
+                        "Internal error: total transparent value overflowed Zatoshis bounds.",
+                    )
+                })?,
+            )
+        } else {
+            (unlocked_utxos, unlocked_value_zats)
+        };
+
+        let remaining_utxos = total_utxos.checked_sub(shielding_utxos).ok_or_else(|| {
+            LegacyCode::Wallet.with_static(
+                "Internal accounting error: proposal selected more UTXOs than \
+                 enumeration found (likely a chain race during shielding setup).",
+            )
         })?;
-    let usk = UnifiedSpendingKey::from_seed(
-        wallet.params(),
-        seed.expose_secret(),
-        derivation.account_index(),
-    )
-    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
+        let remaining_value_zats = (total_value_zats - shielding_value_zats).ok_or_else(|| {
+            LegacyCode::Wallet.with_static(
+                "Internal accounting error: proposal value exceeds enumerated total \
+                 (likely a chain race during shielding setup).",
+            )
+        })?;
 
-    #[cfg(feature = "zcashd-import")]
-    let standalone_keys =
-        collect_standalone_transparent_keys(wallet.as_ref(), &keystore, account_id, &proposal)
-            .await?;
+        // Only warn when the caller did not constrain the batch themselves; if
+        // `limit` was supplied, the caller has already opted into a specific batch
+        // size and the warning is noise.
+        if limit.is_none() && shielding_utxos > COINBASE_INPUTS_WARN_THRESHOLD {
+            warn!(
+                "z_shieldcoinbase: proposal selected {} coinbase UTXOs, which exceeds the \
+                 soft warning threshold of {}. The resulting transaction may exceed \
+                 network/mempool size limits at broadcast time. If broadcast fails, retry \
+                 with a `limit` parameter to shield in smaller batches.",
+                shielding_utxos, COINBASE_INPUTS_WARN_THRESHOLD,
+            );
+        }
+
+        let preflight = Preflight {
+            remaining_utxos,
+            remaining_value: value_from_zatoshis(remaining_value_zats),
+            shielding_utxos,
+            shielding_value: value_from_zatoshis(shielding_value_zats),
+        };
+
+        // Derive the spending key for the source account.
+        let derivation = account.source().key_derivation().ok_or_else(|| {
+            LegacyCode::InvalidAddressOrKey.with_message(format!(
+                "No payment source found for account {}.",
+                account_id.expose_uuid(),
+            ))
+        })?;
+        let seed = keystore
+            .decrypt_seed(derivation.seed_fingerprint())
+            .await
+            .map_err(|e| match e.kind() {
+                crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
+                    LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
+                }
+                _ => LegacyCode::Database.with_message(e.to_string()),
+            })?;
+        let usk = UnifiedSpendingKey::from_seed(
+            wallet.params(),
+            seed.expose_secret(),
+            derivation.account_index(),
+        )
+        .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
+
+        #[cfg(feature = "zcashd-import")]
+        let standalone_keys =
+            collect_standalone_transparent_keys(wallet.as_ref(), &keystore, account_id, &proposal)
+                .await?;
+
+        Ok::<_, jsonrpsee::types::ErrorObjectOwned>((
+            preflight,
+            usk.to_unified_full_viewing_key(),
+            #[cfg(feature = "zcashd-import")]
+            SpendingKeys::new(usk, standalone_keys),
+            #[cfg(not(feature = "zcashd-import"))]
+            SpendingKeys::from_unified_spending_key(usk),
+        ))
+    }
+    .await;
+
+    let (preflight, ufvk, spending_keys) = match post_proposal {
+        Ok(parts) => parts,
+        Err(e) => {
+            unlock_proposal_inputs_after_failure(wallet.as_mut(), &proposal, lock_owner);
+            return Err(e);
+        }
+    };
 
     Ok((
         preflight,
@@ -322,12 +392,10 @@ pub(crate) async fn call<C: Chain>(
             wallet,
             chain,
             account_id,
-            usk.to_unified_full_viewing_key(),
+            ufvk,
             proposal,
-            #[cfg(feature = "zcashd-import")]
-            SpendingKeys::new(usk, standalone_keys),
-            #[cfg(not(feature = "zcashd-import"))]
-            SpendingKeys::from_unified_spending_key(usk),
+            spending_keys,
+            lock_owner,
         ),
     ))
 }
@@ -482,6 +550,10 @@ fn enumerate_eligible(
 ) -> RpcResult<(u64, Zatoshis)> {
     let mut total_utxos: u64 = 0;
     let mut total_value_zats = Zatoshis::ZERO;
+    // "Eligible" mirrors what shielding selection can actually draw on, and selection
+    // excludes locked outputs (the default `LockedInputPolicy::Exclude`).
+    let locked_input_policy = LockedInputPolicy::Exclude;
+    let lock_filter = LockFilter::Policy(&locked_input_policy);
     for addr in from_addrs {
         let utxos = wallet
             .get_spendable_transparent_outputs(
@@ -489,6 +561,7 @@ fn enumerate_eligible(
                 target_height,
                 ConfirmationsPolicy::MIN,
                 CoinbaseFilter::CoinbaseOnly,
+                lock_filter,
             )
             .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
         total_utxos = total_utxos.saturating_add(utxos.len() as u64);
@@ -508,6 +581,10 @@ fn enumerate_eligible(
 /// `ufvk` must be derived from the wallet seed: the built transactions' transparent
 /// outputs are verified against it before broadcast, because their addresses come from
 /// wallet database records that are not integrity-protected.
+/// `lock_owner` is the owner token the proposal's transparent inputs were locked under
+/// when it was created, or `None` when locking is disabled: when building fails, that
+/// owner's locks are explicitly released; when it succeeds,
+/// `store_transactions_to_be_sent` releases them atomically as it marks the inputs spent.
 async fn run<C: Chain>(
     mut wallet: DbHandle,
     chain: C,
@@ -515,30 +592,41 @@ async fn run<C: Chain>(
     ufvk: UnifiedFullViewingKey,
     proposal: Proposal<StandardFeeRule, Infallible>,
     spending_keys: SpendingKeys,
+    lock_owner: Option<LockOwner>,
 ) -> RpcResult<SendResult> {
     let prover = LocalTxProver::bundled();
-    let (wallet, proposal, txids) = crate::spawn_blocking!("z_shieldcoinbase runner", move || {
-        let params = *wallet.params();
-        create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
-            wallet.as_mut(),
-            &params,
-            &prover,
-            &prover,
-            &spending_keys,
-            OvkPolicy::Sender,
-            &proposal,
-            // No expiry-height override; the transaction keeps its builder-derived expiry.
-            None,
-        )
-        .map(|txids| (wallet, proposal, txids))
-    })
-    .await
-    .map_err(|e| {
-        LegacyCode::Wallet.with_message(format!("Failed to build shielding transaction: {e}"))
-    })?
-    .map_err(|e| {
-        LegacyCode::Wallet.with_message(format!("Failed to build shielding transaction: {e}"))
-    })?;
+    // The closure returns the wallet and proposal in BOTH outcomes so that the failure
+    // path can release the proposal's input locks. (If the closure panics, the wallet
+    // handle is lost and the locks self-expire at the lock expiry height.)
+    let (mut wallet, proposal, build_result) =
+        crate::spawn_blocking!("z_shieldcoinbase runner", move || {
+            let params = *wallet.params();
+            let result = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
+                wallet.as_mut(),
+                &params,
+                &prover,
+                &prover,
+                &spending_keys,
+                OvkPolicy::Sender,
+                &proposal,
+                // No expiry-height override; the transaction keeps its builder-derived expiry.
+                None,
+            );
+            (wallet, proposal, result)
+        })
+        .await
+        .map_err(|e| {
+            LegacyCode::Wallet.with_message(format!("Failed to build shielding transaction: {e}"))
+        })?;
+
+    let txids = match build_result {
+        Ok(txids) => txids,
+        Err(e) => {
+            unlock_proposal_inputs_after_failure(wallet.as_mut(), &proposal, lock_owner);
+            return Err(LegacyCode::Wallet
+                .with_message(format!("Failed to build shielding transaction: {e}")));
+        }
+    };
 
     verify_and_broadcast_transactions(&wallet, chain, account_id, &ufvk, &proposal, txids.into())
         .await

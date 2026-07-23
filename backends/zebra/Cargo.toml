@@ -76,18 +76,22 @@ tokio-console = ["zallet-core/tokio-console"]
 
 [patch.crates-io]
 # Replace with the crates.io releases once they ship.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
-zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "beec9b595f1e2b12c51eb19beb6d222ffd6f2088" }
+# The pinned librustzcash rev builds against the git `orchard` (the ZIP 374
+# deferred-anchor builder API), not the crates.io release; patch it to the same
+# rev librustzcash pins. Drop alongside the librustzcash pin above.
+orchard = { git = "https://github.com/zcash/orchard.git", rev = "3bd2b736d1273226595773265313fc3f3428af16" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

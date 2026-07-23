@@ -48,7 +48,7 @@ use tokio::{sync::Notify, time};
 #[cfg(not(feature = "spend-index"))]
 use zcash_client_backend::data_api::{
     CoinbaseFilter, InputSource, TransactionsInvolvingAddress,
-    wallet::{ConfirmationsPolicy, TargetHeight},
+    wallet::{ConfirmationsPolicy, TargetHeight, input_selection::LockFilter},
 };
 use zcash_client_backend::{
     data_api::{
@@ -853,11 +853,16 @@ async fn service_address_request<V: ChainView>(
         .map_err(SyncError::Chain)?
         .into_iter()
         .collect();
+    // This enumerates the wallet's view of unspent outputs to compare against the chain;
+    // an in-flight proposal's lock must not hide an output from spent-detection, so the
+    // query ignores lock state entirely (a retrieval path, not input selection).
+    let lock_filter = LockFilter::Unfiltered;
     let our_outputs = db_data.get_spendable_transparent_outputs(
         &address,
         TargetHeight::from(view_tip + 1),
         ConfirmationsPolicy::MIN,
         CoinbaseFilter::AllTransparentOutputs,
+        lock_filter,
     )?;
     let any_spent = our_outputs.iter().any(|output| {
         let outpoint = output.outpoint();

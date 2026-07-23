@@ -60,9 +60,18 @@ struct Pools {
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 struct PoolBalance {
-    /// The balance in zatoshis.
+    /// The spendable balance in zatoshis.
     #[serde(rename = "valueZat")]
     value_zat: u64,
+
+    /// The value (in zatoshis) currently locked by in-flight spend operations.
+    ///
+    /// Locked value is excluded from `valueZat` (it cannot be selected by a new spend
+    /// while the operation that locked it is in flight) but still belongs to the account;
+    /// it returns to `valueZat` when the operation completes, fails, or its lock expires.
+    /// Omitted if zero.
+    #[serde(rename = "lockedZat", skip_serializing_if = "Option::is_none")]
+    locked_zat: Option<u64>,
 }
 
 pub(super) const PARAM_ACCOUNT_DESC: &str =
@@ -102,28 +111,42 @@ pub(crate) async fn call(
 
 /// Builds the response from an account's balance.
 ///
-/// Reports each value pool's spendable balance, omitting pools whose balance is
-/// zero, and echoes the effective `minconf` (defaulting to 1, as in zcashd).
+/// Reports each value pool's spendable balance alongside any value locked by in-flight
+/// spend operations, omitting pools with neither, and echoes the effective `minconf`
+/// (defaulting to 1, as in zcashd).
 fn response_for_balance(
     account_balance: &AccountBalance,
     minconf: Option<u32>,
 ) -> BalanceForAccount {
+    let unshielded = account_balance.unshielded_balance();
     BalanceForAccount {
         pools: Pools {
-            transparent: pool_balance(account_balance.unshielded_balance().spendable_value()),
-            sapling: pool_balance(account_balance.sapling_balance().spendable_value()),
-            orchard: pool_balance(account_balance.orchard_balance().spendable_value()),
-            ironwood: pool_balance(account_balance.ironwood_balance().spendable_value()),
+            transparent: pool_balance(unshielded.spendable_value(), unshielded.locked_value()),
+            sapling: pool_balance(
+                account_balance.sapling_balance().spendable_value(),
+                account_balance.sapling_balance().locked_value(),
+            ),
+            orchard: pool_balance(
+                account_balance.orchard_balance().spendable_value(),
+                account_balance.orchard_balance().locked_value(),
+            ),
+            ironwood: pool_balance(
+                account_balance.ironwood_balance().spendable_value(),
+                account_balance.ironwood_balance().locked_value(),
+            ),
         },
         minimum_confirmations: minconf.unwrap_or(1),
     }
 }
 
-/// Renders a pool's spendable balance, omitting pools with a zero balance to
-/// match the reference `z_getbalanceforaccount` behaviour.
-fn pool_balance(value: Zatoshis) -> Option<PoolBalance> {
-    (!value.is_zero()).then(|| PoolBalance {
+/// Renders a pool's spendable and locked balances, omitting pools with neither (matching
+/// the reference `z_getbalanceforaccount` behaviour of omitting zero-balance pools; a pool
+/// whose entire balance is locked is still shown, so an in-flight operation does not make
+/// funds appear to vanish).
+fn pool_balance(value: Zatoshis, locked: Zatoshis) -> Option<PoolBalance> {
+    (!(value.is_zero() && locked.is_zero())).then(|| PoolBalance {
         value_zat: value.into_u64(),
+        locked_zat: (!locked.is_zero()).then(|| locked.into_u64()),
     })
 }
 
@@ -281,6 +304,42 @@ mod tests {
                 "pools": {"transparent": {"valueZat": 5 * COIN}},
                 "minimum_confirmations": 1,
             }),
+        );
+    }
+
+    // A pool with locked value reports it under `lockedZat` alongside the spendable
+    // `valueZat`, and a pool whose ENTIRE balance is locked still appears (spendable 0),
+    // so an in-flight operation does not make the funds appear to vanish.
+    #[test]
+    fn locked_value_is_rendered_and_keeps_the_pool_visible() {
+        let zat = Zatoshis::const_from_u64;
+        let mut balance = account_balance(0, 2 * COIN, 0, 0);
+        balance
+            .with_sapling_balance_mut::<_, BalanceError>(|b| b.add_locked_value(zat(3 * COIN)))
+            .unwrap();
+        balance
+            .with_orchard_balance_mut::<_, BalanceError>(|b| b.add_locked_value(zat(COIN)))
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(response_for_balance(&balance, None)).unwrap(),
+            json!({
+                "pools": {
+                    "sapling": {"valueZat": 2 * COIN, "lockedZat": 3 * COIN},
+                    "orchard": {"valueZat": 0, "lockedZat": COIN},
+                },
+                "minimum_confirmations": 1,
+            }),
+        );
+    }
+
+    // A pool with no locked value renders exactly as before locking existed (`lockedZat`
+    // omitted), so existing consumers of the RPC output are unaffected.
+    #[test]
+    fn unlocked_pools_render_without_locked_field() {
+        assert_eq!(
+            rendered(0, 5 * COIN, 0, 0, None),
+            json!({"pools": {"sapling": {"valueZat": 5 * COIN}}, "minimum_confirmations": 1}),
         );
     }
 

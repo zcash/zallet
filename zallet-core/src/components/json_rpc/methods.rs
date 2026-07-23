@@ -19,6 +19,8 @@ use {
     tokio::sync::RwLock,
 };
 
+#[cfg(zallet_build = "wallet")]
+mod clear_locked_outputs;
 mod convert_tex;
 mod decode_raw_transaction;
 mod decode_script;
@@ -437,6 +439,33 @@ pub(crate) trait WalletRpc {
         account: JsonValue,
         minconf: Option<u32>,
     ) -> z_get_balance_for_account::Response;
+
+    /// Releases every note lock held for the given account.
+    ///
+    /// While a spend operation (`z_sendmany`, `z_shieldcoinbase`) is in flight, the notes
+    /// and UTXOs it selected are locked so that no concurrent operation can select them;
+    /// the locks are released when the operation completes or fails, and otherwise expire
+    /// on their own once the chain advances past their lock height (the
+    /// `builder.note_lock_blocks` config option, 40 blocks by default).
+    ///
+    /// This method is a recovery mechanism for the case where the wallet has lost track of
+    /// an in-flight operation (for example, the process was killed between creating a
+    /// proposal and building its transactions) and its locks would otherwise make the
+    /// account's funds unspendable until they expire.
+    ///
+    /// # Warning
+    ///
+    /// This releases every lock for the account, including locks held by operations that
+    /// are still legitimately in flight; their inputs immediately become selectable by new
+    /// operations, re-creating the double-spend conflict that locking exists to prevent.
+    /// Only call this when no in-flight operation (spend, shielding, proposal, or PCZT)
+    /// for the account remains. When in doubt, wait: locks expire on their own.
+    ///
+    /// # Arguments
+    /// - `account` (string or numeric, required): Either the UUID or the ZIP 32 account
+    ///   index of the account, as returned by `z_getnewaccount`.
+    #[method(name = "z_clearlockedoutputs")]
+    async fn clear_locked_outputs(&self, account: JsonValue) -> clear_locked_outputs::Response;
 
     /// Imports a transparent address into the wallet for a given account.
     ///
@@ -1029,6 +1058,10 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             minconf,
         )
         .await
+    }
+
+    async fn clear_locked_outputs(&self, account: JsonValue) -> clear_locked_outputs::Response {
+        clear_locked_outputs::call(self.wallet().await?.as_mut(), &self.keystore, account).await
     }
 
     async fn import_address(
