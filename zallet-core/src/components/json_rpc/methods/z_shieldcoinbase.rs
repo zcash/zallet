@@ -43,6 +43,7 @@ use crate::{
             utils::{JsonZec, value_from_zatoshis},
         },
         keystore::KeyStore,
+        sync::SyncStatusReader,
     },
     prelude::*,
 };
@@ -148,6 +149,7 @@ pub(crate) async fn call<C: Chain>(
     mut wallet: DbHandle,
     keystore: KeyStore,
     chain: C,
+    sync_status: SyncStatusReader,
     fromaddress: String,
     toaddress: String,
     fee: Option<JsonValue>,
@@ -279,6 +281,13 @@ pub(crate) async fn call<C: Chain>(
         shielding_utxos,
         shielding_value: value_from_zatoshis(shielding_value_zats),
     };
+
+    // The proposal has been built. Before fetching key material and handing off the
+    // execution future, refuse the spend if the wallet is not synced enough to trust its
+    // view of the chain. This check is synchronous — it runs during the `call().await` in
+    // the dispatch layer, before the async operation is queued — so the caller sees the
+    // failure immediately rather than as a failed background operation.
+    sync_status.ensure_available()?;
 
     // Derive the spending key for the source account.
     let derivation = account.source().key_derivation().ok_or_else(|| {

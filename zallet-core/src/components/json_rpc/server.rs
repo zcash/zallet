@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use tokio::task::JoinHandle;
 
 use crate::{
-    components::{chain::Chain, database::Database},
+    components::{chain::Chain, database::Database, sync::SyncStatusReader},
     config::RpcSection,
     error::{Error, ErrorKind},
     fl,
@@ -39,6 +39,7 @@ pub(crate) async fn spawn<C: Chain>(
     #[cfg(zallet_build = "wallet")] keystore: KeyStore,
     chain: C,
     #[cfg(zallet_build = "wallet")] decryptor: WalletDecryptorHandle,
+    sync_status: SyncStatusReader,
 ) -> Result<ServerTask, Error> {
     // Caller should make sure `bind` only contains a single address (for now).
     assert_eq!(config.bind.len(), 1);
@@ -46,13 +47,19 @@ pub(crate) async fn spawn<C: Chain>(
 
     // Initialize the RPC methods.
     #[cfg(zallet_build = "wallet")]
-    let wallet_rpc_impl =
-        WalletRpcImpl::new(wallet.clone(), keystore.clone(), chain.clone(), decryptor);
+    let wallet_rpc_impl = WalletRpcImpl::new(
+        wallet.clone(),
+        keystore.clone(),
+        chain.clone(),
+        decryptor,
+        sync_status.clone(),
+    );
     let rpc_impl = RpcImpl::new(
         wallet,
         #[cfg(zallet_build = "wallet")]
         keystore,
         chain,
+        sync_status,
     );
 
     let timeout = config.timeout();
