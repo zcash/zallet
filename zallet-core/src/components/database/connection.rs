@@ -16,7 +16,7 @@ use zcash_client_backend::{
         WalletWrite, Zip32Derivation,
         chain::ChainState,
         error::{FindAccountForAddressError, LockError, RewindError},
-        wallet::{ConfirmationsPolicy, TargetHeight},
+        wallet::{ConfirmationsPolicy, TargetHeight, input_selection::LockFilter},
     },
     fees::StandardFeeRule,
     keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
@@ -444,10 +444,10 @@ impl InputSource for DbConnection {
         protocol: ShieldedPool,
         index: u32,
         target_height: TargetHeight,
-        include_locked: bool,
+        lock_filter: LockFilter<'_>,
     ) -> Result<Option<ReceivedNote<Self::NoteRef, Note>>, Self::Error> {
         self.with(|db_data| {
-            db_data.get_spendable_note(txid, protocol, index, target_height, include_locked)
+            db_data.get_spendable_note(txid, protocol, index, target_height, lock_filter)
         })
     }
 
@@ -459,7 +459,7 @@ impl InputSource for DbConnection {
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         exclude: &[Self::NoteRef],
-        include_locked: bool,
+        lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
         self.with(|db_data| {
             db_data.select_spendable_notes(
@@ -469,7 +469,7 @@ impl InputSource for DbConnection {
                 target_height,
                 confirmations_policy,
                 exclude,
-                include_locked,
+                lock_filter,
             )
         })
     }
@@ -480,10 +480,10 @@ impl InputSource for DbConnection {
         sources: &[ShieldedPool],
         target_height: TargetHeight,
         exclude: &[Self::NoteRef],
-        include_locked: bool,
+        lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
         self.with(|db_data| {
-            db_data.select_unspent_notes(account, sources, target_height, exclude, include_locked)
+            db_data.select_unspent_notes(account, sources, target_height, exclude, lock_filter)
         })
     }
 
@@ -491,11 +491,8 @@ impl InputSource for DbConnection {
         &self,
         outpoint: &OutPoint,
         target_height: TargetHeight,
-        include_locked: bool,
     ) -> Result<Option<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
-        self.with(|db_data| {
-            db_data.get_unspent_transparent_output(outpoint, target_height, include_locked)
-        })
+        self.with(|db_data| db_data.get_unspent_transparent_output(outpoint, target_height))
     }
 
     fn get_spendable_transparent_outputs(
@@ -504,7 +501,7 @@ impl InputSource for DbConnection {
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         output_filter: CoinbaseFilter,
-        include_locked: bool,
+        lock_filter: LockFilter<'_>,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         self.with(|db_data| {
             db_data.get_spendable_transparent_outputs(
@@ -512,7 +509,7 @@ impl InputSource for DbConnection {
                 target_height,
                 confirmations_policy,
                 output_filter,
-                include_locked,
+                lock_filter,
             )
         })
     }
@@ -528,7 +525,7 @@ impl InputSource for DbConnection {
         target_value: TargetValue,
         max_inputs: usize,
         fee_rule: &StandardFeeRule,
-        include_locked: bool,
+        lock_filter: LockFilter<'_>,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         self.with(|db_data| {
             db_data.select_spendable_transparent_outputs(
@@ -540,7 +537,7 @@ impl InputSource for DbConnection {
                 target_value,
                 max_inputs,
                 fee_rule,
-                include_locked,
+                lock_filter,
             )
         })
     }
@@ -551,10 +548,10 @@ impl InputSource for DbConnection {
         selector: &NoteFilter,
         target_height: TargetHeight,
         exclude: &[Self::NoteRef],
-        include_locked: bool,
+        lock_filter: LockFilter<'_>,
     ) -> Result<AccountMeta, Self::Error> {
         self.with(|db_data| {
-            db_data.get_account_metadata(account, selector, target_height, exclude, include_locked)
+            db_data.get_account_metadata(account, selector, target_height, exclude, lock_filter)
         })
     }
 }

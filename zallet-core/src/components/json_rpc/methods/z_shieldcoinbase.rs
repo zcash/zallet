@@ -19,7 +19,8 @@ use zcash_client_backend::{
         Account as _, CoinbaseFilter, InputSource, WalletRead,
         wallet::{
             ConfirmationsPolicy, LockRequest, SpendingKeys, TargetHeight,
-            create_proposed_transactions, input_selection::GreedyInputSelector,
+            create_proposed_transactions,
+            input_selection::{GreedyInputSelector, LockFilter, LockedInputPolicy},
             propose_shielding_coinbase,
         },
     },
@@ -550,8 +551,9 @@ fn enumerate_eligible(
     let mut total_utxos: u64 = 0;
     let mut total_value_zats = Zatoshis::ZERO;
     // "Eligible" mirrors what shielding selection can actually draw on, and selection
-    // excludes locked outputs.
-    let include_locked = false;
+    // excludes locked outputs (the default `LockedInputPolicy::Exclude`).
+    let locked_input_policy = LockedInputPolicy::Exclude;
+    let lock_filter = LockFilter::Policy(&locked_input_policy);
     for addr in from_addrs {
         let utxos = wallet
             .get_spendable_transparent_outputs(
@@ -559,7 +561,7 @@ fn enumerate_eligible(
                 target_height,
                 ConfirmationsPolicy::MIN,
                 CoinbaseFilter::CoinbaseOnly,
-                include_locked,
+                lock_filter,
             )
             .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
         total_utxos = total_utxos.saturating_add(utxos.len() as u64);
