@@ -20,6 +20,18 @@ be considered breaking changes.
   indicating coinbase origin (mirroring `zcashd`'s `listunspent`), so
   integrators no longer need a `getrawtransaction` round-trip per UTXO to
   distinguish coinbase from spendable-to-transparent funds.
+- A global sync lock that blocks wallet usage while Zallet’s view of the chain
+  is not trustworthy. The balance and spend RPC methods (`z_getbalances`,
+  `z_getbalanceforaccount`, `z_gettotalbalance`, `z_listunspent`,
+  `z_getnotescount`, `z_sendmany`, `z_shieldcoinbase`) return an error both while
+  the wallet is still catching up to the chain tip (analogous to `zcashd`’s
+  initial block download) and while it is recovering from a chain reorganization
+  (analogous to safe mode).
+- The `sync.lock_threshold` config option, controlling how far the wallet may
+  lag the chain tip before it is considered to be catching up rather than synced
+  (default 100).
+- `getwalletstatus` now reports a `locked` field indicating whether the wallet
+  is currently usable.
 
 ### Removed
 

@@ -394,3 +394,12 @@ as_of_version = "0.1.0-beta.1"
 # on the order of N * 2 MiB of memory.
 #recover_batch_size = 1000
 
+# The maximum number of blocks the wallet may lag behind the chain tip while still
+# being considered synced.
+#
+# While the wallet is further than this behind the tip (or has not yet reached the
+# tip for the first time), it is treated as still catching up, and the balance and
+# spend JSON-RPC methods return an error rather than operating on an incomplete view
+# of the chain. The default matches the reorg/finality boundary the sync engine uses.
+#lock_threshold = 100
+
