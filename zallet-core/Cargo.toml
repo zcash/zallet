@@ -93,6 +93,7 @@ zcash_protocol = { workspace = true, features = ["local-consensus"] }
 
 # Zcash payment protocols
 orchard.workspace = true
+pczt.workspace = true
 sapling.workspace = true
 secp256k1.workspace = true
 transparent.workspace = true
@@ -117,11 +118,13 @@ uuid.workspace = true
 zcash_client_backend = { workspace = true, features = [
     "lightwalletd-tonic-tls-webpki-roots",
     "orchard",
+    "pczt",
     "sync-decryptor",
     "transparent-inputs",
 ] }
 zcash_client_sqlite = { workspace = true, features = [
     "orchard",
+    "serde",
     "transparent-inputs",
 ] }
 zcash_note_encryption.workspace = true

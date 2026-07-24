@@ -67,6 +67,69 @@ REMINDER: It is recommended that you back up your wallet files regularly. If you
 have not imported externally-produced keys, it only necessary to have backed up
 the wallet's key storage file.
 
+## `pczt_combine`
+
+Combines multiple PCZTs (for the same transaction) into one.
+
+This applies the Combiner role, merging the per-party contributions
+(proofs and signatures produced in parallel) into a single PCZT.
+
+#### Arguments
+- `pczts` (array, required) The base64-encoded PCZTs to combine.
+
+## `pczt_create`
+
+*Only available in wallet builds of Zallet.*
+
+Creates a PCZT from a transaction proposal.
+
+Selects inputs and computes change for the given recipients, producing a
+complete (but unproven and unsigned) PCZT. This is the PCZT-based
+replacement for `createrawtransaction` and `fundrawtransaction`.
+
+#### Arguments
+- `from_address` (string, required) The address to send funds from.
+- `amounts` (array, required) An array of recipient amounts with fields:
+  - `address` (string, required) Recipient address.
+  - `amount` (numeric, required) Amount in ZEC.
+  - `memo` (string, optional) Optional memo for shielded recipients.
+- `minconf` (numeric, optional) Minimum confirmations for inputs.
+- `privacy_policy` (string, optional) Privacy policy for the transaction.
+
+## `pczt_extract`
+
+Extracts the final, network-ready transaction from a completed PCZT.
+
+Finalizes the transparent spends and verifies all proofs and signatures
+before returning the hex-encoded transaction. Fails if the PCZT is not
+fully proven and signed.
+
+#### Arguments
+- `pczt` (string, required) The base64-encoded PCZT to extract from.
+
+## `pczt_prove`
+
+Adds the zero-knowledge proofs required by a PCZT.
+
+Creates the Sapling and/or Orchard proofs for the PCZT's shielded
+components. This must be done before the transaction can be extracted.
+
+#### Arguments
+- `pczt` (string, required) The base64-encoded PCZT to add proofs to.
+
+## `pczt_sign`
+
+*Only available in wallet builds of Zallet.*
+
+Signs a PCZT with the wallet's keys.
+
+Signs every input the wallet holds keys for. Inputs belonging to other
+keys are left unsigned and reported, unless `strict` is set.
+
+#### Arguments
+- `pczt` (string, required) The base64-encoded PCZT to sign.
+- `strict` (bool, optional) If true, fail if any inputs cannot be signed.
+
 ## `rpc.discover`
 
 *Only available in wallet builds of Zallet.*

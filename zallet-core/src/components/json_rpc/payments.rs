@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt};
+use std::{collections::HashSet, convert::Infallible, fmt};
 
 use abscissa_core::Application;
 use jsonrpsee::core::JsonValue;
@@ -6,16 +6,31 @@ use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use transparent::{address::TransparentAddress, keys::AccountPubKey};
-use zcash_address::ZcashAddress;
+use zcash_address::{ZcashAddress, unified};
 use zcash_client_backend::{
-    data_api::{Account as _, WalletRead},
+    data_api::{
+        Account as _, WalletRead,
+        wallet::{
+            ConfirmationsPolicy,
+            input_selection::{GreedyInputSelector, SpendPolicy},
+            propose_transfer,
+        },
+    },
+    fees::{
+        DustOutputPolicy, StandardFeeRule, TransparentChangePolicy,
+        standard::MultiOutputChangeStrategy,
+    },
     proposal::Proposal,
     wallet::TransparentAddressSource,
     zip321::{Payment, TransactionRequest},
 };
-use zcash_client_sqlite::{AccountUuid, wallet::Account};
+use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, wallet::Account};
 use zcash_keys::{address::Address, keys::UnifiedFullViewingKey};
-use zcash_protocol::{PoolType, TxId, memo::MemoBytes, value::Zatoshis};
+use zcash_protocol::{
+    PoolType, ShieldedPool, TxId,
+    memo::MemoBytes,
+    value::{MAX_MONEY, Zatoshis},
+};
 use zip32::{AccountId, fingerprint::SeedFingerprint};
 
 use crate::{
@@ -112,6 +127,207 @@ pub(super) fn build_request(amounts: &[AmountParameter]) -> RpcResult<Transactio
         // TODO: Map errors to `zcashd` shape.
         LegacyCode::InvalidParameter.with_message(format!("Invalid payment request: {e}"))
     })
+}
+
+/// Validates the recipients against the privacy policy, proposes a transfer, and
+/// enforces both the privacy policy and the configured Orchard action limit on the
+/// resulting proposal.
+///
+/// Shared by the JSON-RPC methods that build a transaction from a
+/// [`TransactionRequest`] (`z_sendmany`, `pczt_create`).
+/// Whether change may be returned to the transparent pool.
+///
+/// Permitted exactly when `spend_policy` can spend transparent funds in the first place, which
+/// keeps a fully transparent send transparent end to end rather than sweeping its change into a
+/// shielded pool. A shielded send therefore cannot acquire a transparent change output by this
+/// route.
+///
+/// The change strategy independently enforces the same thing (it emits transparent change only
+/// when the transaction's net flows are fully transparent, i.e. it has no shielded input or
+/// output at all), but that is its invariant, not ours.
+pub(super) fn transparent_change_policy_for(spend_policy: &SpendPolicy) -> TransparentChangePolicy {
+    match spend_policy.transparent() {
+        Some(_) => TransparentChangePolicy::TransparentChangeAllowed,
+        None => TransparentChangePolicy::ShieldChange,
+    }
+}
+
+pub(super) fn propose_and_check(
+    wallet: &mut DbConnection,
+    params: &Network,
+    account_id: AccountUuid,
+    request: TransactionRequest,
+    privacy_policy: PrivacyPolicy,
+    confirmations_policy: ConfirmationsPolicy,
+    spend_policy: &SpendPolicy,
+) -> RpcResult<Proposal<StandardFeeRule, ReceivedNoteId>> {
+    // TODO: Fetch the real maximums within the account so we can detect correctly.
+    //       https://github.com/zcash/zallet/issues/257
+    let mut max_sapling_available = Zatoshis::const_from_u64(MAX_MONEY);
+    let mut max_orchard_available = Zatoshis::const_from_u64(MAX_MONEY);
+
+    for payment in request.payments().values() {
+        let value = payment
+            .amount()
+            .expect("Every payment built by `build_request` has an amount");
+
+        match Address::try_from_zcash_address(params, payment.recipient_address().clone()) {
+            Err(e) => return Err(LegacyCode::InvalidParameter.with_message(e.to_string())),
+            Ok(Address::Transparent(_) | Address::Tex(_)) => {
+                if !privacy_policy.allow_revealed_recipients() {
+                    return Err(IncompatiblePrivacyPolicy::TransparentRecipient.into());
+                }
+            }
+            Ok(Address::Sapling(_)) => {
+                match (
+                    privacy_policy.allow_revealed_amounts(),
+                    max_sapling_available - value,
+                ) {
+                    (false, None) => {
+                        return Err(IncompatiblePrivacyPolicy::RevealingSaplingAmount.into());
+                    }
+                    (false, Some(rest)) => max_sapling_available = rest,
+                    (true, _) => (),
+                }
+            }
+            Ok(Address::Unified(ua)) => {
+                match (
+                    privacy_policy.allow_revealed_amounts(),
+                    (
+                        ua.receiver_types().contains(&unified::Typecode::Orchard),
+                        max_orchard_available - value,
+                    ),
+                    (
+                        ua.receiver_types().contains(&unified::Typecode::Sapling),
+                        max_sapling_available - value,
+                    ),
+                ) {
+                    // The preferred receiver is Orchard, and we either allow revealed
+                    // amounts or have sufficient Orchard funds available to avoid it.
+                    (true, (true, _), _) => (),
+                    (false, (true, Some(rest)), _) => max_orchard_available = rest,
+
+                    // The preferred receiver is Sapling, and we either allow revealed
+                    // amounts or have sufficient Sapling funds available to avoid it.
+                    (true, _, (true, _)) => (),
+                    (false, _, (true, Some(rest))) => max_sapling_available = rest,
+
+                    // We need to reveal something in order to make progress.
+                    _ => {
+                        if privacy_policy.allow_revealed_recipients() {
+                            // Nothing to do here.
+                        } else if privacy_policy.allow_revealed_amounts() {
+                            return Err(IncompatiblePrivacyPolicy::TransparentReceiver.into());
+                        } else {
+                            return Err(IncompatiblePrivacyPolicy::RevealingReceiverAmounts.into());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let transparent_change_policy = transparent_change_policy_for(spend_policy);
+
+    // Where shielded change goes when the transaction has no shielded flows to infer a pool
+    // from. A transaction that does have shielded flows ignores this and keeps its change in
+    // the pool it is already using.
+    //
+    // This stays Orchard rather than Ironwood: the change strategy promotes it to Ironwood
+    // itself once NU6.3 is active (the turnstile forbids value from entering the Orchard
+    // pool, so change out of a purely transparent transaction has to land in Ironwood), and
+    // it does so against the transaction's target height, which is not known here. Naming
+    // Ironwood outright would instead send change to a pool that does not exist yet on a
+    // chain where NU6.3 has not activated.
+    let fallback_change_pool = ShieldedPool::Orchard;
+
+    // Shielded change is split across several notes, per the wallet's note-management
+    // configuration, so the account keeps a usable set of denominations.
+    let split_policy = APP.config().note_management.split_policy();
+
+    // Change too small to be worth its own output is added to the fee instead.
+    let dust_output_policy = DustOutputPolicy::default();
+
+    // No memo is attached to change. A change memo would force the change into a shielded
+    // pool, since a transparent output cannot carry one.
+    let change_memo = None;
+
+    let change_strategy = MultiOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        change_memo,
+        fallback_change_pool,
+        dust_output_policy,
+        split_policy,
+    )
+    .with_transparent_change_policy(transparent_change_policy);
+
+    let input_selector = GreedyInputSelector::new();
+
+    let proposal = propose_transfer::<_, _, _, _, Infallible>(
+        wallet,
+        params,
+        account_id,
+        &input_selector,
+        &change_strategy,
+        request,
+        confirmations_policy,
+        spend_policy,
+        // Do not request a specific transaction version; building falls back to the version
+        // implied by the target height.
+        None,
+    )
+    // TODO: Map errors to `zcashd` shape.
+    .map_err(|e| {
+        LegacyCode::Wallet
+            .with_message(fl!("err-propose-transaction-failed", error = e.to_string()))
+    })?;
+
+    enforce_privacy_policy(&proposal, privacy_policy)?;
+
+    let orchard_actions_limit = APP.config().builder.limits.orchard_actions().into();
+    for step in proposal.steps() {
+        let orchard_spends = step
+            .shielded_inputs()
+            .iter()
+            .flat_map(|inputs| inputs.notes())
+            .filter(|note| note.note().pool() == ShieldedPool::Orchard)
+            .count();
+
+        let orchard_outputs = step
+            .payment_pools()
+            .values()
+            .filter(|pool| pool == &&PoolType::ORCHARD)
+            .count()
+            + step
+                .balance()
+                .proposed_change()
+                .iter()
+                .filter(|change| change.output_pool() == PoolType::ORCHARD)
+                .count();
+
+        let orchard_actions = orchard_spends.max(orchard_outputs);
+
+        if orchard_actions > orchard_actions_limit {
+            let (count, kind) = if orchard_outputs <= orchard_actions_limit {
+                (orchard_spends, "inputs")
+            } else if orchard_spends <= orchard_actions_limit {
+                (orchard_outputs, "outputs")
+            } else {
+                (orchard_actions, "actions")
+            };
+
+            return Err(LegacyCode::Misc.with_message(fl!(
+                "err-excess-orchard-actions",
+                count = count,
+                kind = kind,
+                limit = orchard_actions_limit,
+                config = "-orchardactionlimit=N",
+                bound = format!("N >= %u"),
+            )));
+        }
+    }
+
+    Ok(proposal)
 }
 
 /// A strategy to use for managing privacy when constructing a transaction.
@@ -437,10 +653,11 @@ pub(super) fn required_privacy_policy<FeeRuleT, NoteRef>(
 #[allow(dead_code)]
 pub(super) fn parse_privacy_policy(privacy_policy: Option<&str>) -> RpcResult<PrivacyPolicy> {
     match privacy_policy {
-        Some("LegacyCompat") => Err(LegacyCode::InvalidParameter
-            .with_static("LegacyCompat privacy policy is unsupported in Zallet")),
+        Some("LegacyCompat") => {
+            Err(LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-legacy-compat")))
+        }
         Some(s) => PrivacyPolicy::from_str(s).ok_or_else(|| {
-            LegacyCode::InvalidParameter.with_message(format!("Unknown privacy policy {s}"))
+            LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-unknown", policy = s))
         }),
         None => Ok(PrivacyPolicy::FullPrivacy),
     }
@@ -738,8 +955,7 @@ pub(super) fn get_account_for_address(
         }
     }
 
-    Err(LegacyCode::InvalidAddressOrKey
-        .with_static("Invalid from address, no payment source found for address."))
+    Err(LegacyCode::InvalidAddressOrKey.with_message(fl!("err-from-address-no-payment-source")))
 }
 
 /// Whether an account with this ZIP 32 derivation holds the legacy `zcashd` pool of funds
@@ -1598,6 +1814,10 @@ mod privacy_policy_tests {
 
     #[test]
     fn parse_privacy_policy_rejects_legacy_compat() {
+        // These messages are localized, so the loader must be populated before
+        // asserting on them; `fl!` is inert until a language is loaded.
+        crate::i18n::load_languages(&[]);
+
         let err = parse_privacy_policy(Some("LegacyCompat"))
             .expect_err("LegacyCompat should be rejected");
         assert_eq!(
@@ -1608,6 +1828,8 @@ mod privacy_policy_tests {
 
     #[test]
     fn parse_privacy_policy_rejects_unknown_policy() {
+        crate::i18n::load_languages(&[]);
+
         let err =
             parse_privacy_policy(Some("Whatever")).expect_err("unknown policy should be rejected");
         assert_eq!(err.message(), "Unknown privacy policy Whatever");
@@ -1697,6 +1919,8 @@ mod privacy_policy_tests {
         /// is reported as an unknown policy.
         #[test]
         fn parse_privacy_policy_rejects_arbitrary_unknown_strings(s in "[A-Za-z]{0,24}") {
+            crate::i18n::load_languages(&[]);
+
             prop_assume!(PrivacyPolicy::from_str(&s).is_none() && s != "LegacyCompat");
             let err = parse_privacy_policy(Some(&s))
                 .expect_err("an unknown policy name should be rejected");
