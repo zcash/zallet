@@ -1,7 +1,5 @@
 use std::convert::Infallible;
-use std::num::NonZeroU32;
 
-use abscissa_core::Application;
 use jsonrpsee::core::{JsonValue, RpcResult};
 use secrecy::ExposeSecret;
 use serde_json::json;
@@ -11,7 +9,7 @@ use zcash_client_backend::{
     data_api::{
         Account,
         wallet::{
-            ConfirmationsPolicy, create_proposed_transactions,
+            create_proposed_transactions,
             input_selection::{SpendPolicy, TransparentSpendPolicy},
         },
     },
@@ -32,15 +30,15 @@ use crate::{
         json_rpc::{
             asyncop::{ContextInfo, OperationId},
             payments::{
-                AmountParameter, PrivacyPolicy, SendResult, build_request, get_account_for_address,
-                get_legacy_pool_account, propose_and_check, verify_and_broadcast_transactions,
+                AmountParameter, SendResult, build_request, confirmations_policy_for_minconf,
+                get_account_for_address, get_legacy_pool_account, parse_privacy_policy,
+                propose_and_check, spend_policy_for, verify_and_broadcast_transactions,
             },
             server::LegacyCode,
         },
         keystore::KeyStore,
     },
     fl,
-    prelude::*,
 };
 
 #[cfg(feature = "zcashd-import")]
@@ -59,28 +57,6 @@ pub(super) const PARAM_MINCONF_DESC: &str = "Only use funds confirmed at least t
 pub(super) const PARAM_FEE_DESC: &str = "If set, it must be null.";
 pub(super) const PARAM_PRIVACY_POLICY_DESC: &str =
     "Policy for what information leakage is acceptable.";
-
-/// The sources of funds a transfer from `source` may draw upon.
-///
-/// Spending from a bare transparent address draws only on that address's UTXOs: the funds are
-/// already public, and confining selection to the named address avoids linking it to the
-/// account's other transparent receivers. Every other source stays shielded-only, so a
-/// shielded send can never silently reach into transparent funds.
-///
-/// Coinbase UTXOs are excluded: `TransparentSpendPolicy` defaults to
-/// `CoinbasePolicy::NonCoinbase`, and consensus requires coinbase to be spent to a single
-/// shielded output, which is `z_shieldcoinbase`'s job.
-///
-/// The privacy policy deliberately does not narrow this: the selector returns its best
-/// proposal, and `enforce_privacy_policy` rejects it afterwards if it leaks more than the
-/// caller permitted.
-fn spend_policy_for(source: &Address) -> SpendPolicy {
-    match source {
-        Address::Transparent(taddr) => SpendPolicy::shielded_pools([])
-            .with_transparent(TransparentSpendPolicy::from_one_address(*taddr)),
-        _ => SpendPolicy::default(),
-    }
-}
 
 /// The sources of funds a transfer from `ANY_TADDR` may draw upon.
 ///
@@ -148,28 +124,12 @@ pub(crate) async fn call<C: Chain>(
         }
     };
 
-    let privacy_policy = match privacy_policy.as_deref() {
-        Some("LegacyCompat") => {
-            Err(LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-legacy-compat")))
-        }
-        Some(s) => PrivacyPolicy::from_str(s).ok_or_else(|| {
-            LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-unknown", policy = s))
-        }),
-        None => Ok(PrivacyPolicy::FullPrivacy),
-    }?;
+    let privacy_policy = parse_privacy_policy(privacy_policy.as_deref())?;
 
     // Sanity check for transaction size
     // TODO: https://github.com/zcash/zallet/issues/255
 
-    let confirmations_policy = match minconf {
-        Some(minconf) => NonZeroU32::new(minconf).map_or(
-            ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, true),
-            |c| ConfirmationsPolicy::new_symmetrical(c, false),
-        ),
-        None => APP.config().builder.confirmations_policy().map_err(|_| {
-            LegacyCode::Wallet.with_message(fl!("err-confirmations-policy-invalid"))
-        })?,
-    };
+    let confirmations_policy = confirmations_policy_for_minconf(minconf)?;
 
     let params = *wallet.params();
     let proposal = propose_and_check(
@@ -295,8 +255,8 @@ mod tests {
     use zcash_protocol::consensus::Network;
     use zip32::AccountId;
 
-    use super::{SpendPolicy, legacy_pool_spend_policy, spend_policy_for};
-    use crate::components::json_rpc::payments::transparent_change_policy_for;
+    use super::{SpendPolicy, legacy_pool_spend_policy};
+    use crate::components::json_rpc::payments::{spend_policy_for, transparent_change_policy_for};
 
     /// `ANY_TADDR` draws on the legacy pool's transparent funds, on any address within it, and
     /// on nothing else.

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, convert::Infallible, fmt};
+use std::{collections::HashSet, convert::Infallible, fmt, num::NonZeroU32};
 
 use abscissa_core::Application;
 use jsonrpsee::core::JsonValue;
@@ -12,7 +12,7 @@ use zcash_client_backend::{
         Account as _, WalletRead,
         wallet::{
             ConfirmationsPolicy,
-            input_selection::{GreedyInputSelector, SpendPolicy},
+            input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy},
             propose_transfer,
         },
     },
@@ -129,12 +129,49 @@ pub(super) fn build_request(amounts: &[AmountParameter]) -> RpcResult<Transactio
     })
 }
 
-/// Validates the recipients against the privacy policy, proposes a transfer, and
-/// enforces both the privacy policy and the configured Orchard action limit on the
-/// resulting proposal.
+/// Maps the optional `minconf` JSON-RPC argument onto a [`ConfirmationsPolicy`],
+/// falling back to the wallet's configured policy when absent.
 ///
-/// Shared by the JSON-RPC methods that build a transaction from a
-/// [`TransactionRequest`] (`z_sendmany`, `pczt_create`).
+/// `minconf = 0` permits spending unconfirmed (trusted) funds; any other value
+/// requires that many confirmations for trusted and untrusted TXOs alike.
+pub(super) fn confirmations_policy_for_minconf(
+    minconf: Option<u32>,
+) -> RpcResult<ConfirmationsPolicy> {
+    match minconf {
+        Some(minconf) => Ok(NonZeroU32::new(minconf).map_or(
+            ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, true),
+            |c| ConfirmationsPolicy::new_symmetrical(c, false),
+        )),
+        None => {
+            APP.config().builder.confirmations_policy().map_err(|_| {
+                LegacyCode::Wallet.with_message(fl!("err-confirmations-policy-invalid"))
+            })
+        }
+    }
+}
+
+/// The sources of funds a transfer from `source` may draw upon.
+///
+/// Spending from a bare transparent address draws only on that address's UTXOs: the funds are
+/// already public, and confining selection to the named address avoids linking it to the
+/// account's other transparent receivers. Every other source stays shielded-only, so a
+/// shielded send can never silently reach into transparent funds.
+///
+/// Coinbase UTXOs are excluded: `TransparentSpendPolicy` defaults to
+/// `CoinbasePolicy::NonCoinbase`, and consensus requires coinbase to be spent to a single
+/// shielded output, which is `z_shieldcoinbase`'s job.
+///
+/// The privacy policy deliberately does not narrow this: the selector returns its best
+/// proposal, and [`enforce_privacy_policy`] rejects it afterwards if it leaks more than the
+/// caller permitted.
+pub(super) fn spend_policy_for(source: &Address) -> SpendPolicy {
+    match source {
+        Address::Transparent(taddr) => SpendPolicy::shielded_pools([])
+            .with_transparent(TransparentSpendPolicy::from_one_address(*taddr)),
+        _ => SpendPolicy::default(),
+    }
+}
+
 /// Whether change may be returned to the transparent pool.
 ///
 /// Permitted exactly when `spend_policy` can spend transparent funds in the first place, which
@@ -152,6 +189,12 @@ pub(super) fn transparent_change_policy_for(spend_policy: &SpendPolicy) -> Trans
     }
 }
 
+/// Validates the recipients against the privacy policy, proposes a transfer, and
+/// enforces both the privacy policy and the configured Orchard action limit on the
+/// resulting proposal.
+///
+/// Shared by the JSON-RPC methods that build a transaction from a
+/// [`TransactionRequest`] (`z_sendmany`, `pczt_create`).
 pub(super) fn propose_and_check(
     wallet: &mut DbConnection,
     params: &Network,
@@ -586,9 +629,6 @@ pub(super) fn enforce_privacy_policy<FeeRuleT, NoteRef>(
 ///
 /// This reports the privacy implications of a proposed transaction without requiring the
 /// caller to commit to a policy up front.
-// Extracted ahead of its caller: this is not yet wired into a JSON-RPC method on this
-// branch, hence `allow(dead_code)`; drop the attribute when the propose path lands.
-#[allow(dead_code)]
 pub(super) fn required_privacy_policy<FeeRuleT, NoteRef>(
     proposal: &Proposal<FeeRuleT, NoteRef>,
 ) -> PrivacyPolicy {
@@ -648,9 +688,6 @@ pub(super) fn required_privacy_policy<FeeRuleT, NoteRef>(
 /// Parses the optional `privacy_policy` JSON-RPC argument into a [`PrivacyPolicy`],
 /// defaulting to [`PrivacyPolicy::FullPrivacy`] when absent and rejecting the unsupported
 /// `"LegacyCompat"` policy.
-// Extracted ahead of its caller; not yet wired into a JSON-RPC method on this branch, hence
-// `allow(dead_code)`.
-#[allow(dead_code)]
 pub(super) fn parse_privacy_policy(privacy_policy: Option<&str>) -> RpcResult<PrivacyPolicy> {
     match privacy_policy {
         Some("LegacyCompat") => {
