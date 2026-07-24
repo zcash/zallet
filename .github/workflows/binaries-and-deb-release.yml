@@ -209,7 +209,7 @@ jobs:
           aws secretsmanager get-secret-value \
             --secret-id /release/gpg-signing-key \
             --query SecretString \
-            --output text | gpg --import
+            --output text | gpg --batch --import
           wget -qO - https://apt.z.cash/zcash.asc | gpg --no-default-keyring --keyring trustedkeys.gpg --import
 
       - name: Install cargo-deb
