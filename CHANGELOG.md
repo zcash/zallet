@@ -20,6 +20,23 @@ be considered breaking changes.
   indicating coinbase origin (mirroring `zcashd`'s `listunspent`), so
   integrators no longer need a `getrawtransaction` round-trip per UTXO to
   distinguish coinbase from spendable-to-transparent funds.
+- JSON-RPC methods for working with PCZTs (Partially Created Zcash
+  Transactions), the robust replacements for `createrawtransaction`,
+  `fundrawtransaction`, and `signrawtransaction`. A transaction is assembled by
+  threading a PCZT through these roles:
+  - `pczt_create` — build a PCZT from a payment request (select inputs and
+    compute change), drawing on an address's funds or on the funds of an
+    account named by an isolating `fund_source`; the replacement for
+    `createrawtransaction` + `fundrawtransaction`. Reports (and records in the
+    PCZT) the minimum privacy policy the transaction requires.
+  - `pczt_combine` — merge the contributions of several parties into one PCZT.
+  - `pczt_prove` — add the Sapling, Orchard, and/or Ironwood zero-knowledge
+    proofs.
+  - `pczt_sign` — add signatures using the wallet's keys, once the caller
+    acknowledges the privacy policy recorded in the PCZT.
+  - `pczt_extract` — verify the PCZT and extract the final, network-ready
+    transaction, additionally recording it in the wallet (marking its inputs
+    pending-spent) when the PCZT was created by this wallet.
 
 ### Removed
 
@@ -160,18 +177,6 @@ be considered breaking changes.
   of a v6 transaction under a new `ironwood` key. Ironwood actions are
   Orchard-shaped, so the object has the same shape as the existing `orchard` one.
   Previously the Ironwood bundle was omitted from the decoded output.
-- JSON-RPC methods for working with PCZTs (Partially Created Zcash
-  Transactions), the robust replacements for `createrawtransaction`,
-  `fundrawtransaction`, and `signrawtransaction`. A transaction is assembled by
-  threading a PCZT through these roles:
-  - `pczt_create` — build a PCZT from a payment request (select inputs and
-    compute change), the replacement for `createrawtransaction` +
-    `fundrawtransaction`.
-  - `pczt_combine` — merge the contributions of several parties into one PCZT.
-  - `pczt_prove` — add the Sapling and/or Orchard zero-knowledge proofs.
-  - `pczt_sign` — add signatures using the wallet's keys.
-  - `pczt_extract` — verify the PCZT and extract the final, network-ready
-    transaction.
 
 ### Changed
 
