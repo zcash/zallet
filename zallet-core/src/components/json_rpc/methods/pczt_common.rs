@@ -1,9 +1,16 @@
 //! Shared helpers for the PCZT RPC methods.
 
+use std::sync::OnceLock;
+
 use base64ct::{Base64, Encoding};
 use jsonrpsee::types::ErrorObjectOwned;
+use orchard::circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey};
 use pczt::Pczt;
+use sapling::circuit::{OutputVerifyingKey, SpendVerifyingKey};
+use tokio::sync::Semaphore;
 use transparent::keys::TransparentKeyScope;
+use zcash_proofs::prover::LocalTxProver;
+use zcash_protocol::consensus::{BranchId, OrchardProtocolRevision};
 
 use super::pczt_error::PcztError;
 use crate::{components::json_rpc::server::LegacyCode, fl};
@@ -31,6 +38,18 @@ pub(super) const MAX_PCZTS_TO_COMBINE: usize = 20;
 /// Global: the wallet seed fingerprint (32 bytes).
 pub(super) const PROP_SEED_FINGERPRINT: &str = "zallet.v1.seed_fingerprint";
 
+/// Global: the minimum privacy policy the transaction requires, as the UTF-8
+/// name of the policy (e.g. `AllowRevealedAmounts`).
+///
+/// `pczt_create` computes this from the proposal and `pczt_sign` checks the
+/// caller's acknowledgement against it. Living in the PCZT rather than in
+/// server-side state, it survives restarts and travels with the PCZT to offline
+/// signers. It is a guardrail against accidental disclosure, not tamper-proof
+/// protection: a caller (or counterparty) editing the field could weaken the
+/// recorded requirement, so a signer that did not create the PCZT should
+/// inspect what it is signing regardless.
+pub(super) const PROP_PRIVACY_POLICY: &str = "zallet.v1.privacy_policy";
+
 /// Global: the ZIP 32 account index (`u32`, little-endian).
 pub(super) const PROP_ACCOUNT_INDEX: &str = "zallet.v1.account_index";
 
@@ -42,27 +61,103 @@ pub(super) const PROP_ADDRESS_INDEX: &str = "zallet.v1.address_index";
 
 /// Encodes a transparent key scope as the `u32` stored in the [`PROP_SCOPE`] hint.
 ///
-/// Inverse of [`decode_key_scope`]. Any scope that is neither external nor
-/// internal (e.g. ephemeral) maps to `2`.
+/// Inverse of [`decode_key_scope`]. The stored value is the scope's BIP 32 child
+/// number, so every scope — including custom ones — round-trips faithfully.
 pub(super) fn encode_key_scope(scope: TransparentKeyScope) -> u32 {
-    if scope == TransparentKeyScope::EXTERNAL {
-        0
-    } else if scope == TransparentKeyScope::INTERNAL {
-        1
-    } else {
-        2
-    }
+    bip32::ChildNumber::from(scope).index()
 }
 
 /// Decodes a [`PROP_SCOPE`] `u32` back into a key scope, or `None` if the value
-/// is not one this Zallet version writes.
+/// is out of range (scopes are BIP 32 child numbers, so they occupy 31 bits).
 pub(super) fn decode_key_scope(value: u32) -> Option<TransparentKeyScope> {
-    match value {
-        0 => Some(TransparentKeyScope::EXTERNAL),
-        1 => Some(TransparentKeyScope::INTERNAL),
-        2 => Some(TransparentKeyScope::EPHEMERAL),
-        _ => None,
+    TransparentKeyScope::custom(value)
+}
+
+/// The proprietary-field key under which `zcash_client_backend` records its
+/// proposal metadata when a PCZT is created via `create_pczt_from_proposal`.
+///
+/// Its presence marks a PCZT this wallet('s backend) created, which is the
+/// precondition for `extract_and_store_transaction_from_pczt`. The upstream
+/// constant is private, but the key is part of the PCZT's serialized format,
+/// so it cannot change without breaking upstream's own compatibility.
+pub(super) const PROP_BACKEND_PROPOSAL_INFO: &str = "zcash_client_backend:proposal_info";
+
+/// Bounds the number of concurrently running proving/verification tasks.
+///
+/// Proof creation and Halo2 key generation are CPU-bound and take seconds to
+/// minutes; they run on the blocking-thread pool, which tokio grows up to 512
+/// threads. Without a bound, a client retrying a timed-out `pczt_prove` stacks
+/// uncancellable proving tasks. Two permits let a prove and an extract overlap
+/// without oversubscribing the machine.
+pub(super) static PROVING_SLOTS: Semaphore = Semaphore::const_new(2);
+
+/// The Orchard-family circuit version in force under the given consensus
+/// branch, or `None` if the branch is unknown or predates Orchard.
+///
+/// The version is a function of the branch alone: under a given branch, an
+/// Orchard bundle and an Ironwood bundle prove and verify against the same
+/// circuit, so one proving/verifying key serves both bundles of a PCZT.
+pub(super) fn circuit_version_for_branch(
+    consensus_branch_id: u32,
+) -> Option<OrchardCircuitVersion> {
+    match BranchId::try_from(consensus_branch_id)
+        .ok()?
+        .orchard_protocol_revision()?
+    {
+        OrchardProtocolRevision::InsecureV1 => Some(OrchardCircuitVersion::InsecurePreNu6_2),
+        OrchardProtocolRevision::V2 => Some(OrchardCircuitVersion::FixedPostNu6_2),
+        OrchardProtocolRevision::V3 => Some(OrchardCircuitVersion::PostNu6_3),
     }
+}
+
+/// Returns the Orchard proving key for the given circuit version, building it
+/// once and caching it for the lifetime of the process.
+///
+/// `ProvingKey::build` takes several seconds, so the first proving call under
+/// each circuit version pays it and every later call reuses the key.
+pub(super) fn orchard_proving_key(version: OrchardCircuitVersion) -> &'static ProvingKey {
+    static INSECURE_PRE_NU6_2: OnceLock<ProvingKey> = OnceLock::new();
+    static FIXED_POST_NU6_2: OnceLock<ProvingKey> = OnceLock::new();
+    static POST_NU6_3: OnceLock<ProvingKey> = OnceLock::new();
+
+    match version {
+        OrchardCircuitVersion::InsecurePreNu6_2 => &INSECURE_PRE_NU6_2,
+        OrchardCircuitVersion::FixedPostNu6_2 => &FIXED_POST_NU6_2,
+        OrchardCircuitVersion::PostNu6_3 => &POST_NU6_3,
+    }
+    .get_or_init(|| ProvingKey::build(version))
+}
+
+/// Returns the Orchard verifying key for the given circuit version, building it
+/// once and caching it for the lifetime of the process.
+///
+/// `VerifyingKey::build` runs a full Halo2 key generation (seconds of CPU), so
+/// extraction must not rebuild it per call.
+pub(super) fn orchard_verifying_key(version: OrchardCircuitVersion) -> &'static VerifyingKey {
+    static INSECURE_PRE_NU6_2: OnceLock<VerifyingKey> = OnceLock::new();
+    static FIXED_POST_NU6_2: OnceLock<VerifyingKey> = OnceLock::new();
+    static POST_NU6_3: OnceLock<VerifyingKey> = OnceLock::new();
+
+    match version {
+        OrchardCircuitVersion::InsecurePreNu6_2 => &INSECURE_PRE_NU6_2,
+        OrchardCircuitVersion::FixedPostNu6_2 => &FIXED_POST_NU6_2,
+        OrchardCircuitVersion::PostNu6_3 => &POST_NU6_3,
+    }
+    .get_or_init(|| VerifyingKey::build(version))
+}
+
+/// Returns the bundled Sapling prover, parsing the parameters once and caching
+/// them for the lifetime of the process.
+pub(super) fn sapling_prover() -> &'static LocalTxProver {
+    static PROVER: OnceLock<LocalTxProver> = OnceLock::new();
+    PROVER.get_or_init(LocalTxProver::bundled)
+}
+
+/// Returns the bundled Sapling verifying keys, derived once from
+/// [`sapling_prover`] and cached for the lifetime of the process.
+pub(super) fn sapling_verifying_keys() -> &'static (SpendVerifyingKey, OutputVerifyingKey) {
+    static KEYS: OnceLock<(SpendVerifyingKey, OutputVerifyingKey)> = OnceLock::new();
+    KEYS.get_or_init(|| sapling_prover().verifying_keys())
 }
 
 /// Decodes a base64-encoded PCZT, rejecting oversized inputs before allocating.
@@ -93,6 +188,23 @@ pub(super) fn encode_pczt_base64(pczt: Pczt) -> Result<String, ErrorObjectOwned>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_scope_round_trips() {
+        for scope in [
+            TransparentKeyScope::EXTERNAL,
+            TransparentKeyScope::INTERNAL,
+            TransparentKeyScope::EPHEMERAL,
+            // A custom scope must survive the codec, not be collapsed onto a
+            // standard one.
+            TransparentKeyScope::custom(0x7000_0007).expect("in range"),
+        ] {
+            assert_eq!(decode_key_scope(encode_key_scope(scope)), Some(scope));
+        }
+
+        // Values with the hardened bit set are not scopes.
+        assert_eq!(decode_key_scope(1 << 31), None);
+    }
 
     #[test]
     fn rejects_oversized_input() {

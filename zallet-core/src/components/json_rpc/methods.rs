@@ -300,24 +300,18 @@ pub(crate) trait Rpc {
 
     /// Adds the zero-knowledge proofs required by a PCZT.
     ///
-    /// Creates the Sapling and/or Orchard proofs for the PCZT's shielded
-    /// components. This must be done before the transaction can be extracted.
+    /// Creates the Sapling, Orchard, and/or Ironwood proofs for the PCZT's
+    /// shielded components. This must be done before the transaction can be
+    /// extracted.
+    ///
+    /// The first call for each circuit version generates and caches the proving
+    /// key, which can take tens of seconds and may exceed the RPC timeout; the
+    /// work completes in the background and a retry reuses the cached key.
     ///
     /// # Arguments
     /// - `pczt` (string, required) The base64-encoded PCZT to add proofs to.
     #[method(name = "pczt_prove")]
     async fn pczt_prove(&self, pczt: &str) -> pczt_prove::Response;
-
-    /// Extracts the final, network-ready transaction from a completed PCZT.
-    ///
-    /// Finalizes the transparent spends and verifies all proofs and signatures
-    /// before returning the hex-encoded transaction. Fails if the PCZT is not
-    /// fully proven and signed.
-    ///
-    /// # Arguments
-    /// - `pczt` (string, required) The base64-encoded PCZT to extract from.
-    #[method(name = "pczt_extract")]
-    async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response;
 }
 
 /// The wallet-specific JSON-RPC interface, containing the methods only provided in the
@@ -788,21 +782,35 @@ pub(crate) trait WalletRpc {
     /// complete (but unproven and unsigned) PCZT. This is the PCZT-based
     /// replacement for `createrawtransaction` and `fundrawtransaction`.
     ///
+    /// The result reports the minimum privacy policy the transaction requires,
+    /// which `pczt_sign` will ask the caller to acknowledge. To see what a
+    /// transaction would reveal before committing to it, create it with the
+    /// `NoPrivacy` policy and inspect the reported requirement.
+    ///
     /// # Arguments
-    /// - `from_address` (string, required) The address to send funds from.
+    /// - `from` (string, required) The address, or the account UUID, to send
+    ///   funds from. An address source spends shielded funds (or, for a
+    ///   transparent address, only that address's UTXOs); an account source
+    ///   spends the funds named by `fund_source`.
     /// - `amounts` (array, required) An array of recipient amounts with fields:
     ///   - `address` (string, required) Recipient address.
     ///   - `amount` (numeric, required) Amount in ZEC.
     ///   - `memo` (string, optional) Optional memo for shielded recipients.
     /// - `minconf` (numeric, optional) Minimum confirmations for inputs.
     /// - `privacy_policy` (string, optional) Privacy policy for the transaction.
+    /// - `fund_source` (string or array, optional) Where funds may be drawn
+    ///   from, when `from` is an account UUID: `"orchard"`, `"sapling"`,
+    ///   `"any_transparent"`, or an array of transparent address strings.
+    ///   Defaults to any shielded pool. Each source is isolating: a source that
+    ///   cannot cover the payment fails rather than drawing on other funds.
     #[method(name = "pczt_create")]
     async fn pczt_create(
         &self,
-        from_address: String,
+        from: String,
         amounts: Vec<AmountParameter>,
         minconf: Option<u32>,
         privacy_policy: Option<String>,
+        fund_source: Option<JsonValue>,
     ) -> pczt_create::Response;
 
     /// Signs a PCZT with the wallet's keys.
@@ -810,11 +818,41 @@ pub(crate) trait WalletRpc {
     /// Signs every input the wallet holds keys for. Inputs belonging to other
     /// keys are left unsigned and reported, unless `strict` is set.
     ///
+    /// Signing commits to what the transaction reveals, so the caller must
+    /// acknowledge the privacy policy recorded in the PCZT by `pczt_create`;
+    /// omitting `privacy_policy` acknowledges only `FullPrivacy` and refuses to
+    /// sign anything that reveals more. A PCZT from another creator carries no
+    /// recorded policy to check against — inspect what you are signing.
+    ///
     /// # Arguments
     /// - `pczt` (string, required) The base64-encoded PCZT to sign.
+    /// - `privacy_policy` (string, optional) Policy acknowledging what
+    ///   information the transaction may reveal, using the same values as
+    ///   `z_sendmany`. Must be at least as permissive as the policy reported by
+    ///   `pczt_create`.
     /// - `strict` (bool, optional) If true, fail if any inputs cannot be signed.
     #[method(name = "pczt_sign")]
-    async fn pczt_sign(&self, pczt: &str, strict: Option<bool>) -> pczt_sign::Response;
+    async fn pczt_sign(
+        &self,
+        pczt: &str,
+        privacy_policy: Option<String>,
+        strict: Option<bool>,
+    ) -> pczt_sign::Response;
+
+    /// Extracts the final, network-ready transaction from a completed PCZT.
+    ///
+    /// Finalizes the transparent spends and verifies the shielded proofs and
+    /// signatures before returning the hex-encoded transaction. Fails if the
+    /// PCZT is not fully proven and signed. Transparent script signatures are
+    /// not executed here; an invalid one surfaces at broadcast.
+    ///
+    /// If this wallet created the PCZT, the transaction is also recorded in the
+    /// wallet database so its inputs are tracked as pending-spent.
+    ///
+    /// # Arguments
+    /// - `pczt` (string, required) The base64-encoded PCZT to extract from.
+    #[method(name = "pczt_extract")]
+    async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response;
 }
 
 pub(crate) struct RpcImpl<C: Chain> {
@@ -1025,10 +1063,6 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
 
     async fn pczt_prove(&self, pczt: &str) -> pczt_prove::Response {
         pczt_prove::call(pczt).await
-    }
-
-    async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response {
-        pczt_extract::call(pczt).await
     }
 }
 
@@ -1251,22 +1285,40 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
 
     async fn pczt_create(
         &self,
-        from_address: String,
+        from: String,
         amounts: Vec<AmountParameter>,
         minconf: Option<u32>,
         privacy_policy: Option<String>,
+        fund_source: Option<JsonValue>,
     ) -> pczt_create::Response {
         pczt_create::call(
             self.wallet().await?,
-            from_address,
+            from,
             amounts,
             minconf,
             privacy_policy,
+            fund_source,
         )
         .await
     }
 
-    async fn pczt_sign(&self, pczt: &str, strict: Option<bool>) -> pczt_sign::Response {
-        pczt_sign::call(self.wallet().await?, self.keystore.clone(), pczt, strict).await
+    async fn pczt_sign(
+        &self,
+        pczt: &str,
+        privacy_policy: Option<String>,
+        strict: Option<bool>,
+    ) -> pczt_sign::Response {
+        pczt_sign::call(
+            self.wallet().await?,
+            self.keystore.clone(),
+            pczt,
+            privacy_policy,
+            strict,
+        )
+        .await
+    }
+
+    async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response {
+        pczt_extract::call(self.wallet().await?, pczt).await
     }
 }

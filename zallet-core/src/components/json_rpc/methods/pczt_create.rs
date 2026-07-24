@@ -5,11 +5,10 @@
 //! recipients, producing a complete (but unproven and unsigned) PCZT.
 
 use std::convert::Infallible;
-use std::num::NonZeroU32;
 
-use abscissa_core::Application;
 use documented::Documented;
-use jsonrpsee::core::RpcResult;
+use jsonrpsee::core::{JsonValue, RpcResult};
+use pczt::Pczt;
 use pczt::roles::updater::Updater;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -19,27 +18,30 @@ use zcash_client_backend::{
         wallet::{ConfirmationsPolicy, create_pczt_from_proposal, input_selection::SpendPolicy},
     },
     wallet::OvkPolicy,
+    zip321::TransactionRequest,
 };
+use zcash_client_sqlite::AccountUuid;
 use zcash_keys::address::Address;
 
 use super::pczt_common::{
-    PROP_ACCOUNT_INDEX, PROP_ADDRESS_INDEX, PROP_SCOPE, PROP_SEED_FINGERPRINT, encode_key_scope,
-    encode_pczt_base64,
+    PROP_ACCOUNT_INDEX, PROP_ADDRESS_INDEX, PROP_PRIVACY_POLICY, PROP_SCOPE, PROP_SEED_FINGERPRINT,
+    encode_key_scope, encode_pczt_base64,
 };
 use super::pczt_error::PcztError;
 use crate::{
     components::{
         database::DbHandle,
         json_rpc::{
+            fund_source::FundSource,
             payments::{
-                AmountParameter, PrivacyPolicy, build_request, get_account_for_address,
-                propose_and_check,
+                AmountParameter, PrivacyPolicy, build_request, confirmations_policy_for_minconf,
+                get_account_for_address, parse_privacy_policy, propose_and_check,
+                required_privacy_policy, spend_policy_for,
             },
             server::LegacyCode,
         },
     },
     fl,
-    prelude::*,
 };
 
 /// Maximum number of recipients accepted in a single `pczt_create` call.
@@ -56,23 +58,32 @@ pub(crate) type Response = RpcResult<ResultType>;
 pub(crate) struct CreateResult {
     /// The base64-encoded PCZT.
     pub pczt: String,
+    /// The minimum privacy policy required to execute this PCZT.
+    ///
+    /// Any policy compatible with this one is sufficient; `pczt_sign` requires
+    /// the caller to acknowledge at least this policy. Inspect this (and the
+    /// PCZT itself) before signing to see what the transaction will reveal.
+    pub privacy_policy: String,
 }
 
 pub(crate) type ResultType = CreateResult;
 
-pub(super) const PARAM_FROM_ADDRESS_DESC: &str = "The address to send funds from.";
+pub(super) const PARAM_FROM_DESC: &str = "The address, or the account UUID, to send funds from.";
 pub(super) const PARAM_AMOUNTS_DESC: &str = "An array of recipient amounts.";
 pub(super) const PARAM_AMOUNTS_REQUIRED: bool = true;
 pub(super) const PARAM_MINCONF_DESC: &str = "Minimum confirmations for inputs.";
 pub(super) const PARAM_PRIVACY_POLICY_DESC: &str = "Privacy policy for the transaction.";
+pub(super) const PARAM_FUND_SOURCE_DESC: &str = "Where funds may be drawn from, when `from` is an account UUID: \"orchard\", \"sapling\", \
+     \"any_transparent\", or an array of transparent addresses.";
 
 /// Creates a PCZT from a transaction proposal.
 pub(crate) async fn call(
     mut wallet: DbHandle,
-    from_address: String,
+    from: String,
     amounts: Vec<AmountParameter>,
     minconf: Option<u32>,
     privacy_policy: Option<String>,
+    fund_source: Option<JsonValue>,
 ) -> Response {
     if amounts.len() > MAX_RECIPIENTS {
         return Err(LegacyCode::InvalidParameter.with_message(fl!(
@@ -84,35 +95,72 @@ pub(crate) async fn call(
 
     let request = build_request(&amounts)?;
 
-    // Resolve `from_address` to an account.
-    let account = {
-        let address = Address::decode(wallet.params(), &from_address).ok_or_else(|| {
-            LegacyCode::InvalidAddressOrKey.with_message(fl!("err-invalid-from-address"))
-        })?;
-
-        get_account_for_address(wallet.as_ref(), &address)
-    }?;
-
-    let privacy_policy = match privacy_policy.as_deref() {
-        Some("LegacyCompat") => {
-            Err(LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-legacy-compat")))
+    // Resolve `from` to an account and the sources of funds selection may draw
+    // upon. An address confines a transparent source to that address and a
+    // shielded source to the shielded pools; an account UUID draws on the pools
+    // named by `fund_source` (by default, any shielded pool).
+    let (account, spend_policy) = if let Some(address) = Address::decode(wallet.params(), &from) {
+        if fund_source.is_some() {
+            return Err(LegacyCode::InvalidParameter
+                .with_message(fl!("err-pczt-fund-source-requires-account")));
         }
-        Some(s) => PrivacyPolicy::from_str(s).ok_or_else(|| {
-            LegacyCode::InvalidParameter.with_message(fl!("err-privacy-policy-unknown", policy = s))
-        }),
-        None => Ok(PrivacyPolicy::FullPrivacy),
-    }?;
 
-    let confirmations_policy = match minconf {
-        Some(minconf) => NonZeroU32::new(minconf).map_or(
-            ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, true),
-            |c| ConfirmationsPolicy::new_symmetrical(c, false),
-        ),
-        None => APP.config().builder.confirmations_policy().map_err(|_| {
-            LegacyCode::Wallet.with_message(fl!("err-confirmations-policy-invalid"))
-        })?,
+        let account = get_account_for_address(wallet.as_ref(), &address)?;
+        let spend_policy = spend_policy_for(&address);
+        (account, spend_policy)
+    } else if let Ok(uuid) = from.parse() {
+        let account_id = AccountUuid::from_uuid(uuid);
+        let account = wallet
+            .as_ref()
+            .get_account(account_id)
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+            .ok_or_else(|| {
+                LegacyCode::InvalidParameter.with_message(fl!("err-account-not-found"))
+            })?;
+
+        let spend_policy = match &fund_source {
+            Some(value) => FundSource::parse(value, wallet.params())?.spend_policy(),
+            None => SpendPolicy::default(),
+        };
+        (account, spend_policy)
+    } else {
+        return Err(LegacyCode::InvalidAddressOrKey.with_message(fl!("err-pczt-from-invalid")));
     };
 
+    let privacy_policy = parse_privacy_policy(privacy_policy.as_deref())?;
+    let confirmations_policy = confirmations_policy_for_minconf(minconf)?;
+
+    let (pczt, required_policy) = build_pczt(
+        &mut wallet,
+        &account,
+        &spend_policy,
+        request,
+        privacy_policy,
+        confirmations_policy,
+    )?;
+
+    Ok(CreateResult {
+        pczt: encode_pczt_base64(pczt)?,
+        privacy_policy: required_policy.to_string(),
+    })
+}
+
+/// Proposes a transfer and builds an unproven, unsigned PCZT from it.
+///
+/// Enforces `privacy_policy` and the configured Orchard action limit on the
+/// proposal, then records Zallet's signing hints and the proposal's minimum
+/// required privacy policy as proprietary fields. The required policy is
+/// returned alongside the PCZT so the caller can report it.
+///
+/// Shared with `z_sendfromaccount`, which sends the built PCZT in one shot.
+pub(super) fn build_pczt(
+    wallet: &mut DbHandle,
+    account: &zcash_client_sqlite::wallet::Account,
+    spend_policy: &SpendPolicy,
+    request: TransactionRequest,
+    privacy_policy: PrivacyPolicy,
+    confirmations_policy: ConfirmationsPolicy,
+) -> RpcResult<(Pczt, PrivacyPolicy)> {
     let params = *wallet.params();
     let proposal = propose_and_check(
         wallet.as_mut(),
@@ -121,15 +169,19 @@ pub(crate) async fn call(
         request,
         privacy_policy,
         confirmations_policy,
-        // pczt_create only spends shielded funds; the default policy permits every shielded
-        // pool present in the build and no transparent spending.
-        &SpendPolicy::default(),
+        spend_policy,
     )?;
 
-    // Derivation info used to populate the zallet signing hints below.
-    let derivation = account.source().key_derivation().ok_or_else(|| {
-        LegacyCode::InvalidAddressOrKey.with_message(fl!("err-from-address-no-payment-source"))
-    })?;
+    // The minimum policy the proposal actually requires, reported to the caller
+    // and recorded in the PCZT for `pczt_sign` to check acknowledgement
+    // against. `privacy_policy` was already enforced above, so this is always
+    // compatible with what the caller permitted.
+    let required_policy = required_privacy_policy(&proposal);
+
+    // Derivation info used to populate the zallet signing hints below. A
+    // view-only account has none; it can still create a PCZT (the flagship
+    // offline-signing flow), it just cannot record hints naming its own seed.
+    let derivation = account.source().key_derivation();
 
     // Build the PCZT from the proposal. This selects inputs, computes change,
     // runs IO finalization, and records the native ZIP 32 / BIP 32 derivation
@@ -182,13 +234,19 @@ pub(crate) async fn call(
     let pczt = Updater::new(pczt)
         .update_global_with(|mut global| {
             global.set_proprietary(
-                PROP_SEED_FINGERPRINT.to_string(),
-                derivation.seed_fingerprint().to_bytes().to_vec(),
+                PROP_PRIVACY_POLICY.to_string(),
+                <&'static str>::from(required_policy).as_bytes().to_vec(),
             );
-            global.set_proprietary(
-                PROP_ACCOUNT_INDEX.to_string(),
-                u32::from(derivation.account_index()).to_le_bytes().to_vec(),
-            );
+            if let Some(derivation) = derivation {
+                global.set_proprietary(
+                    PROP_SEED_FINGERPRINT.to_string(),
+                    derivation.seed_fingerprint().to_bytes().to_vec(),
+                );
+                global.set_proprietary(
+                    PROP_ACCOUNT_INDEX.to_string(),
+                    u32::from(derivation.account_index()).to_le_bytes().to_vec(),
+                );
+            }
         })
         // A no-op when there are no transparent inputs.
         .update_transparent_with(|mut bundle| {
@@ -216,7 +274,5 @@ pub(crate) async fn call(
         .map_err(PcztError::RecordSigningHints)?
         .finish();
 
-    Ok(CreateResult {
-        pczt: encode_pczt_base64(pczt)?,
-    })
+    Ok((pczt, required_policy))
 }

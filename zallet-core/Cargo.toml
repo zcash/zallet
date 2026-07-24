@@ -92,6 +92,9 @@ tracing-subscriber.workspace = true
 zcash_protocol = { workspace = true, features = ["local-consensus"] }
 
 # Zcash payment protocols
+# `bip32` is pinned to the same semver line as `transparent`'s dependency, because
+# we round-trip `TransparentKeyScope` through its `ChildNumber` type.
+bip32 = { version = "0.6.0-pre.1", default-features = false }
 orchard.workspace = true
 pczt.workspace = true
 sapling.workspace = true

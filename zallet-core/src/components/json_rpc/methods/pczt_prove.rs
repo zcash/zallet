@@ -2,21 +2,28 @@
 //!
 //! Proving is a prerequisite for extracting a transaction from any PCZT that
 //! has shielded components: [`super::pczt_extract`] verifies proofs and will
-//! reject a PCZT whose Sapling or Orchard proofs are missing.
-
-use std::sync::OnceLock;
+//! reject a PCZT whose Sapling, Orchard, or Ironwood proofs are missing.
+//!
+//! The first call for each circuit version pays a one-time key-generation and
+//! parameter-parsing cost of tens of seconds, which can exceed the RPC
+//! timeout; the work continues and completes in the background, and a retry
+//! reuses the cached keys. Concurrent proving is bounded, so retries queue
+//! rather than stack.
 
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::types::ErrorObjectOwned;
 use pczt::Pczt;
-use pczt::roles::prover::Prover;
+use pczt::roles::prover::{OrchardError, Prover};
 use schemars::JsonSchema;
 use serde::Serialize;
-use zcash_proofs::prover::LocalTxProver;
 
-use super::pczt_common::{decode_pczt_base64, encode_pczt_base64};
+use super::pczt_common::{
+    PROVING_SLOTS, circuit_version_for_branch, decode_pczt_base64, encode_pczt_base64,
+    orchard_proving_key, sapling_prover,
+};
 use super::pczt_error::PcztError;
+use crate::{components::json_rpc::server::LegacyCode, fl};
 
 pub(crate) type Response = RpcResult<ResultType>;
 
@@ -29,54 +36,75 @@ pub(crate) struct ProveResult {
     pub sapling_proven: bool,
     /// Whether the Orchard proof was created.
     pub orchard_proven: bool,
+    /// Whether the Ironwood proof was created.
+    pub ironwood_proven: bool,
 }
 
 pub(crate) type ResultType = ProveResult;
 
 pub(super) const PARAM_PCZT_DESC: &str = "The base64-encoded PCZT to add proofs to.";
 
-/// Returns the Orchard proving key, building it once and caching it.
-///
-/// `ProvingKey::build` takes several seconds, so we avoid rebuilding it on
-/// every call. The key is held for the lifetime of the process.
-///
-/// We build the `FixedPostNu6_2` circuit, which is the one used for all current
-/// (non-Ironwood) network proving; `create_orchard_proof` proves the regular
-/// Orchard bundle against it.
-fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
-    static ORCHARD_PK: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
-    ORCHARD_PK.get_or_init(|| {
-        orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2)
-    })
-}
-
-/// Creates the Sapling and/or Orchard proofs required by a PCZT.
+/// Creates the Sapling, Orchard, and/or Ironwood proofs required by a PCZT.
 pub(crate) async fn call(pczt_base64: &str) -> Response {
-    let prover = Prover::new(decode_pczt_base64(pczt_base64)?);
+    let pczt = decode_pczt_base64(pczt_base64)?;
 
+    // The circuit version is fixed by the PCZT's consensus branch, and is the
+    // same for the Orchard and Ironwood bundles of a given PCZT.
+    let circuit_version = circuit_version_for_branch(*pczt.global().consensus_branch_id());
+
+    let prover = Prover::new(pczt);
     let need_sapling = prover.requires_sapling_proofs();
     let need_orchard = prover.requires_orchard_proof();
+    let need_ironwood = prover.requires_ironwood_proof();
 
-    // Proving is CPU-bound (and loading the Sapling parameters is expensive), so
-    // run it off the async runtime.
-    let (pczt, sapling_proven, orchard_proven): (Pczt, bool, bool) =
+    let circuit_version = match (need_orchard || need_ironwood, circuit_version) {
+        (true, None) => {
+            // The same condition `create_orchard_proof` reports; surfaced here
+            // because the proving key must be selected before calling it.
+            return Err(PcztError::OrchardProve(OrchardError::UnsupportedConsensusBranchId).into());
+        }
+        (_, version) => version,
+    };
+
+    // Proving is CPU-bound (and generating the proving keys is expensive), so
+    // run it off the async runtime, and at bounded concurrency.
+    let _permit = PROVING_SLOTS
+        .acquire()
+        .await
+        .expect("the proving semaphore is never closed");
+
+    let (pczt, sapling_proven, orchard_proven, ironwood_proven): (Pczt, bool, bool, bool) =
         crate::spawn_blocking!("pczt_prove", move || -> Result<_, ErrorObjectOwned> {
             let mut prover = prover;
 
             if need_sapling {
-                let local = LocalTxProver::bundled();
+                let local = sapling_prover();
                 prover = prover
-                    .create_sapling_proofs(&local, &local)
+                    .create_sapling_proofs(local, local)
                     .map_err(PcztError::SaplingProve)?;
             }
 
-            if need_orchard {
-                prover = prover
-                    .create_orchard_proof(orchard_proving_key())
-                    .map_err(PcztError::OrchardProve)?;
+            if let Some(version) = circuit_version {
+                let pk = orchard_proving_key(version);
+
+                if need_orchard {
+                    prover = prover
+                        .create_orchard_proof(pk)
+                        .map_err(PcztError::OrchardProve)?;
+                }
+
+                if need_ironwood {
+                    // The prover's `IronwoodError` is not publicly nameable at
+                    // this `pczt` rev, so it is formatted here rather than
+                    // carried in `PcztError`.
+                    prover = prover.create_ironwood_proof(pk).map_err(|e| {
+                        LegacyCode::Verify
+                            .with_message(fl!("err-pczt-prove-ironwood", error = format!("{e:?}")))
+                    })?;
+                }
             }
 
-            Ok((prover.finish(), need_sapling, need_orchard))
+            Ok((prover.finish(), need_sapling, need_orchard, need_ironwood))
         })
         .await
         .map_err(|source| PcztError::TaskFailed {
@@ -88,5 +116,6 @@ pub(crate) async fn call(pczt_base64: &str) -> Response {
         pczt: encode_pczt_base64(pczt)?,
         sapling_proven,
         orchard_proven,
+        ironwood_proven,
     })
 }

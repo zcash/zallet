@@ -244,6 +244,14 @@ err-pczt-transparent-metadata-lookup =
 err-pczt-transparent-input-count-mismatch =
     Internal error: transparent input count mismatch
 err-pczt-serialize-transaction = Failed to serialize transaction: {$error}
+err-pczt-prove-ironwood = Failed to create Ironwood proof: {$error}
+err-pczt-extract-store = Failed to extract and store transaction: {$error}
+err-pczt-stored-transaction-missing =
+    The extracted transaction was stored but could not be read back
+err-pczt-from-invalid =
+    Invalid from parameter: expected an address or an account UUID.
+err-pczt-fund-source-requires-account =
+    fund_source may only be given when `from` is an account UUID.
 
 ## PCZT signing errors
 
@@ -257,7 +265,14 @@ err-pczt-account-index-out-of-range =
 err-pczt-derive-spending-key = Failed to derive spending key: {$error}
 err-pczt-strict-unsigned =
     Strict mode: {$transparent} transparent, {$sapling} sapling, {$orchard}
-    orchard inputs remain unsigned
+    orchard, {$ironwood} ironwood inputs remain unsigned
+# {$required} and {$acknowledged} are privacy-policy names such as
+# `AllowRevealedAmounts`; they are not translated.
+err-pczt-policy-not-acknowledged =
+    This transaction requires the privacy policy {$required}, which the
+    supplied policy {$acknowledged} does not acknowledge.
+err-pczt-invalid-recorded-policy =
+    The privacy policy recorded in the PCZT is unrecognized.
 
 ## Transaction proposal errors
 
