@@ -16,6 +16,11 @@ be considered breaking changes.
     unified addresses (returning the account's unified full viewing key), and
     an optional `ivk` argument that exports the account's unified incoming
     viewing key instead.
+  - `z_importviewingkey`. Imports a Sapling extended full viewing key into the
+    wallet as a view-only account, enabling the wallet to track incoming and
+    outgoing transactions for addresses derived from the key without holding
+    spending authority. Supports `whenkeyisnew`, `yes`, and `no` rescan
+    options with a configurable start height.
 - `z_listunspent` transparent outputs now include a `generated` field
   indicating coinbase origin (mirroring `zcashd`'s `listunspent`), so
   integrators no longer need a `getrawtransaction` round-trip per UTXO to

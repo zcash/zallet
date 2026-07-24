@@ -42,6 +42,8 @@ mod get_wallet_status;
 pub(crate) mod help;
 #[cfg(zallet_build = "wallet")]
 mod import_key;
+#[cfg(zallet_build = "wallet")]
+mod import_viewing_key;
 mod list_accounts;
 mod list_addresses;
 #[cfg(zallet_build = "wallet")]
@@ -458,6 +460,29 @@ pub(crate) trait WalletRpc {
         hex_data: &str,
         rescan: Option<bool>,
     ) -> z_import_address::Response;
+
+    /// Imports a Sapling viewing key into the wallet.
+    ///
+    /// Only Sapling extended full viewing keys are supported. The wallet will track
+    /// incoming and outgoing transactions for addresses derived from this key, but
+    /// will not have spending authority.
+    ///
+    /// # Arguments
+    ///
+    /// - `vkey` (string, required) The viewing key (see `z_exportviewingkey`).
+    /// - `rescan` (string, optional, default="whenkeyisnew") Whether to rescan the
+    ///   blockchain for transactions ("yes", "no", or "whenkeyisnew"). When rescan is
+    ///   enabled, the wallet's background sync engine will scan for historical
+    ///   transactions from the given start height.
+    /// - `startHeight` (numeric, optional, default=0) Block height from which to begin
+    ///   the rescan. Only used when rescan is "yes" or "whenkeyisnew" (for a new key).
+    #[method(name = "z_importviewingkey")]
+    async fn import_viewing_key(
+        &self,
+        vkey: &str,
+        rescan: Option<&str>,
+        start_height: Option<u64>,
+    ) -> import_viewing_key::Response;
 
     /// Returns the total value of funds stored in the node's wallet.
     ///
@@ -1043,6 +1068,22 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             account,
             hex_data,
             rescan,
+        )
+        .await
+    }
+
+    async fn import_viewing_key(
+        &self,
+        vkey: &str,
+        rescan: Option<&str>,
+        start_height: Option<u64>,
+    ) -> import_viewing_key::Response {
+        import_viewing_key::call(
+            self.wallet().await?.as_mut(),
+            self.chain().await?,
+            vkey,
+            rescan,
+            start_height,
         )
         .await
     }
