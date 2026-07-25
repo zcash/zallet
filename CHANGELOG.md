@@ -30,8 +30,12 @@ be considered breaking changes.
     `createrawtransaction` + `fundrawtransaction`. Reports (and records in the
     PCZT) the minimum privacy policy the transaction requires.
   - `pczt_combine` — merge the contributions of several parties into one PCZT.
+  - `pczt_inspect` — decode a PCZT and describe what it commits to (inputs,
+    outputs, fee, recorded privacy policy, proof/signature status), for
+    reviewing a PCZT before signing it.
   - `pczt_prove` — add the Sapling, Orchard, and/or Ironwood zero-knowledge
-    proofs.
+    proofs. The proving keys for the current consensus branch are warmed in
+    the background when the RPC server starts.
   - `pczt_sign` — add signatures using the wallet's keys, once the caller
     acknowledges the privacy policy recorded in the PCZT.
   - `pczt_extract` — verify the PCZT and extract the final, network-ready

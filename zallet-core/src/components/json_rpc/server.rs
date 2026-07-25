@@ -44,6 +44,11 @@ pub(crate) async fn spawn<C: Chain>(
     assert_eq!(config.bind.len(), 1);
     let listen_addr = config.bind[0];
 
+    // Warm the proving caches in the background, so the first `pczt_prove` or
+    // `pczt_extract` call does not pay the multi-second key-generation cost
+    // inside an RPC timeout.
+    super::methods::spawn_proving_cache_warmer(chain.clone());
+
     // Initialize the RPC methods.
     #[cfg(zallet_build = "wallet")]
     let wallet_rpc_impl =

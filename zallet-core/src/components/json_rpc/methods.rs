@@ -54,14 +54,17 @@ mod list_unspent;
 mod lock_wallet;
 #[cfg(zallet_build = "wallet")]
 mod openrpc;
-// PCZT methods. The stateless roles (combine, prove, extract) and their shared
-// helpers are available in every build; create and sign require wallet state.
+// PCZT methods. The stateless roles (combine, inspect, prove) and their shared
+// helpers are available in every build; create, sign, and extract (which
+// records the extracted transaction) require wallet state.
 mod pczt_combine;
 mod pczt_common;
 #[cfg(zallet_build = "wallet")]
 mod pczt_create;
 mod pczt_error;
+#[cfg(zallet_build = "wallet")]
 mod pczt_extract;
+mod pczt_inspect;
 mod pczt_prove;
 #[cfg(zallet_build = "wallet")]
 mod pczt_sign;
@@ -85,6 +88,8 @@ mod z_import_address;
 mod z_send_many;
 #[cfg(zallet_build = "wallet")]
 mod z_shieldcoinbase;
+
+pub(crate) use pczt_common::spawn_proving_cache_warmer;
 
 /// The general JSON-RPC interface, containing the methods provided in all Zallet builds.
 #[rpc(server)]
@@ -306,12 +311,32 @@ pub(crate) trait Rpc {
     ///
     /// The first call for each circuit version generates and caches the proving
     /// key, which can take tens of seconds and may exceed the RPC timeout; the
-    /// work completes in the background and a retry reuses the cached key.
+    /// work completes in the background and a retry reuses the cached key. When
+    /// the RPC server starts, the keys for the current consensus branch are
+    /// warmed in the background, so in steady state this cost is paid before
+    /// the first call arrives.
     ///
     /// # Arguments
     /// - `pczt` (string, required) The base64-encoded PCZT to add proofs to.
     #[method(name = "pczt_prove")]
     async fn pczt_prove(&self, pczt: &str) -> pczt_prove::Response;
+
+    /// Decodes a PCZT and describes what it commits to.
+    ///
+    /// Reports the transaction's transparent inputs and outputs, its shielded
+    /// bundles (with the recipient and value data its creator recorded), the
+    /// implied fee, the privacy policy recorded by `pczt_create`, and the
+    /// proof/signature status of each bundle. Use this to review a PCZT before
+    /// signing it — particularly one that has passed through other parties.
+    ///
+    /// Everything reported is read from the PCZT as recorded by its creator;
+    /// nothing is cryptographically verified until `pczt_extract`. Shielded
+    /// output details are creator-side metadata and may have been redacted.
+    ///
+    /// # Arguments
+    /// - `pczt` (string, required) The base64-encoded PCZT to inspect.
+    #[method(name = "pczt_inspect")]
+    async fn pczt_inspect(&self, pczt: &str) -> pczt_inspect::Response;
 }
 
 /// The wallet-specific JSON-RPC interface, containing the methods only provided in the
@@ -821,8 +846,13 @@ pub(crate) trait WalletRpc {
     /// Signing commits to what the transaction reveals, so the caller must
     /// acknowledge the privacy policy recorded in the PCZT by `pczt_create`;
     /// omitting `privacy_policy` acknowledges only `FullPrivacy` and refuses to
-    /// sign anything that reveals more. A PCZT from another creator carries no
-    /// recorded policy to check against — inspect what you are signing.
+    /// sign anything that reveals more.
+    ///
+    /// > ⚠️ A PCZT that this wallet did not create — or that passed through
+    /// > other parties on its way back — carries no recorded policy Zallet can
+    /// > trust. Review what you are about to sign with `pczt_inspect`: a
+    /// > counterparty could have altered the outputs, amounts, or recorded
+    /// > policy of the PCZT.
     ///
     /// # Arguments
     /// - `pczt` (string, required) The base64-encoded PCZT to sign.
@@ -1063,6 +1093,10 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
 
     async fn pczt_prove(&self, pczt: &str) -> pczt_prove::Response {
         pczt_prove::call(pczt).await
+    }
+
+    async fn pczt_inspect(&self, pczt: &str) -> pczt_inspect::Response {
+        pczt_inspect::call(self.wallet().await?.params(), pczt)
     }
 }
 

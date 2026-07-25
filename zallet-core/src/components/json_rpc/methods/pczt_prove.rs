@@ -1,14 +1,17 @@
 //! PCZT prove method — create the zero-knowledge proofs for a PCZT.
 //!
 //! Proving is a prerequisite for extracting a transaction from any PCZT that
-//! has shielded components: [`super::pczt_extract`] verifies proofs and will
-//! reject a PCZT whose Sapling, Orchard, or Ironwood proofs are missing.
+//! has shielded components: `pczt_extract` verifies proofs and will reject a
+//! PCZT whose Sapling, Orchard, or Ironwood proofs are missing.
 //!
 //! The first call for each circuit version pays a one-time key-generation and
 //! parameter-parsing cost of tens of seconds, which can exceed the RPC
 //! timeout; the work continues and completes in the background, and a retry
 //! reuses the cached keys. Concurrent proving is bounded, so retries queue
-//! rather than stack.
+//! rather than stack. When the RPC server starts, the keys for the current
+//! consensus branch are warmed in the background (see
+//! [`super::pczt_common::spawn_proving_cache_warmer`]), so in steady state
+//! this cost is paid before the first call arrives.
 
 use documented::Documented;
 use jsonrpsee::core::RpcResult;

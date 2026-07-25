@@ -13,7 +13,13 @@ use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::consensus::{BranchId, OrchardProtocolRevision};
 
 use super::pczt_error::PcztError;
-use crate::{components::json_rpc::server::LegacyCode, fl};
+use crate::{
+    components::{
+        chain::{Chain, ChainView},
+        json_rpc::server::LegacyCode,
+    },
+    fl,
+};
 
 /// Maximum size, in bytes, accepted for a base64-encoded PCZT.
 ///
@@ -144,6 +150,55 @@ pub(super) fn orchard_verifying_key(version: OrchardCircuitVersion) -> &'static 
         OrchardCircuitVersion::PostNu6_3 => &POST_NU6_3,
     }
     .get_or_init(|| VerifyingKey::build(version))
+}
+
+/// Warms the proving caches in the background.
+///
+/// The first `pczt_prove`/`pczt_extract` call otherwise pays tens of seconds
+/// of key generation and parameter parsing, likely exceeding the RPC timeout.
+/// This builds the Sapling prover/verifying keys and the Orchard-family
+/// proving/verifying keys for the consensus branch at the chain tip, so that
+/// cost is paid at startup instead. Detached and best-effort: failure to read
+/// the tip just skips the warmup, and the caches fill on first use as before.
+///
+/// The warmup holds a [`PROVING_SLOTS`] permit, so it counts against the same
+/// concurrency bound as the RPC methods; a prove request arriving mid-warmup
+/// blocks on the cache initialization it needs and completes as soon as that
+/// key is built.
+pub(crate) fn spawn_proving_cache_warmer<C: Chain>(chain: C) {
+    tokio::spawn(async move {
+        let tip = match async { chain.snapshot().await?.tip().await }.await {
+            Ok(tip) => tip,
+            Err(e) => {
+                tracing::debug!("Skipping proving-cache warmup: failed to read chain tip: {e}");
+                return;
+            }
+        };
+
+        // Transactions are built to be mined in the next block.
+        let branch = BranchId::for_height(chain.params(), tip.height() + 1);
+        let version = circuit_version_for_branch(u32::from(branch));
+
+        let _permit = PROVING_SLOTS
+            .acquire()
+            .await
+            .expect("the proving semaphore is never closed");
+
+        let warmed = tokio::task::spawn_blocking(move || {
+            sapling_prover();
+            sapling_verifying_keys();
+            if let Some(version) = version {
+                orchard_proving_key(version);
+                orchard_verifying_key(version);
+            }
+        })
+        .await;
+
+        match warmed {
+            Ok(()) => tracing::info!("Proving caches warmed for consensus branch {branch:?}"),
+            Err(e) => tracing::warn!("Proving-cache warmup task failed: {e}"),
+        }
+    });
 }
 
 /// Returns the bundled Sapling prover, parsing the parameters once and caching
