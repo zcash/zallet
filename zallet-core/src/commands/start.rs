@@ -9,6 +9,7 @@ use crate::{
     components::{
         chain::{ChainFactory, check_consensus_compatibility},
         database::Database,
+        health,
         json_rpc::JsonRpc,
         sync::WalletSync,
     },
@@ -71,6 +72,9 @@ impl StartCmd {
         )
         .await?;
 
+        // Launch readiness / liveness HTTP probes (dedicated port; opt-in).
+        let health_task_handle = health::spawn(&config.health, db.clone()).await?;
+
         // Start the wallet sync process.
         let (
             wallet_sync_steady_state_task_handle,
@@ -92,6 +96,7 @@ impl StartCmd {
         // ongoing tasks.
         pin!(chain_indexer_task_handle);
         pin!(rpc_task_handle);
+        pin!(health_task_handle);
         pin!(wallet_sync_steady_state_task_handle);
         pin!(wallet_sync_recover_history_task_handle);
         pin!(wallet_sync_batch_decryptor_task_handle);
@@ -113,6 +118,13 @@ impl StartCmd {
                     let rpc_server_result = rpc_join_result
                         .expect("unexpected panic in the RPC task");
                     info!(?rpc_server_result, "RPC task exited");
+                    Ok(())
+                }
+
+                health_join_result = &mut health_task_handle => {
+                    let health_result = health_join_result
+                        .expect("unexpected panic in the health server task");
+                    info!(?health_result, "Health server task exited");
                     Ok(())
                 }
 
@@ -159,6 +171,7 @@ impl StartCmd {
         // ongoing tasks
         chain_indexer_task_handle.abort();
         rpc_task_handle.abort();
+        health_task_handle.abort();
         wallet_sync_steady_state_task_handle.abort();
         wallet_sync_recover_history_task_handle.abort();
         wallet_sync_batch_decryptor_task_handle.abort();

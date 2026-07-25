@@ -71,7 +71,9 @@ rpassword.workspace = true
 
 # RPC
 http-body-util.workspace = true
+bytes.workspace = true
 hyper.workspace = true
+hyper-util.workspace = true
 jsonrpsee = { workspace = true, features = ["macros", "server"] }
 jsonrpsee-http-client = { workspace = true, optional = true }
 nix = { workspace = true, features = ["signal"] }
