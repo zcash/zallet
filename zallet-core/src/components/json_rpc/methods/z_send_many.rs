@@ -34,6 +34,12 @@ use zcash_protocol::{
     value::{MAX_MONEY, Zatoshis},
 };
 
+use rand::rngs::OsRng;
+use zcash_client_backend::data_api::error::Error as WalletError;
+use zcash_client_backend::data_api::wallet::LockRequest;
+use zcash_client_backend::proposal::ProposalError;
+use zcash_client_backend::wallet::LockOwner;
+
 use crate::{
     components::{
         chain::Chain,
@@ -42,8 +48,9 @@ use crate::{
             asyncop::{ContextInfo, OperationId},
             payments::{
                 AmountParameter, IncompatiblePrivacyPolicy, PrivacyPolicy, SendResult,
-                build_request, enforce_privacy_policy, get_account_for_address,
-                get_legacy_pool_account, verify_and_broadcast_transactions,
+                account_busy_error, build_request, enforce_privacy_policy, get_account_for_address,
+                get_legacy_pool_account, unlock_proposal_inputs_after_failure,
+                verify_and_broadcast_transactions,
             },
             server::LegacyCode,
         },
@@ -304,6 +311,18 @@ pub(crate) async fn call<C: Chain>(
 
     let input_selector = GreedyInputSelector::new();
 
+    // Lock the proposal's inputs for the configured window so a concurrent operation on
+    // this account cannot select (and double-spend) them while this one is building. Each
+    // operation locks under its own fresh random owner token, so releasing this
+    // operation's locks can never disturb a concurrent operation's, and a conflict always
+    // means a different in-flight operation holds the input.
+    let lock_inputs = APP
+        .config()
+        .builder
+        .note_lock_blocks()
+        .map(|for_blocks| LockRequest::new(LockOwner::random(&mut OsRng), for_blocks));
+    let lock_owner = lock_inputs.as_ref().map(|request| request.owner());
+
     let proposal = propose_transfer::<_, _, _, _, Infallible>(
         wallet.as_mut(),
         &params,
@@ -313,88 +332,120 @@ pub(crate) async fn call<C: Chain>(
         request,
         confirmations_policy,
         &spend_policy,
+        lock_inputs,
         // Do not request a specific transaction version; building falls back to the version
         // implied by the target height.
         None,
     )
     // TODO: Map errors to `zcashd` shape.
-    .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
-
-    enforce_privacy_policy(&proposal, privacy_policy)?;
-
-    let orchard_actions_limit = APP.config().builder.limits.orchard_actions().into();
-    for step in proposal.steps() {
-        let orchard_spends = step
-            .shielded_inputs()
-            .iter()
-            .flat_map(|inputs| inputs.notes())
-            .filter(|note| note.note().pool() == ShieldedPool::Orchard)
-            .count();
-
-        let orchard_outputs = step
-            .payment_pools()
-            .values()
-            .filter(|pool| pool == &&PoolType::ORCHARD)
-            .count()
-            + step
-                .balance()
-                .proposed_change()
-                .iter()
-                .filter(|change| change.output_pool() == PoolType::ORCHARD)
-                .count();
-
-        let orchard_actions = orchard_spends.max(orchard_outputs);
-
-        if orchard_actions > orchard_actions_limit {
-            let (count, kind) = if orchard_outputs <= orchard_actions_limit {
-                (orchard_spends, "inputs")
-            } else if orchard_spends <= orchard_actions_limit {
-                (orchard_outputs, "outputs")
-            } else {
-                (orchard_actions, "actions")
-            };
-
-            return Err(LegacyCode::Misc.with_message(fl!(
-                "err-excess-orchard-actions",
-                count = count,
-                kind = kind,
-                limit = orchard_actions_limit,
-                config = "-orchardactionlimit=N",
-                bound = format!("N >= %u"),
-            )));
-        }
-    }
-
-    let derivation = account.source().key_derivation().ok_or_else(|| {
-        LegacyCode::InvalidAddressOrKey
-            .with_static("Invalid from address, no payment source found for address.")
+    .map_err(|e| match &e {
+        // A lock conflict is transient: a concurrent operation holds one of the selected
+        // inputs. Surface it as a retryable "account busy" error rather than a failure.
+        WalletError::Proposal(ProposalError::InputsLocked(_)) => account_busy_error(),
+        _ => LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")),
     })?;
 
-    // Fetch spending key last, to avoid a keystore decryption if unnecessary.
-    let seed = keystore
-        .decrypt_seed(derivation.seed_fingerprint())
-        .await
-        .map_err(|e| match e.kind() {
-            // TODO: Improve internal error types.
-            //       https://github.com/zcash/zallet/issues/256
-            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
-                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
+    // From here until `create_proposed_transactions` stores the built transactions, this
+    // function owns the proposal's input locks: every error on this path must release
+    // them, or the account's inputs would stay unspendable until the lock window expires.
+    let post_proposal = async {
+        enforce_privacy_policy(&proposal, privacy_policy)?;
+
+        let orchard_actions_limit = APP.config().builder.limits.orchard_actions().into();
+        for step in proposal.steps() {
+            let orchard_spends = step
+                .shielded_inputs()
+                .iter()
+                .flat_map(|inputs| inputs.notes())
+                .filter(|note| note.note().pool() == ShieldedPool::Orchard)
+                .count();
+
+            let orchard_outputs = step
+                .payment_pools()
+                .values()
+                .filter(|pool| pool == &&PoolType::ORCHARD)
+                .count()
+                + step
+                    .balance()
+                    .proposed_change()
+                    .iter()
+                    .filter(|change| change.output_pool() == PoolType::ORCHARD)
+                    .count();
+
+            let orchard_actions = orchard_spends.max(orchard_outputs);
+
+            if orchard_actions > orchard_actions_limit {
+                let (count, kind) = if orchard_outputs <= orchard_actions_limit {
+                    (orchard_spends, "inputs")
+                } else if orchard_spends <= orchard_actions_limit {
+                    (orchard_outputs, "outputs")
+                } else {
+                    (orchard_actions, "actions")
+                };
+
+                return Err(LegacyCode::Misc.with_message(fl!(
+                    "err-excess-orchard-actions",
+                    count = count,
+                    kind = kind,
+                    limit = orchard_actions_limit,
+                    config = "-orchardactionlimit=N",
+                    bound = format!("N >= %u"),
+                )));
             }
-            _ => LegacyCode::Database.with_message(e.to_string()),
+        }
+
+        let derivation = account.source().key_derivation().ok_or_else(|| {
+            LegacyCode::InvalidAddressOrKey
+                .with_static("Invalid from address, no payment source found for address.")
         })?;
-    let usk = UnifiedSpendingKey::from_seed(
-        wallet.params(),
-        seed.expose_secret(),
-        derivation.account_index(),
-    )
-    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
 
-    #[cfg(feature = "zcashd-import")]
-    let standalone_keys =
-        collect_standalone_transparent_keys(wallet.as_ref(), &keystore, account.id(), &proposal)
-            .await?;
+        // Fetch spending key last, to avoid a keystore decryption if unnecessary.
+        let seed = keystore
+            .decrypt_seed(derivation.seed_fingerprint())
+            .await
+            .map_err(|e| match e.kind() {
+                // TODO: Improve internal error types.
+                //       https://github.com/zcash/zallet/issues/256
+                crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
+                    LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
+                }
+                _ => LegacyCode::Database.with_message(e.to_string()),
+            })?;
+        let usk = UnifiedSpendingKey::from_seed(
+            wallet.params(),
+            seed.expose_secret(),
+            derivation.account_index(),
+        )
+        .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
 
-    // TODO: verify that the proposal satisfies the requested privacy policy
+        #[cfg(feature = "zcashd-import")]
+        let standalone_keys = collect_standalone_transparent_keys(
+            wallet.as_ref(),
+            &keystore,
+            account.id(),
+            &proposal,
+        )
+        .await?;
+
+        // TODO: verify that the proposal satisfies the requested privacy policy
+
+        Ok::<_, jsonrpsee::types::ErrorObjectOwned>((
+            usk.to_unified_full_viewing_key(),
+            #[cfg(feature = "zcashd-import")]
+            SpendingKeys::new(usk, standalone_keys),
+            #[cfg(not(feature = "zcashd-import"))]
+            SpendingKeys::from_unified_spending_key(usk),
+        ))
+    }
+    .await;
+
+    let (ufvk, spending_keys) = match post_proposal {
+        Ok(keys) => keys,
+        Err(e) => {
+            unlock_proposal_inputs_after_failure(wallet.as_mut(), &proposal, lock_owner);
+            return Err(e);
+        }
+    };
 
     Ok((
         Some(ContextInfo::new(
@@ -409,12 +460,10 @@ pub(crate) async fn call<C: Chain>(
             wallet,
             chain,
             account.id(),
-            usk.to_unified_full_viewing_key(),
+            ufvk,
             proposal,
-            #[cfg(feature = "zcashd-import")]
-            SpendingKeys::new(usk, standalone_keys),
-            #[cfg(not(feature = "zcashd-import"))]
-            SpendingKeys::from_unified_spending_key(usk),
+            spending_keys,
+            lock_owner,
         ),
     ))
 }
@@ -430,8 +479,11 @@ pub(crate) async fn call<C: Chain>(
 /// 1. #1159 Currently there is no limit set on the number of elements, which could
 ///    make the tx too large.
 /// 2. #1360 Note selection is not optimal.
-/// 3. #1277 Spendable notes are not locked, so an operation running in parallel
-///    could also try to use them.
+///
+/// `lock_owner` is the owner token the proposal locked its inputs under when it was
+/// created (#1277), or `None` when locking is disabled: when building fails, that owner's
+/// locks are explicitly released; when it succeeds, `store_transactions_to_be_sent`
+/// releases them atomically as it marks the inputs spent.
 async fn run<C: Chain>(
     mut wallet: DbHandle,
     chain: C,
@@ -439,27 +491,44 @@ async fn run<C: Chain>(
     ufvk: UnifiedFullViewingKey,
     proposal: Proposal<StandardFeeRule, ReceivedNoteId>,
     spending_keys: SpendingKeys,
+    lock_owner: Option<LockOwner>,
 ) -> RpcResult<SendResult> {
     let prover = LocalTxProver::bundled();
-    let (wallet, proposal, txids) = crate::spawn_blocking!("z_sendmany prover", move || {
-        let params = *wallet.params();
-        create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
-            wallet.as_mut(),
-            &params,
-            &prover,
-            &prover,
-            &spending_keys,
-            OvkPolicy::Sender,
-            &proposal,
-            // No expiry-height override; each transaction keeps its builder-derived expiry.
-            None,
-        )
-        .map(|txids| (wallet, proposal, txids))
-    })
-    .await
-    // TODO: Map errors to `zcashd` shape.
-    .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?
-    .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
+    // The closure returns the wallet and proposal in BOTH outcomes so that the failure
+    // path can release the proposal's input locks. (If the closure panics, the wallet
+    // handle is lost and the locks self-expire at the lock expiry height.)
+    let (mut wallet, proposal, build_result) =
+        crate::spawn_blocking!("z_sendmany prover", move || {
+            let params = *wallet.params();
+            let result = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
+                wallet.as_mut(),
+                &params,
+                &prover,
+                &prover,
+                &spending_keys,
+                OvkPolicy::Sender,
+                &proposal,
+                // No expiry-height override; each transaction keeps its builder-derived expiry.
+                None,
+            );
+            (wallet, proposal, result)
+        })
+        .await
+        // TODO: Map errors to `zcashd` shape.
+        .map_err(|e| {
+            LegacyCode::Wallet.with_message(format!("Failed to build transaction: {e}"))
+        })?;
+
+    let txids = match build_result {
+        Ok(txids) => txids,
+        Err(e) => {
+            unlock_proposal_inputs_after_failure(wallet.as_mut(), &proposal, lock_owner);
+            // TODO: Map errors to `zcashd` shape.
+            return Err(
+                LegacyCode::Wallet.with_message(format!("Failed to build transaction: {e}"))
+            );
+        }
+    };
 
     verify_and_broadcast_transactions(&wallet, chain, account_id, &ufvk, &proposal, txids.into())
         .await

@@ -69,6 +69,19 @@
 # Values smaller than `trusted_confirmations` are ignored.
 #untrusted_confirmations = 10
 
+# The number of blocks for which the inputs selected by a spend proposal are locked.
+#
+# While a spend operation (e.g. `z_sendmany`, `z_shieldcoinbase`) is in flight, the
+# notes and UTXOs it selected are locked so that a concurrent operation on the same
+# account cannot select (and double-spend) them. The lock is released when the
+# operation's transactions are stored for broadcast, released explicitly if the
+# operation fails, and expires on its own once the chain advances this many blocks
+# past the operation's target height (self-healing if the wallet crashes while an
+# operation is in flight).
+#
+# Set to `0` to disable input locking entirely.
+#note_lock_blocks = 40
+
 
 #
 # Configurable limits on transaction builder operation (to prevent e.g. memory

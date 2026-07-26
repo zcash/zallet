@@ -10,6 +10,27 @@ be considered breaking changes.
 
 ### Added
 
+- Note locking: while a spend operation (`z_sendmany`, `z_shieldcoinbase`) is
+  in flight, the notes and UTXOs it selected are locked so that a concurrent
+  operation on the same account cannot select (and double-spend) them during
+  the selection-to-broadcast window. Each operation locks under its own random
+  owner token; locks are released when the operation's transactions are stored
+  for broadcast, released explicitly when it fails, and expire on their own
+  once the chain advances past the lock height, so a crashed operation
+  self-heals without intervention.
+  - New `builder.note_lock_blocks` config option: the number of blocks a
+    proposal's input locks last (default 40, roughly 50 minutes of block time,
+    comfortably above worst-case build-and-prove time; 0 disables locking).
+  - A lock conflict surfaces as a retryable "Account is busy" RPC error.
+  - New `z_clearlockedoutputs` RPC method: releases every note lock held for
+    an account, as recovery after the wallet loses track of an in-flight
+    operation. Only safe when no in-flight proposal or PCZT for the account
+    remains.
+  - `z_getbalanceforaccount` reports a per-pool `lockedZat` field alongside
+    the spendable `valueZat`, and `z_getbalances` now populates its `locked`
+    bucket: value locked by in-flight operations, excluded from the spendable
+    balance but still owned by the account. A pool whose entire balance is
+    locked stays visible; `lockedZat` is omitted when zero.
 - RPC methods:
   - `z_exportviewingkey`. In addition to the `zcashd` behaviour (exporting the
     Sapling extended full viewing key for a Sapling address), it accepts

@@ -13,7 +13,7 @@ use zcash_client_backend::{
     address::UnifiedAddress,
     data_api::{
         Account, AccountPurpose, CoinbaseFilter, InputSource, WalletRead,
-        wallet::{ConfirmationsPolicy, TargetHeight},
+        wallet::{ConfirmationsPolicy, TargetHeight, input_selection::LockFilter},
     },
     encoding::AddressCodec,
     fees::{orchard::InputView as _, sapling::InputView as _},
@@ -186,6 +186,11 @@ pub(crate) fn call(
 
         let is_watch_only = !matches!(account.purpose(), AccountPurpose::Spending { .. });
 
+        // `z_listunspent` reports unspent outputs and notes; a lock defers selection but
+        // does not spend, so the queries ignore lock state entirely (retrieval paths, not
+        // input selection).
+        let lock_filter = LockFilter::Unfiltered;
+
         let utxos = wallet
             .get_transparent_receivers(account_id, true, true)
             .map_err(|e| {
@@ -212,6 +217,7 @@ pub(crate) fn call(
                             target_height,
                             confirmations_policy,
                             coinbase_filter,
+                            lock_filter,
                         )
                         .map_err(|e| {
                             RpcError::owned(
@@ -265,6 +271,7 @@ pub(crate) fn call(
                 ],
                 target_height,
                 &[],
+                lock_filter,
             )
             .map_err(|e| {
                 RpcError::owned(

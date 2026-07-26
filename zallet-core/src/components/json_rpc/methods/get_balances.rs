@@ -118,9 +118,9 @@ struct Balance {
     /// Balance that is spendable at the requested number of confirmations, but currently
     /// locked by some other spend operation.
     ///
-    /// Omitted if zero.
-    // TODO: Support locked outputs.
-    // https://github.com/zcash/librustzcash/issues/2161
+    /// Locked value is excluded from `spendable` while the operation that locked it is in
+    /// flight, and returns to `spendable` when the operation completes, fails, or its
+    /// lock expires. Omitted if zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     locked: Option<Value>,
 
@@ -237,6 +237,9 @@ fn balance_from(b: &zcash_client_backend::data_api::AccountBalance) -> RpcResult
             LegacyCode::Database
                 .with_static("Wallet database is corrupt: storing more than MAX_MONEY"),
         )?,
+        // `AccountBalance::locked_value` covers every pool (shielded and both
+        // transparent buckets), so it must be used exactly once here.
+        b.locked_value(),
         // `AccountBalance::change_pending_confirmation` and
         // `AccountBalance::value_pending_spendability` cover the shielded pools only.
         // Immature transparent coinbase funds are reported by the coinbase bucket's
@@ -260,6 +263,7 @@ fn balance_from(b: &zcash_client_backend::data_api::AccountBalance) -> RpcResult
 fn opt_balance_from(b: &zcash_client_backend::data_api::Balance) -> RpcResult<Option<Balance>> {
     Ok(opt_balance(
         b.spendable_value(),
+        b.locked_value(),
         (b.change_pending_confirmation() + b.value_pending_spendability()).ok_or(
             LegacyCode::Database
                 .with_static("Wallet database is corrupt: storing more than MAX_MONEY"),
@@ -268,21 +272,28 @@ fn opt_balance_from(b: &zcash_client_backend::data_api::Balance) -> RpcResult<Op
     ))
 }
 
-fn balance(spendable: Zatoshis, pending: Zatoshis, dust: Zatoshis) -> Balance {
+fn balance(spendable: Zatoshis, locked: Zatoshis, pending: Zatoshis, dust: Zatoshis) -> Balance {
     Balance {
         spendable: value(spendable),
-        locked: None,
+        locked: opt_value(locked),
         pending: opt_value(pending),
         dust: opt_value(dust),
     }
 }
 
-fn opt_balance(spendable: Zatoshis, pending: Zatoshis, dust: Zatoshis) -> Option<Balance> {
-    (!(spendable.is_zero() && pending.is_zero() && dust.is_zero())).then(|| Balance {
-        spendable: value(spendable),
-        locked: None,
-        pending: opt_value(pending),
-        dust: opt_value(dust),
+fn opt_balance(
+    spendable: Zatoshis,
+    locked: Zatoshis,
+    pending: Zatoshis,
+    dust: Zatoshis,
+) -> Option<Balance> {
+    (!(spendable.is_zero() && locked.is_zero() && pending.is_zero() && dust.is_zero())).then(|| {
+        Balance {
+            spendable: value(spendable),
+            locked: opt_value(locked),
+            pending: opt_value(pending),
+            dust: opt_value(dust),
+        }
     })
 }
 
