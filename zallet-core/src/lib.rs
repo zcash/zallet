@@ -62,6 +62,7 @@ pub mod components;
 pub mod config;
 pub mod error;
 mod i18n;
+pub mod migrate;
 pub mod network;
 mod prelude;
 mod task;

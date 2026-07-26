@@ -458,13 +458,28 @@ criteria = "safe-to-deploy"
 version = "0.13.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.darling]]
+version = "0.23.0"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.darling_core]]
 version = "0.13.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.darling_core]]
+version = "0.23.0"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.darling_macro]]
 version = "0.20.11"
 criteria = "safe-to-deploy"
+
+[[exemptions.darling_macro]]
+version = "0.23.0"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.dashmap]]
 version = "6.2.1"
@@ -1602,9 +1617,19 @@ criteria = "safe-to-deploy"
 version = "3.17.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.serde_with]]
+version = "3.21.0"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.serde_with_macros]]
 version = "3.17.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.serde_with_macros]]
+version = "3.21.0"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.serdect]]
 version = "0.2.0"
