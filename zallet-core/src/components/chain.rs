@@ -729,6 +729,9 @@ pub enum SpendStatus {
 }
 
 #[cfg(test)]
+pub(crate) use tests::MockChain;
+
+#[cfg(test)]
 mod tests {
     use std::ops::Range;
 
@@ -764,7 +767,7 @@ mod tests {
     /// A trivial in-memory [`ChainView`], proving the trait is implementable by a non-Zaino
     /// backend and locking the contract.
     #[derive(Clone)]
-    struct MockChainView {
+    pub(crate) struct MockChainView {
         tip: ChainBlock,
     }
 
@@ -1161,7 +1164,7 @@ mod tests {
     /// `reported_upgrades`, and `snapshot` carry meaning; the compatibility check never reaches
     /// the other methods, so they are `unreachable!`.
     #[derive(Clone)]
-    struct MockChain {
+    pub(crate) struct MockChain {
         params: super::Network,
         upgrades: Vec<ReportedUpgrade>,
         tip: BlockHeight,

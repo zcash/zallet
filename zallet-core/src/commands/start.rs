@@ -27,6 +27,13 @@ impl StartCmd {
         let config = APP.config();
         let _lock = config.lock_datadir()?;
 
+        Self::run_with_config(&config, factory).await
+    }
+
+    async fn run_with_config<F: ChainFactory>(
+        config: &ZalletConfig,
+        factory: &F,
+    ) -> Result<(), Error> {
         // BETA: Warn when currently-unused config options are set.
         let warn_unused =
             |option: &str| warn!("{}", fl!("warn-config-unused", option = option.to_string()));
@@ -44,24 +51,38 @@ impl StartCmd {
             warn_unused("keystore.require_backup");
         }
 
-        let db = Database::open(&config).await?;
-        #[cfg(zallet_build = "wallet")]
-        let keystore = KeyStore::new(&config, db.clone())?;
-
-        // Start monitoring the chain.
-        let (chain, chain_indexer_task_handle) = factory.build(&config).await?;
+        // Connect to and validate the chain backend before opening the wallet database.
+        let (chain, chain_indexer_task_handle) = factory.build(config).await?;
 
         // Refuse to start if the backing full node already follows consensus rules we
         // cannot interpret. If the only incompatibilities are still in the future, this
         // returns the height at which to shut down before reaching them.
         let shutdown_height = check_consensus_compatibility(&chain).await?;
 
+        let db = match Database::open(config).await {
+            Ok(db) => db,
+            Err(error) => {
+                // Database failures occurred before this task existed under the previous
+                // startup order, so retain that cleanup behavior after moving construction.
+                chain_indexer_task_handle.abort();
+                return Err(error);
+            }
+        };
+        #[cfg(zallet_build = "wallet")]
+        let keystore = match KeyStore::new(config, db.clone()) {
+            Ok(keystore) => keystore,
+            Err(error) => {
+                chain_indexer_task_handle.abort();
+                return Err(error);
+            }
+        };
+
         // Build the decryptor up front so the RPC server has its handle before the initial scan.
         let (decryptor_handle, decryptor_engine) = WalletSync::build_decryptor();
 
         // Launch RPC server.
         let rpc_task_handle = JsonRpc::spawn(
-            &config,
+            config,
             db.clone(),
             #[cfg(zallet_build = "wallet")]
             keystore,
@@ -78,7 +99,7 @@ impl StartCmd {
             wallet_sync_batch_decryptor_task_handle,
             wallet_sync_data_requests_task_handle,
         ) = WalletSync::spawn(
-            &config,
+            config,
             db,
             chain,
             shutdown_height,
@@ -186,5 +207,140 @@ impl Runnable for StartCmd {
 impl config::Override<ZalletConfig> for StartCmd {
     fn override_config(&self, config: ZalletConfig) -> Result<ZalletConfig, FrameworkError> {
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use rusqlite::Connection;
+
+    use super::StartCmd;
+    use crate::{
+        components::{
+            TaskHandle,
+            chain::{ChainFactory, MockChain},
+        },
+        config::ZalletConfig,
+        error::{Error, ErrorKind},
+    };
+
+    /// The error returned by the fake backend's capability preflight.
+    const CAPABILITY_PREFLIGHT_FAILURE: &str = "required scan capabilities are missing";
+    /// A compatible prior version that makes a database reopen observably record this build.
+    const PRIOR_ZALLET_VERSION: &str = "0.1.0-beta.0";
+
+    struct RejectingBackend {
+        build_was_attempted: Arc<AtomicBool>,
+    }
+
+    impl ChainFactory for RejectingBackend {
+        type Chain = MockChain;
+
+        const NAME: &'static str = "rejecting";
+
+        async fn build(&self, _config: &ZalletConfig) -> Result<(Self::Chain, TaskHandle), Error> {
+            self.build_was_attempted.store(true, Ordering::SeqCst);
+            Err(ErrorKind::Init.context(CAPABILITY_PREFLIGHT_FAILURE).into())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_backend_preflight_does_not_create_wallet_database() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let wallet_db_path = config.wallet_db_path();
+        let build_was_attempted = Arc::new(AtomicBool::new(false));
+        let factory = RejectingBackend {
+            build_was_attempted: build_was_attempted.clone(),
+        };
+
+        let error = StartCmd::run_with_config(&config, &factory)
+            .await
+            .expect_err("capability preflight rejects startup");
+
+        assert!(
+            build_was_attempted.load(Ordering::SeqCst),
+            "backend construction must run before wallet initialization",
+        );
+        assert!(
+            error.to_string().contains(CAPABILITY_PREFLIGHT_FAILURE),
+            "unexpected startup error: {error}",
+        );
+        assert!(
+            !wallet_db_path.exists(),
+            "backend preflight failure must not create or migrate the wallet database",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_backend_preflight_does_not_migrate_existing_wallet_database() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let wallet_db_path = config.wallet_db_path();
+
+        let database = super::Database::open(&config)
+            .await
+            .expect("creates a current wallet database");
+        drop(database);
+
+        let connection = Connection::open(&wallet_db_path).expect("opens wallet database");
+        let updated = connection
+            .execute(
+                "UPDATE ext_zallet_db_version_metadata
+                 SET version = ?1
+                 WHERE rowid = (
+                    SELECT MAX(rowid) FROM ext_zallet_db_version_metadata
+                 )",
+                [PRIOR_ZALLET_VERSION],
+            )
+            .expect("marks the database as last opened by the prior version");
+        assert_eq!(updated, 1, "setup updates exactly one version record");
+        drop(connection);
+
+        let build_was_attempted = Arc::new(AtomicBool::new(false));
+        let factory = RejectingBackend {
+            build_was_attempted: build_was_attempted.clone(),
+        };
+
+        let error = StartCmd::run_with_config(&config, &factory)
+            .await
+            .expect_err("capability preflight rejects startup");
+
+        assert!(build_was_attempted.load(Ordering::SeqCst));
+        assert!(
+            error.to_string().contains(CAPABILITY_PREFLIGHT_FAILURE),
+            "unexpected startup error: {error}",
+        );
+
+        let connection = Connection::open(&wallet_db_path).expect("reopens wallet database");
+        let latest_version: String = connection
+            .query_row(
+                "SELECT version
+                 FROM ext_zallet_db_version_metadata
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("reads latest recorded Zallet version");
+        assert_eq!(
+            latest_version, PRIOR_ZALLET_VERSION,
+            "backend preflight failure must not run migrations or record this Zallet version",
+        );
     }
 }
