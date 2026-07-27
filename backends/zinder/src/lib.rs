@@ -1,10 +1,10 @@
-//! Unshippable P1 integration tracer for Zallet's Zinder client boundary.
+//! Unshippable P1 integration tracer for Zallet's Zinder chain backend.
 //!
-//! The frozen Zallet and Zinder dependency families cannot currently inhabit
-//! one Cargo graph. This crate therefore proves only the typed Zinder side of
-//! the boundary: opening a client, exact capability discovery, and typed
-//! recovery from an expired chain-epoch pin. It has no binary or launcher
-//! integration and is not a supported backend.
+//! The crate implements Zallet's complete [`zallet_core::components::chain`]
+//! interface while deliberately serving only the methods needed for a bounded
+//! shielded scan. Construction preflights that exact capability set. Methods
+//! assigned to later vertical slices fail explicitly instead of implying that
+//! the backend is ready to ship.
 
 #![deny(warnings, missing_docs, trivial_casts, unused_qualifications)]
 #![forbid(unsafe_code)]
@@ -13,6 +13,10 @@ use zinder_client::{
     Capability, EndpointBackedIndex, IndexerError, Network, RemoteChainIndex, RemoteOpenOptions,
     RetryPolicy,
 };
+
+mod chain;
+
+pub use chain::{ZinderBackend, ZinderChain, ZinderChainView};
 
 /// Capabilities required by Zallet's P1 bounded shielded scan.
 ///

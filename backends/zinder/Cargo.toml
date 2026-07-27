@@ -14,7 +14,40 @@ publish = false
 [workspace]
 
 [dependencies]
+zallet-core = { path = "../../zallet-core" }
+
+futures = "0.3"
+hex = "0.4"
+incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
+orchard = "0.15.0"
+sapling = { package = "sapling-crypto", version = "0.7" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+transparent = { package = "zcash_transparent", version = "0.9.0" }
+zcash_client_backend = "0.24.0-rc.1"
+zcash_primitives = "0.29.0"
+zcash_protocol = "0.10.1"
 zinder-client = { git = "https://github.com/gustavovalverde/zinder.git", rev = "71e20d481845c7df93eea67b3ccc89c3d4b9d4f2" }
+
+[patch.crates-io]
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
+
+[patch."https://github.com/zcash/librustzcash.git"]
+# The frozen git packages constrain zcash_protocol with `^0.10.0`, so the
+# published 0.10.1 patch release is source-compatible and also satisfies
+# Zinder's `^0.10.1` requirement. Replacing the git source's path package here
+# gives the graph one registry-owned protocol type.
+zcash_protocol = "0.10.1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
