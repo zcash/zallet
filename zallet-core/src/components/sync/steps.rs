@@ -7,7 +7,8 @@ use jsonrpsee::tracing::info;
 use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
 use zcash_client_backend::{
     data_api::{
-        BlockMetadata, WalletCommitmentTrees, WalletRead, WalletWrite, scanning::ScanRange,
+        BlockMetadata, WalletCommitmentTrees, WalletRead, WalletWrite, chain::ChainState,
+        scanning::ScanRange,
     },
     scanning::{
         Nullifiers,
@@ -120,6 +121,33 @@ fn clamp_to_boundary(
     }
 }
 
+/// Loads a predecessor tree state and a complete contiguous block range from one chain
+/// view.
+///
+/// The returned batch is all-or-nothing. If the view expires while its block stream is
+/// in flight, the partial vector is dropped with the error before any block is queued for
+/// decryption or written to the wallet database.
+async fn collect_block_range<V: ChainView>(
+    chain_view: &V,
+    range: &Range<BlockHeight>,
+) -> Result<Option<(ChainState, Vec<Block>)>, SyncError> {
+    let Some(from_state) = chain_view
+        .tree_state_as_of(range.start - 1)
+        .await
+        .map_err(SyncError::Chain)?
+    else {
+        return Ok(None);
+    };
+
+    let blocks = chain_view
+        .stream_blocks(range)
+        .try_collect()
+        .await
+        .map_err(SyncError::Chain)?;
+
+    Ok(Some((from_state, blocks)))
+}
+
 /// Scans a contiguous sequence of blocks in the main chain.
 pub(super) async fn scan_blocks<V: ChainView>(
     chain_view: V,
@@ -145,20 +173,16 @@ pub(super) async fn scan_blocks<V: ChainView>(
         scan_range
     };
 
-    // Ignore scan ranges beyond the end of the current chain tip (which indicates a race
-    // with a chain reorg).
-    if let Some(from_state) = chain_view
-        .tree_state_as_of(scan_range.block_range().start - 1)
-        .await
-        .map_err(SyncError::Chain)?
+    // Load the whole fixed-view batch before beginning decryption or database work. An
+    // expired view therefore discards every block collected from that view.
+    if let Some((from_state, blocks_to_apply)) =
+        collect_block_range(&chain_view, scan_range.block_range()).await?
     {
         info!("Scanning blocks {}", scan_range);
-        let blocks_to_apply = chain_view.stream_blocks(scan_range.block_range());
-        tokio::pin!(blocks_to_apply);
 
         // Queue the blocks for batch decryption.
         let mut batch = Vec::with_capacity(scan_range.len());
-        while let Some(block) = blocks_to_apply.try_next().await.map_err(SyncError::Chain)? {
+        for block in blocks_to_apply {
             let height = block.claimed_height();
             let result = decryptor
                 .queue_block(block)
@@ -352,6 +376,249 @@ mod tests {
         assert_eq!(
             clamp_to_boundary(&(h(150)..h(200)), Some(h(100))),
             ControlFlow::Break(h(100)),
+        );
+    }
+}
+
+#[cfg(test)]
+mod range_loading_tests {
+    use std::ops::Range;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use futures::{
+        StreamExt as _,
+        stream::{self, BoxStream},
+    };
+    use zcash_client_backend::data_api::{TransactionStatus, chain::ChainState};
+    use zcash_encoding::CompactSize;
+    use zcash_primitives::{
+        block::{Block, BlockHash, BlockHeader, BlockHeaderData},
+        transaction::{Authorized, Transaction, TransactionData, TxVersion},
+    };
+    use zcash_protocol::{
+        TxId,
+        consensus::{BlockHeight, BranchId, Network},
+    };
+
+    use super::collect_block_range;
+    #[cfg(feature = "spend-index")]
+    use crate::components::chain::SpendStatus;
+    use crate::components::chain::{BlockLocator, ChainBlock, ChainError, ChainTx, ChainView};
+    use crate::components::sync::SyncError;
+    #[cfg(not(feature = "spend-index"))]
+    use transparent::address::TransparentAddress;
+    #[cfg(feature = "spend-index")]
+    use transparent::bundle::OutPoint;
+    use transparent::{
+        builder::Coinbase,
+        bundle::{Bundle, TxIn},
+    };
+
+    #[derive(Clone)]
+    struct RangeView {
+        expires_during_stream: bool,
+        predecessor_was_read: Arc<AtomicBool>,
+    }
+
+    impl ChainView for RangeView {
+        async fn tip(&self) -> Result<ChainBlock, ChainError> {
+            Ok(ChainBlock::new(h(11), BlockHash([11; 32])))
+        }
+
+        async fn find_fork_point(
+            &self,
+            _locator: &BlockLocator,
+        ) -> Result<Option<ChainBlock>, ChainError> {
+            Ok(None)
+        }
+
+        async fn tree_state_as_of(
+            &self,
+            height: BlockHeight,
+        ) -> Result<Option<ChainState>, ChainError> {
+            self.predecessor_was_read.store(true, Ordering::SeqCst);
+            Ok(Some(ChainState::empty(height, BlockHash([9; 32]))))
+        }
+
+        async fn get_block_header(
+            &self,
+            _height: BlockHeight,
+        ) -> Result<Option<BlockHeader>, ChainError> {
+            Ok(None)
+        }
+
+        async fn get_block(&self, _height: BlockHeight) -> Result<Option<Block>, ChainError> {
+            Ok(None)
+        }
+
+        fn stream_blocks_to_tip(
+            &self,
+            _start: BlockHeight,
+        ) -> BoxStream<'_, Result<Block, ChainError>> {
+            stream::empty().boxed()
+        }
+
+        fn stream_blocks(
+            &self,
+            range: &Range<BlockHeight>,
+        ) -> BoxStream<'_, Result<Block, ChainError>> {
+            assert!(
+                self.predecessor_was_read.load(Ordering::SeqCst),
+                "the predecessor tree state must be read before the block range",
+            );
+
+            let first_block = Ok(block(range.start, 10));
+            if self.expires_during_stream {
+                stream::iter(vec![
+                    first_block,
+                    Err(ChainError::view_expired(
+                        "test view expired after its first block",
+                    )),
+                ])
+                .boxed()
+            } else {
+                stream::iter(vec![first_block, Ok(block(range.start + 1, 11))]).boxed()
+            }
+        }
+
+        async fn get_mempool_stream(
+            &self,
+        ) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+            Ok(None)
+        }
+
+        async fn get_transaction(&self, _txid: TxId) -> Result<Option<ChainTx>, ChainError> {
+            Ok(None)
+        }
+
+        async fn get_transaction_status(
+            &self,
+            _txid: TxId,
+        ) -> Result<TransactionStatus, ChainError> {
+            Ok(TransactionStatus::TxidNotRecognized)
+        }
+
+        #[cfg(feature = "spend-index")]
+        async fn outpoint_spend_status(
+            &self,
+            _outpoint: &OutPoint,
+        ) -> Result<SpendStatus, ChainError> {
+            Ok(SpendStatus::Unspent)
+        }
+
+        #[cfg(not(feature = "spend-index"))]
+        async fn get_address_unspent_outpoints(
+            &self,
+            _address: &TransparentAddress,
+        ) -> Result<Vec<(TxId, u32)>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        #[cfg(not(feature = "spend-index"))]
+        async fn get_address_tx_ids(
+            &self,
+            _address: &TransparentAddress,
+            _range: Range<BlockHeight>,
+        ) -> Result<Vec<TxId>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+        async fn block_height(&self, _hash: &BlockHash) -> Result<Option<BlockHeight>, ChainError> {
+            Ok(None)
+        }
+    }
+
+    fn h(height: u32) -> BlockHeight {
+        BlockHeight::from_u32(height)
+    }
+
+    fn block(height: BlockHeight, nonce: u8) -> Block {
+        let header = BlockHeaderData {
+            version: 4,
+            prev_block: BlockHash([nonce.saturating_sub(1); 32]),
+            merkle_root: [0; 32],
+            final_sapling_root: [0; 32],
+            time: 0,
+            bits: 0,
+            nonce: [nonce; 32],
+            solution: vec![],
+        }
+        .freeze()
+        .expect("test block header is structurally valid");
+        let coinbase_authorization = Coinbase;
+        let transparent_bundle = Bundle {
+            vin: vec![
+                TxIn::<Coinbase>::coinbase(height, None)
+                    .expect("test coinbase height is structurally valid"),
+            ],
+            vout: Vec::new(),
+            authorization: coinbase_authorization.clone(),
+        }
+        .map_authorization(coinbase_authorization);
+        let transaction = TransactionData::<Authorized>::from_parts(
+            TxVersion::suggested_for_branch(BranchId::Sprout),
+            BranchId::Sprout,
+            0,
+            height,
+            Some(transparent_bundle),
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .expect("test transaction is structurally valid");
+
+        let mut bytes = Vec::new();
+        header
+            .write(&mut bytes)
+            .expect("serializes the test block header");
+        CompactSize::write(&mut bytes, 1).expect("serializes the test transaction count");
+        transaction
+            .write(&mut bytes)
+            .expect("serializes the test coinbase transaction");
+
+        Block::read(bytes.as_slice(), &Network::MainNetwork)
+            .expect("test block is structurally valid")
+    }
+
+    #[tokio::test]
+    async fn expired_partial_range_is_discarded_before_a_fresh_view_succeeds() {
+        let range = h(10)..h(12);
+        let expired_predecessor_read = Arc::new(AtomicBool::new(false));
+        let expired_view = RangeView {
+            expires_during_stream: true,
+            predecessor_was_read: expired_predecessor_read.clone(),
+        };
+
+        let error = collect_block_range(&expired_view, &range)
+            .await
+            .expect_err("the first view expires before its range completes");
+        assert!(matches!(
+            error,
+            SyncError::Chain(ChainError::ViewExpired(_))
+        ));
+        assert!(
+            expired_predecessor_read.load(Ordering::SeqCst),
+            "the view must expire after serving the predecessor tree state",
+        );
+
+        let fresh_view = RangeView {
+            expires_during_stream: false,
+            predecessor_was_read: Arc::new(AtomicBool::new(false)),
+        };
+        let (from_state, blocks) = collect_block_range(&fresh_view, &range)
+            .await
+            .expect("the fresh view remains available")
+            .expect("the predecessor is within the fresh view");
+
+        assert_eq!(from_state.block_height(), h(9));
+        assert_eq!(
+            blocks.iter().map(Block::claimed_height).collect::<Vec<_>>(),
+            vec![h(10), h(11)],
         );
     }
 }

@@ -38,6 +38,9 @@ be considered breaking changes.
   before opening or migrating the wallet database. If startup exits or is cancelled,
   tasks started by the backend, RPC server, or wallet sync engine are cancelled
   instead of detached.
+- Chain backends can now report `ChainError::ViewExpired` when a fixed-history
+  view has been invalidated. Wallet sync reacquires a view only for this precise
+  condition instead of conflating it with general source unavailability.
 - `zallet rpc help` is now answered locally instead of being sent to the
   wallet's JSON-RPC server, so it no longer requires a config file, an
   initialized wallet, or a running `zallet start`. The command argument may
@@ -97,6 +100,10 @@ be considered breaking changes.
 
 ### Fixed
 
+- Wallet sync now loads a complete block range from one fixed-history view
+  before queueing decryption or database work. If the view expires partway
+  through the range, the partial batch is discarded and the entire range is
+  retried against a fresh view, including during history recovery.
 - A failure to service a single transaction data request (for example when the
   requested transaction was reorged away and the validator answers
   `RPC -5: No such mempool or main chain transaction`) no longer shuts the

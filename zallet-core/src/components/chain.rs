@@ -54,15 +54,14 @@ pub trait ChainFactory: Send + Sync + 'static {
     /// and by convention matches the `zallet-<NAME>` binary that ships the backend.
     const NAME: &'static str;
 
-    /// Connects to and structurally admits the chain-data source described by `config`,
-    /// returning the backend handle and the task driving its indexer.
+    /// Connects to the selected composition root described by `config`, runs that
+    /// factory's admission checks, and returns the backend handle and its runtime task.
     ///
-    /// `Ok` guarantees that backend-specific discovery has found every service and
-    /// capability required to implement this binary's complete [`Chain`] contract.
-    /// Factories must reject a partially usable composition with an initialization error.
-    /// This admission guarantee covers the composed service shape, not perpetual runtime
-    /// availability; individual chain operations can still fail. Consensus compatibility
-    /// is checked separately after construction.
+    /// `Ok` means the selected factory's declared construction requirements passed. It is
+    /// not blanket certification that every method in the shared [`Chain`] trait is
+    /// available, nor a guarantee of perpetual runtime availability. A composition root
+    /// must admit every operation its command will use before that command mutates durable
+    /// state. Consensus compatibility is checked separately after construction.
     fn build(
         &self,
         config: &ZalletConfig,
@@ -496,7 +495,10 @@ pub(crate) async fn check_consensus_compatibility(
 
 /// A consistent, reorg-immune view of the chain as of a fixed tip.
 ///
-/// A sequence of reads through one `ChainView` is mutually consistent.
+/// A sequence of successful reads through one `ChainView` is mutually consistent. An
+/// operation that detects the source can no longer uphold that contract must return
+/// [`ChainError::ViewExpired`]; callers then discard the whole view and reacquire one
+/// through [`Chain::snapshot`].
 pub trait ChainView: Clone + Send + Sync + 'static {
     /// Returns this view's chain tip.
     fn tip(&self) -> impl Future<Output = Result<ChainBlock, ChainError>> + Send;
