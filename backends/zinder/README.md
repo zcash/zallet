@@ -1,10 +1,10 @@
 # Zinder backend P1 compatibility tracer
 
 This directory is an unshippable integration tracer. It has no Zallet binary,
-launcher, configuration, or packaging integration. Its current purpose is to
-compile the frozen Zinder typed client and make the P1 capability and
-chain-epoch recovery contracts executable while a cross-repository dependency
-boundary is resolved.
+launcher, production configuration, or packaging integration. Its purpose is
+to prove one complete P1 vertical slice: Zallet's existing `Chain` and
+`ChainView` abstractions can perform an epoch-consistent bounded shielded scan
+through Zinder's native typed client.
 
 ## Frozen inputs
 
@@ -12,70 +12,88 @@ boundary is resolved.
 - Zinder: `71e20d481845c7df93eea67b3ccc89c3d4b9d4f2`
 - Zallet draft PR #591: `59b6415a` (comparison only)
 
-## Proven seam
+## Dependency graph
 
-With Rust 1.95, `zinder-client` exposes typed APIs for endpoint and network
-identity, network-upgrade activations, a visible tip, tree state, shielded
-subtree roots, individual full blocks, bounded full-block ranges, and
-chain-epoch pin expiry. P1 preflight requires those exact capabilities and
-reports the complete missing set. `CHAIN_EPOCH_PIN_UNAVAILABLE` maps to the
-client's `RefreshChainEpoch` policy, which requires discarding the expired
-snapshot and restarting the bounded scan from a fresh snapshot.
+The tracer uses Rust 1.95 because the frozen Zinder crates declare that MSRV.
+This does not require a root Zallet toolchain change: backend crates are
+independent workspaces, and the current Zallet core still compiles under the
+newer toolchain.
 
-## Blocking incompatibilities
+Zallet's frozen librustzcash packages remain at
+`0531f9d89450d5def16d4c320972e4ce960f9175`. The exception is the public
+`zcash_protocol` type boundary:
 
-The P1 `zallet_core::components::chain::{Chain, ChainView}` implementation
-cannot compile at the frozen revisions:
+- the `zcash_protocol` crates.io patch is intentionally omitted;
+- the frozen git source's path package is replaced with published
+  `zcash_protocol 0.10.1`; and
+- Zinder's `^0.10.1` dependency resolves to that same registry package.
 
-1. Zallet declares Rust 1.88. The frozen Zinder crates declare Rust 1.95, so
-   Cargo rejects `zinder-client`, `zinder-core`, and `zinder-proto` before
-   compilation under Zallet's toolchain.
-2. Zallet patches its librustzcash family to git revision
-   `0531f9d89450d5def16d4c320972e4ce960f9175`. Its path dependencies bring
-   `zcash_address` and `zcash_protocol` 0.10.0 from that git source. Zinder
-   uses the published `zcash_protocol` 0.10.1 family. Cargo treats the same
-   Rust types from those two sources as distinct; network, address, value, and
-   block types therefore cannot cross the graph.
-3. Removing Zallet's patches is not a workaround. Cargo then selects newer
-   release-candidate transitive crates, including `zcash_client_backend`
-   0.24.0-rc.4 and `zcash_primitives` 0.30.0, while the frozen Zallet code
-   targets the rc.1/0.29-era APIs. That graph fails with API and nominal-type
-   mismatches.
+The old packages constrain their path dependency with `^0.10.0`, so 0.10.1
+satisfies them without changing the rest of Zallet's librustzcash API
+generation. `cargo tree -i zcash_protocol@0.10.1` must show exactly one
+protocol package and source before this cutover is accepted.
 
-Selective patching cannot split the git workspace cleanly: patched Zallet
-crates retain path dependencies on the git-source address and protocol crates.
-Vendoring protobufs or introducing a second transport client would mask this
-incompatibility and create a competing public contract, so this tracer does
-neither.
+Moving the entire librustzcash family to the current `zcash_protocol-0.10.1`
+release commit (`033a0a9b8c32d82006d67984ed145f4827ca5219`) was tested and
+rejected. That revision is newer than Zallet's frozen API generation and
+requires the intervening lock and proposal API changes. Keeping two protocol
+sources, adding nominal-type conversion shims, vendoring protobufs, or adding
+a second transport would preserve the wrong boundary and are also rejected.
 
-## Required coordinated decision
+## P1 contract
 
-Before implementing `Chain` and `ChainView`, the repositories must share:
+Construction performs a real native `ServerInfo` request and refuses to start
+unless the endpoint advertises every P1 capability:
 
-- one supported Rust toolchain policy; and
-- one source and compatible version family for public librustzcash types.
+- server information;
+- network-upgrade activations;
+- visible-tip identity;
+- tree state;
+- Sapling and Orchard subtree roots;
+- Ironwood subtree roots;
+- individual full blocks; and
+- bounded full-block ranges.
 
-The preferred cutover is to move Zallet to Rust 1.95 and a librustzcash
-revision or release family compatible with the frozen Zinder client, then
-re-run this tracer as a joint Cargo graph. Lowering Zinder's toolchain and
-dependency family is an alternative only if Zinder can still satisfy its
-workspace and release requirements. The boundary should be fixed at the
-dependency source rather than bridged with conversion shims.
+The implementation maps Zallet's half-open ranges to Zinder's inclusive
+ranges, clamps every stream to the captured tip, decodes Sapling, Orchard, and
+Ironwood frontiers and subtree roots, and parses retained consensus block
+bytes with Zallet's configured network parameters.
 
-Once those prerequisites compile, the next tracer increment implements only
-the P1 `Chain` and fixed `ChainView` paths. Transparent history, mempool
-observation, and broadcast remain explicitly out of scope.
+Each `ZinderChainView` owns one `OwnedChainSnapshot`. A
+`CHAIN_EPOCH_PIN_UNAVAILABLE` error becomes `ChainError::Unavailable`; Zallet
+must discard that whole view and capture a new one. The adapter never retries
+one read against a different chain epoch.
 
-## Reproduction
+Transaction broadcast, mempool observation, transaction lookup, and
+transparent history are assigned to later vertical slices. Their required
+trait methods return explicit P1-scope errors.
 
-The typed-client seam passes with:
+## Gate A
+
+Unit and compile-time contract tests cover capability selection, range
+translation, tree-state decoding, P1-only failures, and typed epoch expiry.
+They do not certify the production consumer. Gate A additionally requires a
+real bounded Zallet scan through a current Zinder runtime:
+
+1. Start a Zinder composition that advertises the exact P1 capability set and
+   retains raw blocks.
+2. Construct `ZinderBackend` with that endpoint and the matching Zallet
+   network.
+3. Run Zallet's existing subtree-root update, snapshot, predecessor tree-state
+   read, and bounded full-block scan path.
+4. Verify the applied range is complete and pinned to one chain epoch.
+5. Expire that epoch and verify Zallet abandons the view rather than mixing
+   results across epochs.
+
+The focused local checks are:
 
 ```console
-cargo +1.95.0 test --manifest-path backends/zinder/Cargo.toml --all-targets --all-features
+cargo +1.95.0 fmt --manifest-path backends/zinder/Cargo.toml -- --check
+cargo +1.95.0 test --manifest-path backends/zinder/Cargo.toml --all-targets
+cargo +1.95.0 check --manifest-path backends/zinder/Cargo.toml --all-targets
+cargo +1.95.0 clippy --manifest-path backends/zinder/Cargo.toml --all-targets -- -D warnings
+cargo +1.95.0 tree --manifest-path backends/zinder/Cargo.toml -i zcash_protocol@0.10.1
 ```
 
-The Zallet toolchain incompatibility is reproduced with:
-
-```console
-cargo +1.88.0 check --manifest-path backends/zinder/Cargo.toml --all-targets --all-features
-```
+Passing these checks is necessary but does not replace the real-consumer Gate
+A scan.
