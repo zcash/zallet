@@ -275,7 +275,7 @@ impl<R: ChainReader> ZebraChainView<R> {
                 .block_header_by_hash(cur_hash)
                 .await?
                 .ok_or_else(|| {
-                    ChainError::unavailable("pinned block reorged away during resolve")
+                    ChainError::view_expired("pinned block reorged away during resolve")
                 })?;
             cur_hash = header.previous_block_hash;
             cur_height = BlockHeight::from_u32(u32::from(cur_height) - 1);
@@ -339,7 +339,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
             }
             None if pinned_finalized => CommitmentTree::empty(),
             None => {
-                return Err(ChainError::unavailable(
+                return Err(ChainError::view_expired(
                     "pinned sapling treestate reorged away",
                 ));
             }
@@ -355,7 +355,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
             .map_err(ChainError::invalid_data)?,
             None if pinned_finalized => CommitmentTree::empty(),
             None => {
-                return Err(ChainError::unavailable(
+                return Err(ChainError::view_expired(
                     "pinned orchard treestate reorged away",
                 ));
             }
@@ -373,7 +373,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
             .map_err(ChainError::invalid_data)?,
             None if pinned_finalized => CommitmentTree::empty(),
             None => {
-                return Err(ChainError::unavailable(
+                return Err(ChainError::view_expired(
                     "pinned ironwood treestate reorged away",
                 ));
             }
