@@ -4026,7 +4026,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4849,7 +4849,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5566,7 +5566,7 @@ dependencies = [
 [[package]]
 name = "zinder-client"
 version = "0.5.0-rc.8"
-source = "git+https://github.com/gustavovalverde/zinder.git?rev=71e20d481845c7df93eea67b3ccc89c3d4b9d4f2#71e20d481845c7df93eea67b3ccc89c3d4b9d4f2"
+source = "git+https://github.com/gustavovalverde/zinder.git?rev=479805765d4c277115e534bf26f0a3ed6144bb73#479805765d4c277115e534bf26f0a3ed6144bb73"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5584,7 +5584,7 @@ dependencies = [
 [[package]]
 name = "zinder-core"
 version = "0.5.0-rc.8"
-source = "git+https://github.com/gustavovalverde/zinder.git?rev=71e20d481845c7df93eea67b3ccc89c3d4b9d4f2#71e20d481845c7df93eea67b3ccc89c3d4b9d4f2"
+source = "git+https://github.com/gustavovalverde/zinder.git?rev=479805765d4c277115e534bf26f0a3ed6144bb73#479805765d4c277115e534bf26f0a3ed6144bb73"
 dependencies = [
  "blake2b_simd",
  "hex",
@@ -5598,7 +5598,7 @@ dependencies = [
 [[package]]
 name = "zinder-proto"
 version = "0.5.0-rc.8"
-source = "git+https://github.com/gustavovalverde/zinder.git?rev=71e20d481845c7df93eea67b3ccc89c3d4b9d4f2#71e20d481845c7df93eea67b3ccc89c3d4b9d4f2"
+source = "git+https://github.com/gustavovalverde/zinder.git?rev=479805765d4c277115e534bf26f0a3ed6144bb73#479805765d4c277115e534bf26f0a3ed6144bb73"
 dependencies = [
  "prost",
  "thiserror 2.0.19",

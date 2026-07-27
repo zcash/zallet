@@ -11,7 +11,7 @@ behavior needed by `zallet start`.
 
 - Zallet base: `4d28731dcf33df00f86762d1bfd455943db5819c`
 - P1 Zallet core integration: `c1513772e0ecde73589be23e54d8b9169b170ad3`
-- Pinned Zinder client: `71e20d481845c7df93eea67b3ccc89c3d4b9d4f2`
+- Pinned Zinder client: `479805765d4c277115e534bf26f0a3ed6144bb73`
 - Zallet draft PR #591: `59b6415a` (comparison only)
 
 ## Dependency graph
