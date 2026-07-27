@@ -489,7 +489,10 @@ pub(crate) async fn check_consensus_compatibility(
 
 /// A consistent, reorg-immune view of the chain as of a fixed tip.
 ///
-/// A sequence of reads through one `ChainView` is mutually consistent.
+/// A sequence of successful reads through one `ChainView` is mutually consistent. An
+/// operation that detects the source can no longer uphold that contract must return
+/// [`ChainError::ViewExpired`]; callers then discard the whole view and reacquire one
+/// through [`Chain::snapshot`].
 pub trait ChainView: Clone + Send + Sync + 'static {
     /// Returns this view's chain tip.
     fn tip(&self) -> impl Future<Output = Result<ChainBlock, ChainError>> + Send;

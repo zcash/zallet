@@ -21,6 +21,13 @@ should be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- Chain backends can now report `ChainError::ViewExpired` when a fixed-history
+  view has been invalidated. Wallet sync reacquires a view only for this
+  precise condition instead of conflating it with general source
+  unavailability.
+
 ## [0.1.0-beta.2] - 2026-07-28
 
 ### Changed

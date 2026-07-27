@@ -255,7 +255,10 @@ async fn initialize<C: Chain>(
 ) -> Result<(ChainBlock, BlockHeight), SyncError> {
     info!("Initializing wallet for syncing");
 
-    // Notify the wallet of the current subtree roots.
+    // Notify the wallet of the current subtree roots. These append-only roots are keyed by
+    // their subtree index, and this update happens before any chain view is captured. A
+    // later view-expiry retry therefore neither rolls them back nor mixes them into a pinned
+    // block batch.
     steps::update_subtree_roots(chain, db_data).await?;
 
     // Perform initial scanning prior to firing off the main tasks:
@@ -272,6 +275,9 @@ async fn initialize<C: Chain>(
         let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
         let current_tip = chain_view.tip().await.map_err(SyncError::Chain)?;
         info!("Latest block height is {}", current_tip.height());
+        // This reported-tip write can repeat after a view expires. `update_chain_tip` is
+        // idempotent for an unchanged height and only updates scan scheduling; the block
+        // batch itself is committed later, all at once, by `scan_blocks`.
         db_data.update_chain_tip(current_tip.height())?;
 
         // Set the starting boundary between the `steady_state` and `recover_history` tasks.
@@ -354,17 +360,16 @@ async fn initialize<C: Chain>(
                 break (current_tip, starting_boundary);
             }
             Ok(_) => {}
-            // A stale-view error here means the initial "Verify"/catch-up scan captured
-            // a snapshot referencing a non-finalized block that was reorged away before
-            // it could be read — the same transient condition `steady_state` already
-            // tolerates (see `is_retryable`). Unlike `steady_state`'s loop, this one has
-            // no built-in retry, so without this it crashed the whole wallet on startup
-            // whenever a reorg happened to be in progress right as it started.
-            Err(error) if is_retryable(&error) => {
+            // An expired view can no longer uphold its fixed-history contract. `scan_blocks`
+            // commits only after loading and decrypting its complete range, so discarding the
+            // view here cannot leave a partial block batch in the wallet. The next loop
+            // iteration captures a fresh view, re-reports its tip idempotently, and derives a
+            // new range from the resulting wallet state.
+            Err(error) if is_view_expired(&error) => {
                 warn!(
-                    "Chain view became stale during initial scan, re-pinning to the current tip: {error}"
+                    "Chain view expired during initial scan, reacquiring the current view: {error}"
                 );
-                time::sleep(REORG_RETRY_BACKOFF).await;
+                time::sleep(VIEW_REACQUISITION_BACKOFF).await;
             }
             Err(error) => return Err(error),
         }
@@ -377,16 +382,13 @@ async fn initialize<C: Chain>(
     Ok((current_tip, starting_boundary))
 }
 
-/// How long to wait before re-pinning the chain view after a stale-view error, so a
-/// backend that is briefly unable to serve reads (still syncing its non-finalized state,
-/// or a reorg in progress) is not polled in a tight loop.
-const REORG_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+/// How long to wait before reacquiring an expired chain view, so a source that is still
+/// converging on its current history is not polled in a tight loop.
+const VIEW_REACQUISITION_BACKOFF: Duration = Duration::from_millis(200);
 
-/// Whether a sync error reflects a chain view that went stale mid-read — the captured
-/// snapshot referenced a non-finalized block that was reorged away — and so should be
-/// retried by re-pinning to the current tip, rather than propagated as fatal.
-fn is_retryable(error: &SyncError) -> bool {
-    matches!(error, SyncError::Chain(ChainError::Unavailable(_)))
+/// Whether sync must discard the current chain view and reacquire a fresh fixed history.
+fn is_view_expired(error: &SyncError) -> bool {
+    matches!(error, SyncError::Chain(ChainError::ViewExpired(_)))
 }
 
 /// How far back to step each time the wallet's recorded history is found to be off the
@@ -537,13 +539,12 @@ async fn steady_state<C: Chain>(
                 return Ok(());
             }
             Err(error) => {
-                // A stale-view error means the captured snapshot referenced a non-finalized
-                // block that was reorged away mid-read. Discard the view, pause briefly, and
-                // loop to re-pin to the current tip. Progress already committed to the wallet
-                // (and recorded in `prev_tip`) is preserved across the retry.
-                if is_retryable(&error) {
-                    warn!("Chain view became stale, re-pinning to the current tip: {error}");
-                    time::sleep(REORG_RETRY_BACKOFF).await;
+                // An expired view can no longer serve its fixed history. Discard it, pause
+                // briefly, and loop to reacquire the current view. Progress already committed
+                // to the wallet (and recorded in `prev_tip`) is preserved across the retry.
+                if is_view_expired(&error) {
+                    warn!("Chain view expired, reacquiring the current view: {error}");
+                    time::sleep(VIEW_REACQUISITION_BACKOFF).await;
                     continue;
                 }
                 // A block conflict means the backend's best chain reorged away the block
@@ -770,18 +771,30 @@ async fn recover_history<C: Chain>(
                 }
             })
         }) {
-            let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
-            if steps::scan_blocks(
-                chain_view,
-                db_data,
-                params,
-                &scan_range,
-                &decryptor,
-                shutdown_height,
-            )
-            .await?
-            .is_break()
-            {
+            let scan_flow = loop {
+                let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
+                match steps::scan_blocks(
+                    chain_view,
+                    db_data,
+                    params,
+                    &scan_range,
+                    &decryptor,
+                    shutdown_height,
+                )
+                .await
+                {
+                    Err(error) if is_view_expired(&error) => {
+                        warn!(
+                            "Chain view expired during history recovery; \
+                             reacquiring it before retrying the entire range: {error}"
+                        );
+                        time::sleep(VIEW_REACQUISITION_BACKOFF).await;
+                    }
+                    result => break result?,
+                }
+            };
+
+            if scan_flow.is_break() {
                 // Reached the consensus-divergence height. History recovery operates below
                 // the boundary in practice, so this is belt-and-suspenders; stop scanning
                 // this range and let the next loop re-evaluate.
@@ -1030,8 +1043,12 @@ async fn batch_decryptor(
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainError, SyncError, is_retryable, rewind_step, select_initial_scan_range};
-    use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
+    use super::{ChainError, SyncError, is_view_expired, rewind_step, select_initial_scan_range};
+    use crate::{components::database::Database, config::ZalletConfig};
+    use zcash_client_backend::data_api::{
+        WalletRead, WalletWrite,
+        scanning::{ScanPriority, ScanRange},
+    };
     use zcash_protocol::consensus::BlockHeight;
 
     fn h(height: u32) -> BlockHeight {
@@ -1040,6 +1057,40 @@ mod tests {
 
     fn range(start: u32, end: u32, priority: ScanPriority) -> ScanRange {
         ScanRange::from_parts(h(start)..h(end), priority)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeating_the_reported_tip_before_scanning_is_idempotent() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates a wallet database");
+        let mut wallet = database.handle().await.expect("opens the wallet database");
+        let reported_tip = h(42);
+
+        wallet
+            .update_chain_tip(reported_tip)
+            .expect("records the reported tip");
+        let scan_ranges_after_first_report = wallet
+            .suggest_scan_ranges()
+            .expect("reads scan ranges after the first report");
+
+        wallet
+            .update_chain_tip(reported_tip)
+            .expect("repeats the same reported tip");
+
+        assert_eq!(
+            wallet
+                .suggest_scan_ranges()
+                .expect("reads scan ranges after the repeated report"),
+            scan_ranges_after_first_report,
+        );
     }
 
     // The #636 repro: the wallet DB has recorded a higher chain tip than the current
@@ -1156,21 +1207,24 @@ mod tests {
     }
 
     #[test]
-    fn stale_view_errors_are_retryable() {
-        assert!(is_retryable(&SyncError::Chain(ChainError::unavailable(
-            "pinned block reorged away",
-        ))));
+    fn expired_views_are_reacquired() {
+        assert!(is_view_expired(&SyncError::Chain(
+            ChainError::view_expired("pinned block reorged away"),
+        )));
     }
 
     #[test]
-    fn other_errors_are_fatal() {
-        assert!(!is_retryable(&SyncError::Chain(ChainError::backend(
+    fn other_errors_do_not_trigger_view_reacquisition() {
+        assert!(!is_view_expired(&SyncError::Chain(
+            ChainError::unavailable("temporarily busy"),
+        )));
+        assert!(!is_view_expired(&SyncError::Chain(ChainError::backend(
             "boom"
         ))));
-        assert!(!is_retryable(&SyncError::Chain(ChainError::invalid_data(
-            "bad bytes",
-        ))));
-        assert!(!is_retryable(&SyncError::BatchDecryptorUnavailable));
+        assert!(!is_view_expired(&SyncError::Chain(
+            ChainError::invalid_data("bad bytes"),
+        )));
+        assert!(!is_view_expired(&SyncError::BatchDecryptorUnavailable));
     }
 
     #[cfg(not(feature = "spend-index"))]

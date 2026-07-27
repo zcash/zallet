@@ -11,11 +11,18 @@ type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ChainError {
+    /// The source can no longer serve the fixed chain history represented by a
+    /// [`ChainView`](super::ChainView).
+    ///
+    /// The caller must discard the entire view and reacquire one through
+    /// [`Chain::snapshot`](super::Chain::snapshot). Retrying an individual operation
+    /// against the expired view cannot restore its consistency guarantee.
+    ViewExpired(BoxError),
     /// The chain source is temporarily unable to serve the request; retrying later may
     /// succeed (transient transport failure, the backend is still syncing, work queue full).
     ///
-    /// Constructed by alternative backends that can distinguish retryable failures; the
-    /// Zaino backend currently classifies all opaque failures as [`ChainError::Backend`].
+    /// This does not invalidate an otherwise-consistent [`ChainView`](super::ChainView).
+    /// Backends must use [`ChainError::ViewExpired`] when retrying requires a fresh view.
     #[allow(dead_code)]
     Unavailable(BoxError),
     /// The chain source returned data that could not be decoded, or that violated an
@@ -28,6 +35,11 @@ pub enum ChainError {
 }
 
 impl ChainError {
+    /// Wraps an error that invalidated the current [`ChainView`](super::ChainView).
+    pub fn view_expired(source: impl Into<BoxError>) -> Self {
+        ChainError::ViewExpired(source.into())
+    }
+
     /// Wraps an arbitrary error as a [`ChainError::Backend`].
     pub fn backend(source: impl Into<BoxError>) -> Self {
         ChainError::Backend(source.into())
@@ -49,6 +61,7 @@ impl ChainError {
 impl fmt::Display for ChainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ChainError::ViewExpired(e) => write!(f, "chain view expired: {e}"),
             ChainError::Unavailable(e) => write!(f, "chain source unavailable: {e}"),
             ChainError::InvalidData(e) => write!(f, "chain source returned invalid data: {e}"),
             ChainError::Backend(e) => write!(f, "chain backend error: {e}"),
@@ -59,9 +72,10 @@ impl fmt::Display for ChainError {
 impl std::error::Error for ChainError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            ChainError::Unavailable(e) | ChainError::InvalidData(e) | ChainError::Backend(e) => {
-                Some(e.as_ref())
-            }
+            ChainError::ViewExpired(e)
+            | ChainError::Unavailable(e)
+            | ChainError::InvalidData(e)
+            | ChainError::Backend(e) => Some(e.as_ref()),
         }
     }
 }
