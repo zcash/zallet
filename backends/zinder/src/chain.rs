@@ -41,19 +41,19 @@ use zcash_protocol::{
     consensus::{self, BlockHeight},
 };
 use zinder_client::{
-    BlockHash as ZinderBlockHash, BlockHeight as ZinderBlockHeight,
-    BlockHeightRange as ZinderBlockHeightRange, BlockId as ZinderBlockId,
-    BlockSelector as ZinderBlockSelector, ChainIndex, IndexerError, Network as ZinderNetwork,
+    BlockHeight as ZinderBlockHeight, BlockHeightRange as ZinderBlockHeightRange,
+    BlockId as ZinderBlockId, Capability, ChainIndex, IndexerError, Network as ZinderNetwork,
     OwnedChainSnapshot, RemoteChainIndex, RetryPolicy, ShieldedProtocol, SubtreeRootArtifact,
     SubtreeRootIndex, SubtreeRootRange, TreeStateArtifact,
 };
 
-use crate::{open_zinder_index, probe_missing_p1_scan_capabilities};
+use crate::{open_zinder_index, probe_missing_bounded_scan_capabilities};
 
-/// Factory for the P1 Zinder chain backend tracer.
+/// Factory-shaped entry point for the P1 Zinder chain backend tracer.
 ///
 /// The endpoint is supplied by the composition root rather than added to
-/// Zallet's production configuration before the backend is ready to ship.
+/// Zallet's production configuration. This type is not registered by a Zallet
+/// binary and does not make the tracer a production backend.
 #[derive(Clone)]
 pub struct ZinderBackend {
     endpoint: String,
@@ -95,26 +95,19 @@ pub struct ZinderChain {
 }
 
 impl ZinderChain {
-    /// Connects to Zinder and verifies the complete P1 scan contract.
+    /// Connects to Zinder and verifies the exact P1 bounded-scan contract.
     ///
     /// Construction performs a real `ServerInfo` request so an unreachable
     /// endpoint, network mismatch, or incomplete capability set fails before
-    /// Zallet opens its wallet database.
+    /// this function returns a chain value.
     pub async fn connect(endpoint: String, params: Network) -> Result<Self, Error> {
         let index = open_zinder_index(endpoint, zinder_network(params)).map_err(init_error)?;
-        let missing = probe_missing_p1_scan_capabilities(&index)
+        let missing = probe_missing_bounded_scan_capabilities(&index)
             .await
             .map_err(init_error)?;
         if !missing.is_empty() {
-            let names = missing
-                .iter()
-                .map(|capability| capability.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
             return Err(ErrorKind::Init
-                .context(format!(
-                    "Zinder endpoint is missing P1 scan capabilities: {names}"
-                ))
+                .context(bounded_scan_preflight_message(&missing))
                 .into());
         }
 
@@ -185,7 +178,7 @@ impl Chain for ZinderChain {
     }
 
     async fn broadcast_transaction(&self, _tx: &Transaction) -> Result<(), ChainError> {
-        Err(method_outside_p1("broadcast_transaction"))
+        Err(unsupported_by_bounded_scan_tracer("broadcast_transaction"))
     }
 
     async fn get_sapling_subtree_roots(
@@ -237,9 +230,9 @@ impl Chain for ZinderChain {
 
 /// A cloneable Zinder chain view pinned to one retained chain epoch.
 ///
-/// An expired epoch is reported as [`ChainError::Unavailable`]. The caller
-/// must discard the entire view and capture a fresh one; individual requests
-/// are never silently moved onto a different canonical history.
+/// An expired epoch is reported as [`ChainError::Unavailable`] with the
+/// original [`IndexerError::ChainEpochPinUnavailable`] retained as its source.
+/// This adapter never silently moves a request onto a different chain epoch.
 #[derive(Clone)]
 pub struct ZinderChainView {
     snapshot: OwnedChainSnapshot<RemoteChainIndex>,
@@ -254,18 +247,9 @@ impl ChainView for ZinderChainView {
 
     async fn find_fork_point(
         &self,
-        locator: &BlockLocator,
+        _locator: &BlockLocator,
     ) -> Result<Option<ChainBlock>, ChainError> {
-        for hash in locator.hashes() {
-            let selector = ZinderBlockSelector::from_hash(ZinderBlockHash::from_bytes(hash.0));
-            match self.snapshot.block_id_by_selector(selector).await {
-                Ok(block) => return Ok(Some(chain_block(block))),
-                Err(IndexerError::NotFound { .. }) => {}
-                Err(error) => return Err(chain_error(error)),
-            }
-        }
-
-        Ok(None)
+        Err(unsupported_by_bounded_scan_tracer("find_fork_point"))
     }
 
     async fn tree_state_as_of(
@@ -286,18 +270,9 @@ impl ChainView for ZinderChainView {
 
     async fn get_block_header(
         &self,
-        height: BlockHeight,
+        _height: BlockHeight,
     ) -> Result<Option<BlockHeader>, ChainError> {
-        self.full_block_bytes(height)
-            .await?
-            .map(|bytes| {
-                BlockHeader::read(bytes.as_slice()).map_err(|error| {
-                    invalid_data(format!(
-                        "invalid full-block header at height {height}: {error}"
-                    ))
-                })
-            })
-            .transpose()
+        Err(unsupported_by_bounded_scan_tracer("get_block_header"))
     }
 
     async fn get_block(&self, height: BlockHeight) -> Result<Option<Block>, ChainError> {
@@ -307,8 +282,11 @@ impl ChainView for ZinderChainView {
             .transpose()
     }
 
-    fn stream_blocks_to_tip(&self, start: BlockHeight) -> BoxStream<'_, Result<Block, ChainError>> {
-        self.stream_blocks_inclusive(start, self.tip.height())
+    fn stream_blocks_to_tip(
+        &self,
+        _start: BlockHeight,
+    ) -> BoxStream<'_, Result<Block, ChainError>> {
+        unsupported_stream_by_bounded_scan_tracer("stream_blocks_to_tip")
     }
 
     fn stream_blocks(
@@ -323,22 +301,24 @@ impl ChainView for ZinderChainView {
     }
 
     async fn get_mempool_stream(&self) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
-        Err(method_outside_p1("get_mempool_stream"))
+        Err(unsupported_by_bounded_scan_tracer("get_mempool_stream"))
     }
 
     async fn get_transaction(&self, _txid: TxId) -> Result<Option<ChainTx>, ChainError> {
-        Err(method_outside_p1("get_transaction"))
+        Err(unsupported_by_bounded_scan_tracer("get_transaction"))
     }
 
     async fn get_transaction_status(&self, _txid: TxId) -> Result<TransactionStatus, ChainError> {
-        Err(method_outside_p1("get_transaction_status"))
+        Err(unsupported_by_bounded_scan_tracer("get_transaction_status"))
     }
 
     async fn get_address_unspent_outpoints(
         &self,
         _address: &TransparentAddress,
     ) -> Result<Vec<(TxId, u32)>, ChainError> {
-        Err(method_outside_p1("get_address_unspent_outpoints"))
+        Err(unsupported_by_bounded_scan_tracer(
+            "get_address_unspent_outpoints",
+        ))
     }
 
     async fn get_address_tx_ids(
@@ -346,7 +326,7 @@ impl ChainView for ZinderChainView {
         _address: &TransparentAddress,
         _range: Range<BlockHeight>,
     ) -> Result<Vec<TxId>, ChainError> {
-        Err(method_outside_p1("get_address_tx_ids"))
+        Err(unsupported_by_bounded_scan_tracer("get_address_tx_ids"))
     }
 }
 
@@ -361,21 +341,6 @@ impl ZinderChainView {
             Err(IndexerError::NotFound { .. }) => Ok(None),
             Err(error) => Err(chain_error(error)),
         }
-    }
-
-    fn stream_blocks_inclusive(
-        &self,
-        start: BlockHeight,
-        end: BlockHeight,
-    ) -> BoxStream<'_, Result<Block, ChainError>> {
-        if start > end {
-            return stream::empty().boxed();
-        }
-
-        self.stream_zinder_range(ZinderBlockHeightRange::inclusive(
-            zinder_height(start),
-            zinder_height(end),
-        ))
     }
 
     fn stream_zinder_range(
@@ -395,6 +360,31 @@ impl ZinderChainView {
             })
             .boxed()
     }
+}
+
+fn bounded_scan_preflight_message(missing: &[Capability]) -> String {
+    let missing_names = missing
+        .iter()
+        .map(Capability::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut preflight_error =
+        format!("Zinder endpoint is missing bounded-scan capabilities: {missing_names}");
+
+    if missing.iter().any(|capability| {
+        matches!(
+            capability,
+            Capability::FullBlock | Capability::FullBlockRange
+        )
+    }) {
+        preflight_error.push_str(
+            "; full-block reads require raw_blob_policy=all for Zinder ingest and query; \
+             rebuild the canonical store under that policy and cut over with a blue-green \
+             replacement because retention cannot be upgraded in place",
+        );
+    }
+
+    preflight_error
 }
 
 fn zinder_network(params: Network) -> ZinderNetwork {
@@ -608,20 +598,15 @@ fn init_error(error: IndexerError) -> Error {
 }
 
 fn chain_error(error: IndexerError) -> ChainError {
-    if matches!(
-        &error,
-        IndexerError::DataLoss { .. }
-            | IndexerError::MalformedResponse { .. }
-            | IndexerError::NetworkMismatch { .. }
-    ) {
-        ChainError::invalid_data(error)
-    } else if matches!(
-        error.retry_policy(),
-        RetryPolicy::RefreshChainEpoch | RetryPolicy::RetryWithBackoff
-    ) {
-        ChainError::unavailable(error)
-    } else {
-        ChainError::backend(error)
+    match error {
+        error @ IndexerError::ChainEpochPinUnavailable => ChainError::unavailable(error),
+        error @ (IndexerError::DataLoss { .. }
+        | IndexerError::MalformedResponse { .. }
+        | IndexerError::NetworkMismatch { .. }) => ChainError::invalid_data(error),
+        error if error.retry_policy() == RetryPolicy::RetryWithBackoff => {
+            ChainError::unavailable(error)
+        }
+        error => ChainError::backend(error),
     }
 }
 
@@ -633,19 +618,26 @@ fn invalid_data(message: impl Into<String>) -> ChainError {
     ChainError::invalid_data(io::Error::new(io::ErrorKind::InvalidData, message.into()))
 }
 
-fn method_outside_p1(method: &'static str) -> ChainError {
+fn unsupported_by_bounded_scan_tracer(method: &'static str) -> ChainError {
     ChainError::backend(io::Error::new(
         io::ErrorKind::Unsupported,
-        format!("{method} is outside the P1 bounded-scan backend contract"),
+        format!("{method} is unsupported by the bounded-scan tracer"),
     ))
+}
+
+fn unsupported_stream_by_bounded_scan_tracer(
+    method: &'static str,
+) -> BoxStream<'static, Result<Block, ChainError>> {
+    stream::once(async move { Err(unsupported_by_bounded_scan_tracer(method)) }).boxed()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zinder_client::BlockHash as ZinderBlockHash;
 
     #[test]
-    fn zinder_types_implement_the_zallet_chain_contract() {
+    fn zinder_types_satisfy_chain_trait_bounds() {
         fn assert_chain<T: Chain>() {}
         fn assert_chain_view<T: ChainView>() {}
 
@@ -679,6 +671,24 @@ mod tests {
             zinder_range_from_half_open(&above_tip, BlockHeight::from_u32(14)),
             None
         );
+    }
+
+    #[test]
+    fn missing_full_blocks_explain_retention_rebuild_and_cutover() {
+        let message =
+            bounded_scan_preflight_message(&[Capability::FullBlock, Capability::FullBlockRange]);
+
+        assert!(message.contains("raw_blob_policy=all"));
+        assert!(message.contains("rebuild the canonical store"));
+        assert!(message.contains("blue-green replacement"));
+    }
+
+    #[test]
+    fn non_retention_capability_failure_omits_store_rebuild_guidance() {
+        let message = bounded_scan_preflight_message(&[Capability::NetworkUpgradeActivations]);
+
+        assert!(!message.contains("raw_blob_policy"));
+        assert!(!message.contains("blue-green"));
     }
 
     #[test]
@@ -737,18 +747,47 @@ mod tests {
     }
 
     #[test]
-    fn expired_snapshot_requires_a_new_chain_view() {
+    fn expired_snapshot_retains_the_typed_zinder_error() {
+        let ChainError::Unavailable(source) = chain_error(IndexerError::ChainEpochPinUnavailable)
+        else {
+            panic!("chain epoch pin expiry must remain an unavailable error");
+        };
+
         assert!(matches!(
-            chain_error(IndexerError::ChainEpochPinUnavailable),
-            ChainError::Unavailable(_)
+            source.downcast_ref::<IndexerError>(),
+            Some(IndexerError::ChainEpochPinUnavailable)
         ));
     }
 
     #[test]
-    fn p2_method_is_an_explicit_backend_error() {
-        assert!(matches!(
-            method_outside_p1("broadcast_transaction"),
-            ChainError::Backend(_)
-        ));
+    fn whole_sync_methods_are_explicit_unsupported_errors() {
+        for method in [
+            "find_fork_point",
+            "get_block_header",
+            "stream_blocks_to_tip",
+        ] {
+            let ChainError::Backend(source) = unsupported_by_bounded_scan_tracer(method) else {
+                panic!("whole-sync methods must remain backend errors");
+            };
+            let error = source
+                .downcast_ref::<io::Error>()
+                .expect("whole-sync method error must retain its unsupported I/O kind");
+
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+            assert_eq!(
+                error.to_string(),
+                format!("{method} is unsupported by the bounded-scan tracer")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_to_tip_reports_one_explicit_error() {
+        let items = unsupported_stream_by_bounded_scan_tracer("stream_blocks_to_tip")
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], Err(ChainError::Backend(_))));
     }
 }
