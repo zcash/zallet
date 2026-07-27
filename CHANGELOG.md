@@ -25,6 +25,19 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- `zallet start` now completes chain-backend construction and consensus checks
+  before opening or migrating the wallet database. If startup exits or is
+  cancelled, tasks started by the backend, RPC server, or wallet sync engine
+  are cancelled instead of detached.
+
+### Fixed
+
+- `zallet start` now returns a failure when a supervised runtime task returns
+  an error. Previously the first task exit was converted to a successful
+  process result.
+
 ## [0.1.0-beta.2] - 2026-07-28
 
 ### Added
@@ -74,10 +87,6 @@ be considered breaking changes.
 ### Changed
 
 - MSRV updated to 1.95.
-- `zallet start` now completes chain-backend construction and consensus checks
-  before opening or migrating the wallet database. If startup exits or is cancelled,
-  tasks started by the backend, RPC server, or wallet sync engine are cancelled
-  instead of detached.
 - `zallet rpc help` is now answered locally instead of being sent to the
   wallet's JSON-RPC server, so it no longer requires a config file, an
   initialized wallet, or a running `zallet start`. The command argument may
