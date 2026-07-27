@@ -78,7 +78,7 @@ mod error;
 pub(crate) use error::SyncError;
 
 mod locator;
-mod steps;
+pub(super) mod steps;
 
 #[derive(Debug)]
 pub(crate) struct WalletSync {}
@@ -300,7 +300,12 @@ async fn initialize<C: Chain>(
     // their subtree index, and this update happens before any chain view is captured. A
     // later view-expiry retry therefore neither rolls them back nor mixes them into a pinned
     // block batch.
-    steps::update_subtree_roots(chain, db_data).await?;
+    let subtree_root_counts = steps::update_subtree_roots(chain, db_data).await?;
+    let _ = (
+        subtree_root_counts.sapling,
+        subtree_root_counts.orchard,
+        subtree_root_counts.ironwood,
+    );
 
     // Perform initial scanning prior to firing off the main tasks:
     // - Detect reorgs that might have occurred while the wallet was offline, by
@@ -1063,7 +1068,7 @@ async fn data_requests<C: Chain>(
 /// Processes the queue of transactions that need to be scanned with the wallet's viewing
 /// keys.
 #[tracing::instrument(skip_all)]
-async fn batch_decryptor(
+pub(super) async fn batch_decryptor(
     params: Network,
     db_data: &mut DbConnection,
     decryptor: decryptor::Engine<AccountUuid, (AccountUuid, Scope)>,
