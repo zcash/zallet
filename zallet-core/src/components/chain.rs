@@ -54,8 +54,15 @@ pub trait ChainFactory: Send + Sync + 'static {
     /// and by convention matches the `zallet-<NAME>` binary that ships the backend.
     const NAME: &'static str;
 
-    /// Connects to the chain-data source described by `config`, returning the
-    /// backend handle and the task driving its indexer.
+    /// Connects to and structurally admits the chain-data source described by `config`,
+    /// returning the backend handle and the task driving its indexer.
+    ///
+    /// `Ok` guarantees that backend-specific discovery has found every service and
+    /// capability required to implement this binary's complete [`Chain`] contract.
+    /// Factories must reject a partially usable composition with an initialization error.
+    /// This admission guarantee covers the composed service shape, not perpetual runtime
+    /// availability; individual chain operations can still fail. Consensus compatibility
+    /// is checked separately after construction.
     fn build(
         &self,
         config: &ZalletConfig,
@@ -1170,6 +1177,16 @@ mod tests {
         tip: BlockHeight,
     }
 
+    impl MockChain {
+        pub(crate) fn reporting(upgrades: Vec<ReportedUpgrade>, tip: u32) -> Self {
+            Self {
+                params: super::Network::Consensus(Network::MainNetwork),
+                upgrades,
+                tip: BlockHeight::from_u32(tip),
+            }
+        }
+    }
+
     impl Chain for MockChain {
         type View = MockChainView;
 
@@ -1215,11 +1232,7 @@ mod tests {
 
     /// A [`MockChain`] on mainnet reporting `upgrades`, with its tip at `tip`.
     fn mock_chain(upgrades: Vec<ReportedUpgrade>, tip: u32) -> MockChain {
-        MockChain {
-            params: super::Network::Consensus(Network::MainNetwork),
-            upgrades,
-            tip: BlockHeight::from_u32(tip),
-        }
+        MockChain::reporting(upgrades, tip)
     }
 
     #[tokio::test]
