@@ -1166,10 +1166,11 @@ mod tests {
         assert!(detect(&all_known()).is_empty());
     }
 
-    /// A minimal [`Chain`] that serves a fixed upgrade set and tip on mainnet, for exercising
-    /// the end-to-end `check_consensus_compatibility` orchestration. Only `params`,
-    /// `reported_upgrades`, and `snapshot` carry meaning; the compatibility check never reaches
-    /// the other methods, so they are `unreachable!`.
+    /// A minimal [`Chain`] that serves a fixed upgrade set and tip on mainnet.
+    ///
+    /// `params`, `reported_upgrades`, and `snapshot` support consensus checks. Operations
+    /// outside that scope return a backend error, which also lets component tests exercise
+    /// startup failure after accepting this chain.
     #[derive(Clone)]
     pub(crate) struct MockChain {
         params: super::Network,
@@ -1199,25 +1200,33 @@ mod tests {
         }
 
         async fn broadcast_transaction(&self, _tx: &Transaction) -> Result<(), ChainError> {
-            unreachable!("the compatibility check does not broadcast transactions")
+            Err(ChainError::backend(
+                "mock chain does not broadcast transactions",
+            ))
         }
 
         async fn get_sapling_subtree_roots(
             &self,
         ) -> Result<Vec<CommitmentTreeRoot<sapling::Node>>, ChainError> {
-            unreachable!("the compatibility check does not read subtree roots")
+            Err(ChainError::backend(
+                "mock chain does not serve wallet subtree roots",
+            ))
         }
 
         async fn get_orchard_subtree_roots(
             &self,
         ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
-            unreachable!("the compatibility check does not read subtree roots")
+            Err(ChainError::backend(
+                "mock chain does not serve wallet subtree roots",
+            ))
         }
 
         async fn get_ironwood_subtree_roots(
             &self,
         ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
-            unreachable!("the compatibility check does not read subtree roots")
+            Err(ChainError::backend(
+                "mock chain does not serve wallet subtree roots",
+            ))
         }
 
         async fn snapshot(&self) -> Result<Self::View, ChainError> {

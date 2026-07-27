@@ -35,8 +35,9 @@ be considered breaking changes.
 ### Changed
 
 - `zallet start` now completes chain-backend construction and consensus checks
-  before opening or migrating the wallet database. If startup exits before task
-  supervision begins, the backend's indexer task is cancelled instead of detached.
+  before opening or migrating the wallet database. If startup exits or is cancelled,
+  tasks started by the backend, RPC server, or wallet sync engine are cancelled
+  instead of detached.
 - `zallet rpc help` is now answered locally instead of being sent to the
   wallet's JSON-RPC server, so it no longer requires a config file, an
   initialized wallet, or a running `zallet start`. The command argument may
