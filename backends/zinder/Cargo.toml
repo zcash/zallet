@@ -1,0 +1,24 @@
+[package]
+name = "zallet-zinder-tracer"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Unshippable P1 integration tracer for the Zallet and Zinder chain boundary"
+repository = "https://github.com/zcash/zallet"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# This package is deliberately an independent workspace, matching Zallet's
+# backend dependency boundary. It has no binary or packaging integration and
+# must not ship as a supported backend.
+[workspace]
+
+[dependencies]
+zinder-client = { git = "https://github.com/gustavovalverde/zinder.git", rev = "71e20d481845c7df93eea67b3ccc89c3d4b9d4f2" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(tokio_unstable)',
+    'cfg(zallet_build, values("merchant_terminal", "wallet"))',
+    'cfg(zcash_unstable, values("nu7"))',
+] }
