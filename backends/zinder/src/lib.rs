@@ -10,7 +10,6 @@
 
 use zinder_client::{
     Capability, EndpointBackedIndex, IndexerError, Network, RemoteChainIndex, RemoteOpenOptions,
-    RetryPolicy,
 };
 
 mod chain;
@@ -69,24 +68,11 @@ pub fn missing_bounded_scan_capabilities(advertised: &[Capability]) -> Vec<Capab
         .collect()
 }
 
-/// Returns whether a failed pinned scan must restart from a fresh snapshot.
-///
-/// This is the typed recovery seam Zallet needs for a snapshot whose Zinder
-/// chain-epoch pin has expired. The caller must discard all results from the
-/// expired snapshot before capturing a replacement.
-#[must_use]
-pub fn scan_requires_fresh_snapshot(error: &IndexerError) -> bool {
-    error.retry_policy() == RetryPolicy::RefreshChainEpoch
-}
-
 #[cfg(test)]
 mod tests {
-    use zinder_client::{Capability, IndexerError};
+    use zinder_client::Capability;
 
-    use super::{
-        BOUNDED_SCAN_REQUIRED_CAPABILITIES, missing_bounded_scan_capabilities,
-        scan_requires_fresh_snapshot,
-    };
+    use super::{BOUNDED_SCAN_REQUIRED_CAPABILITIES, missing_bounded_scan_capabilities};
 
     #[test]
     fn preflight_reports_every_missing_capability_in_requirement_order() {
@@ -109,8 +95,8 @@ mod tests {
     }
 
     #[test]
-    fn preflight_accepts_the_exact_bounded_scan_capability_set() {
-        let exact_bounded_scan_capabilities = [
+    fn preflight_accepts_required_capabilities_with_additional_advertisements() {
+        let mut advertised_capabilities = vec![
             Capability::ServerInfo,
             Capability::NetworkUpgradeActivations,
             Capability::VisibleTipBlock,
@@ -123,22 +109,9 @@ mod tests {
 
         assert_eq!(
             BOUNDED_SCAN_REQUIRED_CAPABILITIES,
-            exact_bounded_scan_capabilities
+            advertised_capabilities.as_slice()
         );
-        assert!(missing_bounded_scan_capabilities(&exact_bounded_scan_capabilities).is_empty());
-    }
-
-    #[test]
-    fn expired_chain_epoch_requires_a_fresh_snapshot() {
-        assert!(scan_requires_fresh_snapshot(
-            &IndexerError::ChainEpochPinUnavailable
-        ));
-    }
-
-    #[test]
-    fn unrelated_failure_does_not_require_a_fresh_snapshot() {
-        assert!(!scan_requires_fresh_snapshot(&IndexerError::NotFound {
-            resource: "full block",
-        }));
+        advertised_capabilities.push(Capability::Broadcast);
+        assert!(missing_bounded_scan_capabilities(&advertised_capabilities).is_empty());
     }
 }

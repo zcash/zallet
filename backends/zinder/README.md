@@ -9,8 +9,9 @@ behavior needed by `zallet start`.
 
 ## Frozen inputs
 
-- Zallet: `4d28731dcf33df00f86762d1bfd455943db5819c`
-- Zinder: `71e20d481845c7df93eea67b3ccc89c3d4b9d4f2`
+- Zallet base: `4d28731dcf33df00f86762d1bfd455943db5819c`
+- P1 Zallet core integration: `c1513772e0ecde73589be23e54d8b9169b170ad3`
+- Pinned Zinder client: `71e20d481845c7df93eea67b3ccc89c3d4b9d4f2`
 - Zallet draft PR #591: `59b6415a` (comparison only)
 
 ## Dependency graph
@@ -44,7 +45,9 @@ a second transport would preserve the wrong boundary and are also rejected.
 ## P1 contract
 
 Construction performs a real native `ServerInfo` request and refuses to return
-a chain value unless the endpoint advertises all eight P1 requirements:
+a chain value unless the endpoint advertises all eight P1 requirements. The
+endpoint may advertise additional capabilities when its composed providers can
+truthfully serve them; the tracer checks inclusion, not set equality.
 
 - server information;
 - network-upgrade activations;
@@ -66,7 +69,7 @@ and Ironwood frontiers and subtree roots, and parses retained consensus block
 bytes with Zallet's configured network parameters.
 
 Each `ZinderChainView` owns one `OwnedChainSnapshot`. A
-`CHAIN_EPOCH_PIN_UNAVAILABLE` error becomes `ChainError::Unavailable` while
+`CHAIN_EPOCH_PIN_UNAVAILABLE` error becomes `ChainError::ViewExpired` while
 retaining the original typed `IndexerError` as its error source. The adapter
 never retries one read against a different chain epoch.
 
@@ -79,7 +82,7 @@ Zinder's block-ID-by-selector operation.
 
 ## Current Zallet boundary
 
-On the frozen current Zallet source, the bounded scan kernel calls
+On this consolidated P1 Zallet source, the bounded scan kernel calls
 `tree_state_as_of` and `stream_blocks` on one `ChainView`; setup also uses the
 three subtree-root methods, `snapshot`, `tip`, and an individual `get_block`
 for best-effort tip metadata. Construction reads `ServerInfo`, and consensus
@@ -93,15 +96,14 @@ outside P1, so registering this crate as a backend for `zallet start` would
 fail explicitly. Satisfying the Rust traits proves type compatibility, not
 operational completeness.
 
-Zinder pin expiry is also not yet a distinct Zallet control-flow variant.
-`ChainError::Unavailable` preserves the boxed `IndexerError` source, but
-Zallet's private sync layer classifies every unavailable error alike.
-Initial-scan and steady-state retry loops discard their local view; the
-recovery-history bounded-scan loop currently propagates the same error and
-ends its task. A later core slice must add a typed “refresh chain view”
-classification at the `ChainError`/`SyncError` boundary and retry the entire
-bounded range after discarding the expired view. The backend must not add an
-adapter-local retry because that could mix epochs inside one scan.
+Zallet core treats only `ChainError::ViewExpired` as a reason to discard a
+fixed-history view. Initial scan, steady-state scan, and history recovery then
+capture a fresh view and retry the entire bounded range. Other unavailable,
+invalid-data, and backend failures retain their existing categories and do not
+enter this recovery path. The scan kernel buffers the predecessor tree state
+and complete block range before decryption or wallet-database mutation, so a
+mid-range expiry cannot mix epochs or partially apply the failed range. The
+backend does not add an adapter-local retry.
 
 ## Gate A
 
@@ -111,8 +113,9 @@ of typed epoch expiry. They do not certify the production consumer. Gate A
 additionally requires a real bounded Zallet scan through a current Zinder
 runtime:
 
-1. Start a Zinder composition that advertises the exact P1 capability set and
-   retains raw blocks.
+1. Start a Zinder composition that advertises at least the exact eight P1
+   requirements listed above and retains raw blocks. Additional truthful
+   capabilities are allowed.
 2. Construct the tracer against that endpoint and the matching Zallet network.
 3. Through an explicit P1 consumer-test seam, run Zallet's subtree-root update,
    snapshot, predecessor tree-state read, and bounded full-block scan kernel.

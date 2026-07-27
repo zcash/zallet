@@ -95,7 +95,7 @@ pub struct ZinderChain {
 }
 
 impl ZinderChain {
-    /// Connects to Zinder and verifies the exact P1 bounded-scan contract.
+    /// Connects to Zinder and verifies every P1 bounded-scan requirement.
     ///
     /// Construction performs a real `ServerInfo` request so an unreachable
     /// endpoint, network mismatch, or incomplete capability set fails before
@@ -230,7 +230,7 @@ impl Chain for ZinderChain {
 
 /// A cloneable Zinder chain view pinned to one retained chain epoch.
 ///
-/// An expired epoch is reported as [`ChainError::Unavailable`] with the
+/// An expired epoch is reported as [`ChainError::ViewExpired`] with the
 /// original [`IndexerError::ChainEpochPinUnavailable`] retained as its source.
 /// This adapter never silently moves a request onto a different chain epoch.
 #[derive(Clone)]
@@ -599,7 +599,7 @@ fn init_error(error: IndexerError) -> Error {
 
 fn chain_error(error: IndexerError) -> ChainError {
     match error {
-        error @ IndexerError::ChainEpochPinUnavailable => ChainError::unavailable(error),
+        error @ IndexerError::ChainEpochPinUnavailable => ChainError::view_expired(error),
         error @ (IndexerError::DataLoss { .. }
         | IndexerError::MalformedResponse { .. }
         | IndexerError::NetworkMismatch { .. }) => ChainError::invalid_data(error),
@@ -747,15 +747,35 @@ mod tests {
     }
 
     #[test]
-    fn expired_snapshot_retains_the_typed_zinder_error() {
-        let ChainError::Unavailable(source) = chain_error(IndexerError::ChainEpochPinUnavailable)
+    fn expired_snapshot_maps_only_to_view_expired_and_retains_the_typed_source() {
+        let ChainError::ViewExpired(source) = chain_error(IndexerError::ChainEpochPinUnavailable)
         else {
-            panic!("chain epoch pin expiry must remain an unavailable error");
+            panic!("chain epoch pin expiry must invalidate the current view");
         };
 
         assert!(matches!(
             source.downcast_ref::<IndexerError>(),
             Some(IndexerError::ChainEpochPinUnavailable)
+        ));
+    }
+
+    #[test]
+    fn unrelated_failures_retain_their_existing_categories() {
+        assert!(matches!(
+            chain_error(IndexerError::NoVisibleChainEpoch),
+            ChainError::Unavailable(_)
+        ));
+        assert!(matches!(
+            chain_error(IndexerError::DataLoss {
+                reason: "corrupt block".to_owned(),
+            }),
+            ChainError::InvalidData(_)
+        ));
+        assert!(matches!(
+            chain_error(IndexerError::FailedPrecondition {
+                reason: "operator action required".to_owned(),
+            }),
+            ChainError::Backend(_)
         ));
     }
 
