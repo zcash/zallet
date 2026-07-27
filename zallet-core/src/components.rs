@@ -8,6 +8,10 @@ use tokio::task::JoinHandle;
 use crate::error::Error;
 
 pub mod chain;
+
+#[cfg(feature = "bounded-scan-certification")]
+pub mod bounded_scan_certification;
+
 pub(crate) mod database;
 pub(crate) mod json_rpc;
 pub(crate) mod sync;
