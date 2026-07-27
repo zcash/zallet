@@ -57,8 +57,6 @@ async fn supervise_zallet_tasks(
     wallet_sync_data_requests_task_handle: TaskHandle,
 ) -> Result<(), Error> {
     // Retain abort-on-drop ownership while the supervisor itself is cancellable.
-    let _task_owner = task_owner;
-
     info!("Spawned Zallet tasks");
 
     // ongoing tasks.
@@ -69,76 +67,57 @@ async fn supervise_zallet_tasks(
     pin!(wallet_sync_batch_decryptor_task_handle);
     pin!(wallet_sync_data_requests_task_handle);
 
-    // Wait for tasks to finish.
-    let res = loop {
-        let exit_when_task_finishes = true;
+    // Every supervised task is ongoing, so the first exit shuts down Zallet. Preserve
+    // the selected task's inner result so a backend-runtime or sync failure makes the
+    // process fail rather than being converted to success.
+    let result = select! {
+        chain_indexer_join_result = &mut chain_indexer_task_handle => {
+            let chain_indexer_result = chain_indexer_join_result
+                .expect("unexpected panic in the chain indexer task");
+            info!(?chain_indexer_result, "Chain indexer task exited");
+            chain_indexer_result
+        }
 
-        let result = select! {
-            chain_indexer_join_result = &mut chain_indexer_task_handle => {
-                let chain_indexer_result = chain_indexer_join_result
-                    .expect("unexpected panic in the chain indexer task");
-                info!(?chain_indexer_result, "Chain indexer task exited");
-                Ok(())
-            }
+        rpc_join_result = &mut rpc_task_handle => {
+            let rpc_server_result = rpc_join_result
+                .expect("unexpected panic in the RPC task");
+            info!(?rpc_server_result, "RPC task exited");
+            rpc_server_result
+        }
 
-            rpc_join_result = &mut rpc_task_handle => {
-                let rpc_server_result = rpc_join_result
-                    .expect("unexpected panic in the RPC task");
-                info!(?rpc_server_result, "RPC task exited");
-                Ok(())
-            }
+        wallet_sync_join_result = &mut wallet_sync_steady_state_task_handle => {
+            let wallet_sync_result = wallet_sync_join_result
+                .expect("unexpected panic in the wallet steady-state sync task");
+            info!(?wallet_sync_result, "Wallet steady-state sync task exited");
+            wallet_sync_result
+        }
 
-            wallet_sync_join_result = &mut wallet_sync_steady_state_task_handle => {
-                let wallet_sync_result = wallet_sync_join_result
-                    .expect("unexpected panic in the wallet steady-state sync task");
-                info!(?wallet_sync_result, "Wallet steady-state sync task exited");
-                Ok(())
-            }
+        wallet_sync_join_result = &mut wallet_sync_recover_history_task_handle => {
+            let wallet_sync_result = wallet_sync_join_result
+                .expect("unexpected panic in the wallet recover-history sync task");
+            info!(?wallet_sync_result, "Wallet recover-history sync task exited");
+            wallet_sync_result
+        }
 
-            wallet_sync_join_result = &mut wallet_sync_recover_history_task_handle => {
-                let wallet_sync_result = wallet_sync_join_result
-                    .expect("unexpected panic in the wallet recover-history sync task");
-                info!(?wallet_sync_result, "Wallet recover-history sync task exited");
-                Ok(())
-            }
+        wallet_sync_join_result = &mut wallet_sync_batch_decryptor_task_handle => {
+            let wallet_sync_result = wallet_sync_join_result
+                .expect("unexpected panic in the wallet batch decryptor task");
+            info!(?wallet_sync_result, "Wallet batch decryptor task exited");
+            wallet_sync_result
+        }
 
-            wallet_sync_join_result = &mut wallet_sync_batch_decryptor_task_handle => {
-                let wallet_sync_result = wallet_sync_join_result
-                    .expect("unexpected panic in the wallet batch decryptor task");
-                info!(?wallet_sync_result, "Wallet batch decryptor task exited");
-                Ok(())
-            }
-
-            wallet_sync_join_result = &mut wallet_sync_data_requests_task_handle => {
-                let wallet_sync_result = wallet_sync_join_result
-                    .expect("unexpected panic in the wallet data-requests sync task");
-                info!(?wallet_sync_result, "Wallet data-requests sync task exited");
-                Ok(())
-            }
-        };
-
-        // Stop Zallet if a task finished and returned an error, or if an ongoing task
-        // exited.
-        match result {
-            Err(_) => break result,
-            Ok(()) if exit_when_task_finishes => break result,
-            Ok(()) => (),
+        wallet_sync_join_result = &mut wallet_sync_data_requests_task_handle => {
+            let wallet_sync_result = wallet_sync_join_result
+                .expect("unexpected panic in the wallet data-requests sync task");
+            info!(?wallet_sync_result, "Wallet data-requests sync task exited");
+            wallet_sync_result
         }
     };
 
-    info!("Exiting Zallet because an ongoing task exited; asking other tasks to stop");
+    info!("An ongoing Zallet task exited; cancelling the remaining tasks");
+    drop(task_owner);
 
-    // ongoing tasks
-    chain_indexer_task_handle.abort();
-    rpc_task_handle.abort();
-    wallet_sync_steady_state_task_handle.abort();
-    wallet_sync_recover_history_task_handle.abort();
-    wallet_sync_batch_decryptor_task_handle.abort();
-    wallet_sync_data_requests_task_handle.abort();
-
-    info!("All tasks have been asked to stop, waiting for remaining tasks to finish");
-
-    res
+    result
 }
 
 impl StartCmd {
@@ -278,6 +257,8 @@ mod tests {
 
     /// The error returned when the fake factory cannot admit its backend.
     const BACKEND_ADMISSION_FAILURE: &str = "required chain backend service is unavailable";
+    /// The error returned by a supervised task in the propagation test.
+    const SUPERVISED_TASK_FAILURE: &str = "supervised task failed";
     /// A compatible prior version that makes a database reopen observably record this build.
     const PRIOR_ZALLET_VERSION: &str = "0.1.0-beta.0";
 
@@ -520,6 +501,52 @@ mod tests {
         }
 
         assert_task_cancelled(chain_cancelled_receiver).await;
+        assert_task_cancelled(rpc_cancelled_receiver).await;
+        assert_task_cancelled(steady_cancelled_receiver).await;
+        assert_task_cancelled(recovery_cancelled_receiver).await;
+        assert_task_cancelled(batch_cancelled_receiver).await;
+        assert_task_cancelled(requests_cancelled_receiver).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn task_supervision_propagates_the_selected_task_error() {
+        let chain_task = tokio::spawn(async {
+            Err::<(), Error>(ErrorKind::Generic.context(SUPERVISED_TASK_FAILURE).into())
+        });
+        let (rpc_cancelled, rpc_cancelled_receiver) = mpsc::channel();
+        let rpc_task = observed_pending_task(rpc_cancelled).await;
+        let (steady_cancelled, steady_cancelled_receiver) = mpsc::channel();
+        let steady_task = observed_pending_task(steady_cancelled).await;
+        let (recovery_cancelled, recovery_cancelled_receiver) = mpsc::channel();
+        let recovery_task = observed_pending_task(recovery_cancelled).await;
+        let (batch_cancelled, batch_cancelled_receiver) = mpsc::channel();
+        let batch_task = observed_pending_task(batch_cancelled).await;
+        let (requests_cancelled, requests_cancelled_receiver) = mpsc::channel();
+        let requests_task = observed_pending_task(requests_cancelled).await;
+
+        let mut task_owner = StartupTaskOwner::new(&chain_task);
+        task_owner.include(&rpc_task);
+        task_owner.include(&steady_task);
+        task_owner.include(&recovery_task);
+        task_owner.include(&batch_task);
+        task_owner.include(&requests_task);
+
+        let error = supervise_zallet_tasks(
+            task_owner,
+            chain_task,
+            rpc_task,
+            steady_task,
+            recovery_task,
+            batch_task,
+            requests_task,
+        )
+        .await
+        .expect_err("a supervised task error must fail zallet start");
+
+        assert!(
+            error.to_string().contains(SUPERVISED_TASK_FAILURE),
+            "unexpected supervision error: {error}",
+        );
         assert_task_cancelled(rpc_cancelled_receiver).await;
         assert_task_cancelled(steady_cancelled_receiver).await;
         assert_task_cancelled(recovery_cancelled_receiver).await;
