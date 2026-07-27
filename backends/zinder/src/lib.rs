@@ -1,10 +1,9 @@
 //! Unshippable P1 integration tracer for Zallet's Zinder chain backend.
 //!
-//! The crate implements Zallet's complete [`zallet_core::components::chain`]
-//! interface while deliberately serving only the methods needed for a bounded
-//! shielded scan. Construction preflights that exact capability set. Methods
-//! assigned to later vertical slices fail explicitly instead of implying that
-//! the backend is ready to ship.
+//! The crate implements the methods needed for a bounded shielded scan through
+//! Zallet's [`zallet_core::components::chain`] traits. It satisfies the traits
+//! structurally, but methods assigned to later vertical slices fail explicitly.
+//! It is not a complete chain backend and cannot run Zallet's full sync loop.
 
 #![deny(warnings, missing_docs, trivial_casts, unused_qualifications)]
 #![forbid(unsafe_code)]
@@ -18,12 +17,12 @@ mod chain;
 
 pub use chain::{ZinderBackend, ZinderChain, ZinderChainView};
 
-/// Capabilities required by Zallet's P1 bounded shielded scan.
+/// Capabilities required by Zallet's bounded shielded-scan tracer.
 ///
 /// The list deliberately excludes transparent history, mempool observation,
 /// and transaction broadcast. Those operations belong to later vertical
-/// slices and must not be inferred from P1 readiness.
-pub const P1_SCAN_REQUIRED_CAPABILITIES: [Capability; 8] = [
+/// slices and must not be inferred from bounded-scan readiness.
+pub const BOUNDED_SCAN_REQUIRED_CAPABILITIES: [Capability; 8] = [
     Capability::ServerInfo,
     Capability::NetworkUpgradeActivations,
     Capability::VisibleTipBlock,
@@ -49,21 +48,21 @@ pub fn open_zinder_index(
     })
 }
 
-/// Reads endpoint metadata and returns every capability missing from P1.
+/// Reads endpoint metadata and returns every bounded-scan capability missing.
 ///
-/// Returning the complete set gives operators one actionable preflight result
-/// instead of a sequence of one-capability-at-a-time startup failures.
-pub async fn probe_missing_p1_scan_capabilities(
+/// Returning the complete set gives the tracer one actionable preflight result
+/// instead of a sequence of one-capability-at-a-time failures.
+pub async fn probe_missing_bounded_scan_capabilities(
     index: &RemoteChainIndex,
 ) -> Result<Vec<Capability>, IndexerError> {
     let server_info = index.server_info().await?;
-    Ok(missing_p1_scan_capabilities(&server_info.capabilities))
+    Ok(missing_bounded_scan_capabilities(&server_info.capabilities))
 }
 
-/// Returns every P1 scan capability absent from an advertised capability set.
+/// Returns every bounded-scan capability absent from an advertised set.
 #[must_use]
-pub fn missing_p1_scan_capabilities(advertised: &[Capability]) -> Vec<Capability> {
-    P1_SCAN_REQUIRED_CAPABILITIES
+pub fn missing_bounded_scan_capabilities(advertised: &[Capability]) -> Vec<Capability> {
+    BOUNDED_SCAN_REQUIRED_CAPABILITIES
         .iter()
         .filter(|required| !advertised.contains(required))
         .cloned()
@@ -85,7 +84,8 @@ mod tests {
     use zinder_client::{Capability, IndexerError};
 
     use super::{
-        P1_SCAN_REQUIRED_CAPABILITIES, missing_p1_scan_capabilities, scan_requires_fresh_snapshot,
+        BOUNDED_SCAN_REQUIRED_CAPABILITIES, missing_bounded_scan_capabilities,
+        scan_requires_fresh_snapshot,
     };
 
     #[test]
@@ -97,7 +97,7 @@ mod tests {
         ];
 
         assert_eq!(
-            missing_p1_scan_capabilities(&advertised),
+            missing_bounded_scan_capabilities(&advertised),
             vec![
                 Capability::NetworkUpgradeActivations,
                 Capability::SubtreeRoots,
@@ -109,8 +109,23 @@ mod tests {
     }
 
     #[test]
-    fn preflight_accepts_the_exact_p1_capability_set() {
-        assert!(missing_p1_scan_capabilities(&P1_SCAN_REQUIRED_CAPABILITIES).is_empty());
+    fn preflight_accepts_the_exact_bounded_scan_capability_set() {
+        let exact_bounded_scan_capabilities = [
+            Capability::ServerInfo,
+            Capability::NetworkUpgradeActivations,
+            Capability::VisibleTipBlock,
+            Capability::TreeState,
+            Capability::SubtreeRoots,
+            Capability::SubtreeRootsIronwood,
+            Capability::FullBlock,
+            Capability::FullBlockRange,
+        ];
+
+        assert_eq!(
+            BOUNDED_SCAN_REQUIRED_CAPABILITIES,
+            exact_bounded_scan_capabilities
+        );
+        assert!(missing_bounded_scan_capabilities(&exact_bounded_scan_capabilities).is_empty());
     }
 
     #[test]

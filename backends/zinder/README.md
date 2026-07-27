@@ -1,10 +1,11 @@
 # Zinder backend P1 compatibility tracer
 
 This directory is an unshippable integration tracer. It has no Zallet binary,
-launcher, production configuration, or packaging integration. Its purpose is
-to prove one complete P1 vertical slice: Zallet's existing `Chain` and
-`ChainView` abstractions can perform an epoch-consistent bounded shielded scan
-through Zinder's native typed client.
+launcher, production configuration, or packaging integration. It proves the
+backend half of one P1 vertical slice: the bounded shielded-scan methods in
+Zallet's `Chain` and `ChainView` traits can read one pinned Zinder chain epoch
+through the native typed client. It does not implement the full `Chain`
+behavior needed by `zallet start`.
 
 ## Frozen inputs
 
@@ -42,8 +43,8 @@ a second transport would preserve the wrong boundary and are also rejected.
 
 ## P1 contract
 
-Construction performs a real native `ServerInfo` request and refuses to start
-unless the endpoint advertises every P1 capability:
+Construction performs a real native `ServerInfo` request and refuses to return
+a chain value unless the endpoint advertises all eight P1 requirements:
 
 - server information;
 - network-upgrade activations;
@@ -54,38 +55,77 @@ unless the endpoint advertises every P1 capability:
 - individual full blocks; and
 - bounded full-block ranges.
 
+If either full-block capability is absent, preflight directs the operator to
+set `raw_blob_policy=all` for Zinder ingest and query. Existing canonical data
+must be rebuilt under that retention policy and deployed with a blue-green
+replacement; retention cannot be upgraded safely in place.
+
 The implementation maps Zallet's half-open ranges to Zinder's inclusive
-ranges, clamps every stream to the captured tip, decodes Sapling, Orchard, and
-Ironwood frontiers and subtree roots, and parses retained consensus block
+ranges, clamps bounded streams to the captured tip, decodes Sapling, Orchard,
+and Ironwood frontiers and subtree roots, and parses retained consensus block
 bytes with Zallet's configured network parameters.
 
 Each `ZinderChainView` owns one `OwnedChainSnapshot`. A
-`CHAIN_EPOCH_PIN_UNAVAILABLE` error becomes `ChainError::Unavailable`; Zallet
-must discard that whole view and capture a new one. The adapter never retries
-one read against a different chain epoch.
+`CHAIN_EPOCH_PIN_UNAVAILABLE` error becomes `ChainError::Unavailable` while
+retaining the original typed `IndexerError` as its error source. The adapter
+never retries one read against a different chain epoch.
 
-Transaction broadcast, mempool observation, transaction lookup, and
-transparent history are assigned to later vertical slices. Their required
-trait methods return explicit P1-scope errors.
+The trait implementation is deliberately incomplete. Fork-point lookup, block
+header lookup, streaming from a height through the tip, transaction broadcast,
+mempool observation, transaction lookup and status, and transparent history
+are assigned to later vertical slices. Their required trait methods return
+explicit `Unsupported` errors. In particular, P1 neither requires nor calls
+Zinder's block-ID-by-selector operation.
+
+## Current Zallet boundary
+
+On the frozen current Zallet source, the bounded scan kernel calls
+`tree_state_as_of` and `stream_blocks` on one `ChainView`; setup also uses the
+three subtree-root methods, `snapshot`, `tip`, and an individual `get_block`
+for best-effort tip metadata. Construction reads `ServerInfo`, and consensus
+preflight reads the reported network upgrades. Those calls are the P1 tracer
+boundary.
+
+The full sync runtime has additional requirements. Its steady-state path calls
+`find_fork_point`, may fall back to `get_block_header`, streams with
+`stream_blocks_to_tip`, and then observes the mempool. Those methods are
+outside P1, so registering this crate as a backend for `zallet start` would
+fail explicitly. Satisfying the Rust traits proves type compatibility, not
+operational completeness.
+
+Zinder pin expiry is also not yet a distinct Zallet control-flow variant.
+`ChainError::Unavailable` preserves the boxed `IndexerError` source, but
+Zallet's private sync layer classifies every unavailable error alike.
+Initial-scan and steady-state retry loops discard their local view; the
+recovery-history bounded-scan loop currently propagates the same error and
+ends its task. A later core slice must add a typed “refresh chain view”
+classification at the `ChainError`/`SyncError` boundary and retry the entire
+bounded range after discarding the expired view. The backend must not add an
+adapter-local retry because that could mix epochs inside one scan.
 
 ## Gate A
 
-Unit and compile-time contract tests cover capability selection, range
-translation, tree-state decoding, P1-only failures, and typed epoch expiry.
-They do not certify the production consumer. Gate A additionally requires a
-real bounded Zallet scan through a current Zinder runtime:
+Unit and compile-time contract tests cover the frozen capability set, range
+translation, tree-state decoding, explicit whole-sync failures, and retention
+of typed epoch expiry. They do not certify the production consumer. Gate A
+additionally requires a real bounded Zallet scan through a current Zinder
+runtime:
 
 1. Start a Zinder composition that advertises the exact P1 capability set and
    retains raw blocks.
-2. Construct `ZinderBackend` with that endpoint and the matching Zallet
-   network.
-3. Run Zallet's existing subtree-root update, snapshot, predecessor tree-state
-   read, and bounded full-block scan path.
+2. Construct the tracer against that endpoint and the matching Zallet network.
+3. Through an explicit P1 consumer-test seam, run Zallet's subtree-root update,
+   snapshot, predecessor tree-state read, and bounded full-block scan kernel.
 4. Verify the applied range is complete and pinned to one chain epoch.
-5. Expire that epoch and verify Zallet abandons the view rather than mixing
-   results across epochs.
+5. Expire that epoch and verify the whole bounded range restarts with a fresh
+   view rather than mixing results across epochs.
 
-The focused local checks are:
+The consumer-test seam and typed whole-range retry belong in Zallet core or its
+external integration harness; this backend-only crate cannot make those
+private sync decisions. Gate A must not substitute a full `zallet start`
+attempt, because that would test intentionally unsupported whole-sync methods.
+
+The focused backend checks are:
 
 ```console
 cargo +1.95.0 fmt --manifest-path backends/zinder/Cargo.toml -- --check
