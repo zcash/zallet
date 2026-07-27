@@ -27,7 +27,7 @@ transparent = { package = "zcash_transparent", version = "0.9.0" }
 zcash_client_backend = "0.24.0-rc.1"
 zcash_primitives = "0.29.0"
 zcash_protocol = "0.10.1"
-zinder-client = { git = "https://github.com/gustavovalverde/zinder.git", rev = "71e20d481845c7df93eea67b3ccc89c3d4b9d4f2" }
+zinder-client = { git = "https://github.com/gustavovalverde/zinder.git", rev = "479805765d4c277115e534bf26f0a3ed6144bb73" }
 
 [patch.crates-io]
 equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }

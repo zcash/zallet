@@ -42,9 +42,10 @@ use zcash_protocol::{
 };
 use zinder_client::{
     BlockHeight as ZinderBlockHeight, BlockHeightRange as ZinderBlockHeightRange,
-    BlockId as ZinderBlockId, Capability, ChainIndex, IndexerError, Network as ZinderNetwork,
-    OwnedChainSnapshot, RemoteChainIndex, RetryPolicy, ShieldedProtocol, SubtreeRootArtifact,
-    SubtreeRootIndex, SubtreeRootRange, TreeStateArtifact,
+    BlockId as ZinderBlockId, Capability, ChainEpochId, ChainIndex, IndexerError,
+    MAX_SUBTREE_ROOTS_PER_REQUEST, Network as ZinderNetwork, OwnedChainSnapshot, RemoteChainIndex,
+    RetryPolicy, ShieldedProtocol, SubtreeRootArtifact, SubtreeRootIndex, SubtreeRootRange,
+    TreeStateArtifact,
 };
 
 use crate::{open_zinder_index, probe_missing_bounded_scan_capabilities};
@@ -124,23 +125,94 @@ impl ZinderChain {
         let snapshot = OwnedChainSnapshot::capture(Arc::clone(&self.index))
             .await
             .map_err(chain_error)?;
-        let root_count = snapshot
-            .chain_epoch()
-            .tip_metadata
-            .completed_subtree_count(protocol);
-        let Some(max_entries) = NonZeroU32::new(root_count) else {
-            return Ok(Vec::new());
-        };
 
-        snapshot
-            .subtree_roots_in_range(SubtreeRootRange::new(
-                protocol,
-                SubtreeRootIndex::new(0),
-                max_entries,
-            ))
-            .await
-            .map_err(chain_error)
+        subtree_roots_from_snapshot(&snapshot, protocol).await
     }
+}
+
+trait SubtreeRootSnapshot {
+    type SubtreeRoot;
+
+    fn chain_epoch_id(&self) -> ChainEpochId;
+
+    fn completed_subtree_count(&self, protocol: ShieldedProtocol) -> u32;
+
+    fn subtree_roots_in_range(
+        &self,
+        subtree_root_range: SubtreeRootRange,
+    ) -> impl Future<Output = Result<Vec<Self::SubtreeRoot>, IndexerError>>;
+}
+
+impl<I: ChainIndex + ?Sized> SubtreeRootSnapshot for OwnedChainSnapshot<I> {
+    type SubtreeRoot = SubtreeRootArtifact;
+
+    fn chain_epoch_id(&self) -> ChainEpochId {
+        self.chain_epoch().id
+    }
+
+    fn completed_subtree_count(&self, protocol: ShieldedProtocol) -> u32 {
+        self.chain_epoch()
+            .tip_metadata
+            .completed_subtree_count(protocol)
+    }
+
+    fn subtree_roots_in_range(
+        &self,
+        subtree_root_range: SubtreeRootRange,
+    ) -> impl Future<Output = Result<Vec<Self::SubtreeRoot>, IndexerError>> {
+        OwnedChainSnapshot::subtree_roots_in_range(self, subtree_root_range)
+    }
+}
+
+async fn subtree_roots_from_snapshot<S: SubtreeRootSnapshot + ?Sized>(
+    snapshot: &S,
+    protocol: ShieldedProtocol,
+) -> Result<Vec<S::SubtreeRoot>, ChainError> {
+    let root_count = snapshot.completed_subtree_count(protocol);
+    let mut remaining_root_count = root_count;
+    let mut next_subtree_index = SubtreeRootIndex::new(0);
+    let mut subtree_roots = Vec::new();
+
+    while remaining_root_count > 0 {
+        let requested_root_count = remaining_root_count.min(MAX_SUBTREE_ROOTS_PER_REQUEST);
+        let Some(max_entries) = NonZeroU32::new(requested_root_count) else {
+            return Err(invalid_data(
+                "subtree-root pagination produced an empty request",
+            ));
+        };
+        let requested_range = SubtreeRootRange::new(protocol, next_subtree_index, max_entries);
+        let page = snapshot
+            .subtree_roots_in_range(requested_range)
+            .await
+            .map_err(chain_error)?;
+        let expected_page_length = usize::try_from(requested_root_count).map_err(|error| {
+            invalid_data(format!("subtree-root page length is invalid: {error}"))
+        })?;
+
+        if page.len() != expected_page_length {
+            return Err(invalid_data(format!(
+                "Zinder returned {} {protocol:?} subtree roots at index {} for chain epoch {}; \
+                 expected {requested_root_count} from the epoch-advertised total of {root_count}",
+                page.len(),
+                next_subtree_index.value(),
+                snapshot.chain_epoch_id().value(),
+            )));
+        }
+
+        subtree_roots.extend(page);
+        let Some(next_remaining_root_count) =
+            remaining_root_count.checked_sub(requested_root_count)
+        else {
+            return Err(invalid_data("subtree-root page count underflowed"));
+        };
+        remaining_root_count = next_remaining_root_count;
+        let Some(next_index) = next_subtree_index.value().checked_add(requested_root_count) else {
+            return Err(invalid_data("subtree-root page index overflowed"));
+        };
+        next_subtree_index = SubtreeRootIndex::new(next_index);
+    }
+
+    Ok(subtree_roots)
 }
 
 impl Chain for ZinderChain {
@@ -633,8 +705,82 @@ fn unsupported_stream_by_bounded_scan_tracer(
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, future};
+
     use super::*;
-    use zinder_client::BlockHash as ZinderBlockHash;
+    use zinder_client::{BlockHash as ZinderBlockHash, ChainEpochId};
+
+    const CAPTURED_CHAIN_EPOCH_ID: ChainEpochId = ChainEpochId::new(41);
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct RecordedSubtreeRootRequest {
+        range: SubtreeRootRange,
+        chain_epoch_id: ChainEpochId,
+    }
+
+    struct RecordingSubtreeRootSnapshot {
+        root_count: u32,
+        chain_epoch_id: ChainEpochId,
+        returned_root_count_override: Option<(SubtreeRootIndex, u32)>,
+        requests: RefCell<Vec<RecordedSubtreeRootRequest>>,
+    }
+
+    impl RecordingSubtreeRootSnapshot {
+        fn new(root_count: u32) -> Self {
+            Self {
+                root_count,
+                chain_epoch_id: CAPTURED_CHAIN_EPOCH_ID,
+                returned_root_count_override: None,
+                requests: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn with_returned_root_count_at(
+            mut self,
+            start_index: SubtreeRootIndex,
+            returned_root_count: u32,
+        ) -> Self {
+            self.returned_root_count_override = Some((start_index, returned_root_count));
+            self
+        }
+    }
+
+    impl SubtreeRootSnapshot for RecordingSubtreeRootSnapshot {
+        type SubtreeRoot = SubtreeRootIndex;
+
+        fn chain_epoch_id(&self) -> ChainEpochId {
+            self.chain_epoch_id
+        }
+
+        fn completed_subtree_count(&self, _protocol: ShieldedProtocol) -> u32 {
+            self.root_count
+        }
+
+        fn subtree_roots_in_range(
+            &self,
+            subtree_root_range: SubtreeRootRange,
+        ) -> impl Future<Output = Result<Vec<Self::SubtreeRoot>, IndexerError>> {
+            self.requests.borrow_mut().push(RecordedSubtreeRootRequest {
+                range: subtree_root_range,
+                chain_epoch_id: self.chain_epoch_id,
+            });
+
+            let returned_root_count = self
+                .returned_root_count_override
+                .filter(|(start_index, _)| *start_index == subtree_root_range.start_index)
+                .map_or(subtree_root_range.max_entries.get(), |(_, count)| count);
+            let returned_end_index = subtree_root_range
+                .start_index
+                .value()
+                .checked_add(returned_root_count)
+                .expect("focused test page indices fit u32");
+            let subtree_roots = (subtree_root_range.start_index.value()..returned_end_index)
+                .map(SubtreeRootIndex::new)
+                .collect();
+
+            future::ready(Ok(subtree_roots))
+        }
+    }
 
     #[test]
     fn zinder_types_satisfy_chain_trait_bounds() {
@@ -643,6 +789,150 @@ mod tests {
 
         assert_chain::<ZinderChain>();
         assert_chain_view::<ZinderChainView>();
+    }
+
+    #[tokio::test]
+    async fn exactly_1024_subtree_roots_use_one_page() {
+        let snapshot = RecordingSubtreeRootSnapshot::new(MAX_SUBTREE_ROOTS_PER_REQUEST);
+
+        let subtree_roots = subtree_roots_from_snapshot(&snapshot, ShieldedProtocol::Sapling)
+            .await
+            .expect("one bounded subtree-root page should succeed");
+
+        assert_eq!(
+            subtree_roots.len(),
+            usize::try_from(MAX_SUBTREE_ROOTS_PER_REQUEST)
+                .expect("u32 root counts fit usize on supported targets")
+        );
+        assert_eq!(
+            snapshot.requests.into_inner(),
+            vec![RecordedSubtreeRootRequest {
+                range: SubtreeRootRange::new(
+                    ShieldedProtocol::Sapling,
+                    SubtreeRootIndex::new(0),
+                    NonZeroU32::new(MAX_SUBTREE_ROOTS_PER_REQUEST)
+                        .expect("the exported request limit is non-zero"),
+                ),
+                chain_epoch_id: CAPTURED_CHAIN_EPOCH_ID,
+            }],
+        );
+    }
+
+    #[tokio::test]
+    async fn exactly_1025_subtree_roots_use_two_bounded_pages() {
+        let root_count = MAX_SUBTREE_ROOTS_PER_REQUEST
+            .checked_add(1)
+            .expect("the request limit leaves room for a second page");
+        let snapshot = RecordingSubtreeRootSnapshot::new(root_count);
+
+        let subtree_roots = subtree_roots_from_snapshot(&snapshot, ShieldedProtocol::Sapling)
+            .await
+            .expect("two bounded subtree-root pages should succeed");
+        let requests = snapshot.requests.into_inner();
+
+        assert_eq!(
+            subtree_roots.len(),
+            usize::try_from(root_count).expect("u32 root counts fit usize")
+        );
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].range.start_index, SubtreeRootIndex::new(0));
+        assert_eq!(
+            requests[0].range.max_entries.get(),
+            MAX_SUBTREE_ROOTS_PER_REQUEST
+        );
+        assert_eq!(
+            requests[1].range.start_index,
+            SubtreeRootIndex::new(MAX_SUBTREE_ROOTS_PER_REQUEST)
+        );
+        assert_eq!(requests[1].range.max_entries.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn multiple_subtree_root_pages_preserve_every_ordered_index() {
+        let root_count = MAX_SUBTREE_ROOTS_PER_REQUEST
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(7))
+            .expect("the focused test root count fits u32");
+        let snapshot = RecordingSubtreeRootSnapshot::new(root_count);
+
+        let subtree_roots = subtree_roots_from_snapshot(&snapshot, ShieldedProtocol::Sapling)
+            .await
+            .expect("multiple bounded subtree-root pages should succeed");
+
+        assert_eq!(
+            subtree_roots,
+            (0..root_count)
+                .map(SubtreeRootIndex::new)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(snapshot.requests.into_inner().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn every_subtree_root_page_uses_the_same_epoch_pin() {
+        let root_count = MAX_SUBTREE_ROOTS_PER_REQUEST
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(1))
+            .expect("the focused test root count fits u32");
+        let snapshot = RecordingSubtreeRootSnapshot::new(root_count);
+
+        subtree_roots_from_snapshot(&snapshot, ShieldedProtocol::Sapling)
+            .await
+            .expect("multiple bounded subtree-root pages should succeed");
+
+        assert!(
+            snapshot
+                .requests
+                .into_inner()
+                .iter()
+                .all(|request| request.chain_epoch_id == CAPTURED_CHAIN_EPOCH_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_subtree_root_page_fails_without_returning_partial_roots() {
+        let root_count = MAX_SUBTREE_ROOTS_PER_REQUEST
+            .checked_add(3)
+            .expect("the request limit leaves room for a short second page");
+        let snapshot = RecordingSubtreeRootSnapshot::new(root_count)
+            .with_returned_root_count_at(SubtreeRootIndex::new(MAX_SUBTREE_ROOTS_PER_REQUEST), 2);
+
+        let result = subtree_roots_from_snapshot(&snapshot, ShieldedProtocol::Sapling).await;
+        let Err(ChainError::InvalidData(source)) = result else {
+            panic!("a short page must fail instead of returning partial roots");
+        };
+
+        assert_eq!(snapshot.requests.into_inner().len(), 2);
+        assert!(
+            source
+                .to_string()
+                .contains("returned 2 Sapling subtree roots")
+        );
+        assert!(source.to_string().contains("expected 3"));
+        assert!(source.to_string().contains("chain epoch 41"));
+    }
+
+    #[tokio::test]
+    async fn an_overlong_subtree_root_page_fails_without_returning_partial_roots() {
+        let root_count = MAX_SUBTREE_ROOTS_PER_REQUEST
+            .checked_add(3)
+            .expect("the request limit leaves room for an overlong second page");
+        let snapshot = RecordingSubtreeRootSnapshot::new(root_count)
+            .with_returned_root_count_at(SubtreeRootIndex::new(MAX_SUBTREE_ROOTS_PER_REQUEST), 4);
+
+        let result = subtree_roots_from_snapshot(&snapshot, ShieldedProtocol::Sapling).await;
+        let Err(ChainError::InvalidData(source)) = result else {
+            panic!("an overlong page must fail instead of returning partial roots");
+        };
+
+        assert_eq!(snapshot.requests.into_inner().len(), 2);
+        assert!(
+            source
+                .to_string()
+                .contains("returned 4 Sapling subtree roots")
+        );
+        assert!(source.to_string().contains("expected 3"));
+        assert!(source.to_string().contains("chain epoch 41"));
     }
 
     #[test]
