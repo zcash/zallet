@@ -98,6 +98,9 @@ be considered breaking changes.
   before queueing decryption or database work. If the view expires partway
   through the range, the partial batch is discarded and the entire range is
   retried against a fresh view, including during history recovery.
+- `zallet start` now returns a failure when a supervised runtime task returns
+  an error. Previously the first task exit was converted to a successful
+  process result.
 - A failure to service a single transaction data request (for example when the
   requested transaction was reorged away and the validator answers
   `RPC -5: No such mempool or main chain transaction`) no longer shuts the
