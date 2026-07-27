@@ -44,7 +44,7 @@ use jsonrpsee::tracing::{self, debug, info, warn};
 use std::collections::HashSet;
 #[cfg(not(feature = "spend-index"))]
 use std::ops::Range;
-use tokio::{sync::Notify, time};
+use tokio::{sync::Notify, task::AbortHandle, time};
 #[cfg(not(feature = "spend-index"))]
 use zcash_client_backend::data_api::{
     CoinbaseFilter, InputSource, TransactionsInvolvingAddress,
@@ -89,6 +89,35 @@ pub(crate) type WalletDecryptorHandle = decryptor::Handle<AccountUuid, (AccountU
 /// Engine half of the batch decryptor, driven by the sync tasks spawned by [`WalletSync::spawn`].
 pub(crate) type WalletDecryptorEngine = decryptor::Engine<AccountUuid, (AccountUuid, Scope)>;
 
+/// Owns cancellation for wallet-sync tasks until the complete task set is returned.
+struct PendingWalletSyncTasks {
+    abort_handles: Vec<AbortHandle>,
+}
+
+impl PendingWalletSyncTasks {
+    fn new(first_task: &TaskHandle) -> Self {
+        Self {
+            abort_handles: vec![first_task.abort_handle()],
+        }
+    }
+
+    fn include(&mut self, task: &TaskHandle) {
+        self.abort_handles.push(task.abort_handle());
+    }
+
+    fn transfer_to_caller(mut self) {
+        self.abort_handles.clear();
+    }
+}
+
+impl Drop for PendingWalletSyncTasks {
+    fn drop(&mut self) {
+        for abort_handle in &self.abort_handles {
+            abort_handle.abort();
+        }
+    }
+}
+
 impl WalletSync {
     /// Builds the batch decryptor. Split from [`WalletSync::spawn`] so the RPC server can be
     /// handed a handle before `spawn`'s initial scan, which would otherwise delay RPC startup.
@@ -98,6 +127,10 @@ impl WalletSync {
         decryptor::new().build()
     }
 
+    /// Initializes wallet sync and returns its complete task set.
+    ///
+    /// On success, the caller owns cancellation for every returned task and must register
+    /// that ownership before its next cancellable await.
     pub(crate) async fn spawn<C: Chain>(
         config: &ZalletConfig,
         db: Database,
@@ -117,6 +150,7 @@ impl WalletSync {
                 Ok(())
             })
         };
+        let mut pending_tasks = PendingWalletSyncTasks::new(&batch_decryptor_task);
 
         // Ensure the wallet is in a state that the sync tasks can work with.
         let mut db_data = db.handle().await?;
@@ -159,6 +193,7 @@ impl WalletSync {
                 Ok(())
             })
         };
+        pending_tasks.include(&steady_state_task);
 
         let recover_history_task = {
             let chain = chain.clone();
@@ -178,6 +213,7 @@ impl WalletSync {
                 Ok(())
             })
         };
+        pending_tasks.include(&recover_history_task);
 
         let mut db_data = db.handle().await?;
         let data_requests_task = crate::spawn!("Data requests", async move {
@@ -190,6 +226,11 @@ impl WalletSync {
             .await?;
             Ok(())
         });
+        pending_tasks.include(&data_requests_task);
+
+        // This handoff and the return must stay free of awaits: the caller registers every
+        // returned handle with its own abort-on-drop owner in the same executor poll.
+        pending_tasks.transfer_to_caller();
 
         Ok((
             steady_state_task,
@@ -1030,9 +1071,48 @@ async fn batch_decryptor(
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainError, SyncError, is_retryable, rewind_step, select_initial_scan_range};
+    use std::{sync::mpsc, time::Duration};
+
+    use super::{
+        ChainError, PendingWalletSyncTasks, SyncError, WalletSync, is_retryable, rewind_step,
+        select_initial_scan_range,
+    };
+    use crate::{
+        components::{TaskHandle, chain::MockChain, database::Database},
+        config::ZalletConfig,
+        error::{Error, ErrorKind},
+    };
     use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
     use zcash_protocol::consensus::BlockHeight;
+
+    struct TaskCancellationProbe(mpsc::Sender<()>);
+
+    impl Drop for TaskCancellationProbe {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    async fn observed_pending_task(task_cancelled: mpsc::Sender<()>) -> TaskHandle {
+        let cancellation_probe = TaskCancellationProbe(task_cancelled);
+        let (task_started, task_started_receiver) = futures::channel::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _cancellation_probe = cancellation_probe;
+            let _ = task_started.send(());
+            std::future::pending::<Result<(), Error>>().await
+        });
+        task_started_receiver
+            .await
+            .expect("cancellation-observed task starts");
+        task
+    }
+
+    async fn assert_task_cancelled(task_cancelled: mpsc::Receiver<()>) {
+        tokio::task::spawn_blocking(move || task_cancelled.recv_timeout(Duration::from_secs(1)))
+            .await
+            .expect("cancellation observer does not panic")
+            .expect("partially initialized wallet sync task is cancelled");
+    }
 
     fn h(height: u32) -> BlockHeight {
         BlockHeight::from_u32(height)
@@ -1040,6 +1120,98 @@ mod tests {
 
     fn range(start: u32, end: u32, priority: ScanPriority) -> ScanRange {
         ScanRange::from_parts(h(start)..h(end), priority)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn late_wallet_sync_error_cancels_all_earlier_tasks() {
+        let (batch_cancelled, batch_cancelled_receiver) = mpsc::channel();
+        let batch_task = observed_pending_task(batch_cancelled).await;
+        let (steady_cancelled, steady_cancelled_receiver) = mpsc::channel();
+        let steady_task = observed_pending_task(steady_cancelled).await;
+        let (recovery_cancelled, recovery_cancelled_receiver) = mpsc::channel();
+        let recovery_task = observed_pending_task(recovery_cancelled).await;
+
+        let initialization: Result<(), Error> = async {
+            let mut pending_tasks = PendingWalletSyncTasks::new(&batch_task);
+            pending_tasks.include(&steady_task);
+            pending_tasks.include(&recovery_task);
+            Err(ErrorKind::Init
+                .context("simulated late wallet sync failure")
+                .into())
+        }
+        .await;
+
+        initialization.expect_err("late wallet sync initialization fails");
+        assert_task_cancelled(batch_cancelled_receiver).await;
+        assert_task_cancelled(steady_cancelled_receiver).await;
+        assert_task_cancelled(recovery_cancelled_receiver).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wallet_sync_initialization_cancellation_stops_all_earlier_tasks() {
+        let (batch_cancelled, batch_cancelled_receiver) = mpsc::channel();
+        let batch_task = observed_pending_task(batch_cancelled).await;
+        let (steady_cancelled, steady_cancelled_receiver) = mpsc::channel();
+        let steady_task = observed_pending_task(steady_cancelled).await;
+        let (recovery_cancelled, recovery_cancelled_receiver) = mpsc::channel();
+        let recovery_task = observed_pending_task(recovery_cancelled).await;
+        let (initialization_waiting, initialization_waiting_receiver) =
+            futures::channel::oneshot::channel();
+
+        let initialization = tokio::spawn(async move {
+            let mut pending_tasks = PendingWalletSyncTasks::new(&batch_task);
+            pending_tasks.include(&steady_task);
+            pending_tasks.include(&recovery_task);
+            let _ = initialization_waiting.send(());
+            std::future::pending::<()>().await;
+            pending_tasks.transfer_to_caller();
+        });
+
+        initialization_waiting_receiver
+            .await
+            .expect("wallet sync initialization reaches its cancellable await");
+        initialization.abort();
+        initialization
+            .await
+            .expect_err("wallet sync initialization is cancelled");
+
+        assert_task_cancelled(batch_cancelled_receiver).await;
+        assert_task_cancelled(steady_cancelled_receiver).await;
+        assert_task_cancelled(recovery_cancelled_receiver).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wallet_sync_error_shuts_down_the_spawned_batch_decryptor() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates a wallet database");
+        let (decryptor, decryptor_engine) = WalletSync::build_decryptor();
+        let decryptor_observer = decryptor.clone();
+
+        let result = WalletSync::spawn(
+            &config,
+            database,
+            MockChain::reporting(Vec::new(), 0),
+            None,
+            decryptor,
+            decryptor_engine,
+        )
+        .await;
+
+        assert!(result.is_err(), "mock chain rejects wallet sync startup");
+        if let Some(reload_finished) = decryptor_observer.reload_keys().await {
+            assert!(
+                reload_finished.await.is_err(),
+                "failed wallet sync startup must not leave its batch decryptor running",
+            );
+        }
     }
 
     // The #636 repro: the wallet DB has recorded a higher chain tip than the current
