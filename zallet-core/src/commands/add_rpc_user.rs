@@ -18,6 +18,13 @@ impl AsyncRunnable for AddRpcUserCmd {
 
         let pwhash = PasswordHash::from_bare(password.expose_secret());
 
+        // Emitting this snippet on stdout is the entire point of the command: the
+        // user pastes it into their `zallet.toml`. It is a deliverable, not a log —
+        // Zallet's only tracing subscriber writes to stderr, and there is no log
+        // file. `username` is the positional argument the user just supplied, so it
+        // is already in argv, and the password itself never leaves `SecretString`:
+        // only its salted hash is printed. CodeQL's `rust/cleartext-logging` still
+        // flags the `user` line, because it treats `println!` as a logging sink.
         eprintln!("{}", fl!("cmd-add-rpc-user-instructions"));
         eprintln!();
         println!("[[rpc.auth]]");
