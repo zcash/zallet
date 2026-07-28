@@ -123,10 +123,59 @@ runtime:
 5. Expire that epoch and verify the whole bounded range restarts with a fresh
    view rather than mixing results across epochs.
 
-The consumer-test seam and typed whole-range retry belong in Zallet core or its
-external integration harness; this backend-only crate cannot make those
-private sync decisions. Gate A must not substitute a full `zallet start`
-attempt, because that would test intentionally unsupported whole-sync methods.
+The consumer-test seam and typed whole-range retry remain in Zallet core; this
+backend-only crate only supplies the admitted chain and invokes that seam from
+ignored tests. Gate A must not substitute a full `zallet start` attempt,
+because that would test intentionally unsupported whole-sync methods.
+
+### Unshippable certification executable
+
+The non-default `bounded-scan-certification` feature forwards to Zallet core's
+test-only bounded-scan seam and adds three ignored library tests. It does not
+add a binary, launcher backend, production hook, or support claim. Build the
+single libtest executable without running it:
+
+```console
+cargo +1.95.0 test --manifest-path backends/zinder/Cargo.toml \
+  --features bounded-scan-certification --locked --no-run \
+  --message-format=json
+```
+
+The external harness invokes exactly one ignored test per fresh OS process:
+
+```text
+chain::tests::endpoint_without_full_blocks_fails_before_wallet_open
+chain::tests::endpoint_certifies_birthday_through_tip
+chain::tests::expired_epoch_reacquires_complete_bounded_scan
+```
+
+Each process receives an absolute real Zallet TOML path in
+`ZIT_ZALLET_CONFIG`, an absolute certification data directory in
+`ZIT_CERTIFICATION_DATADIR`, and an absolute nonexistent JSON destination in
+`ZIT_CERTIFICATION_RESULT`. The common endpoint and half-open range variables
+are `ZIT_ZINDER_ENDPOINT`, `ZIT_REQUESTED_START_HEIGHT`, and
+`ZIT_REQUESTED_END_HEIGHT_EXCLUSIVE`. The positive test is executed twice in
+fresh processes against the same initialized wallet directory to certify
+restart persistence; the wallet must already contain a real account whose
+birthday equals the requested start.
+
+Epoch-rotation certification additionally requires
+`ZIT_RETRY_END_HEIGHT_EXCLUSIVE`, an absolute fresh
+`ZIT_RANGE_BARRIER_DIR`, and `ZIT_BLOCK_FIRST_RANGE_REQUEST=true`. This
+scenario admits exactly one new block, so the retry end must be one greater than
+`ZIT_REQUESTED_END_HEIGHT_EXCLUSIVE`. When a barrier directory is supplied
+for a non-rotation run,
+`ZIT_BLOCK_FIRST_RANGE_REQUEST=false` records its one range attempt without
+blocking it. The private hook records schema-v1
+`range-request-attempt-N.json` files immediately before each native range RPC.
+On the blocked first attempt it also records `predecessor-loaded.json` and
+waits at most 60 seconds for the harness to create
+`continue-range-request`.
+
+All result and marker JSON is written through a same-directory temporary file
+and an atomic no-clobber persist. Existing result or marker files are errors;
+the harness must provide fresh evidence paths rather than overwrite a prior
+run.
 
 The focused backend checks are:
 

@@ -29,6 +29,15 @@ zcash_primitives = "0.29.0"
 zcash_protocol = "0.10.1"
 zinder-client = { git = "https://github.com/gustavovalverde/zinder.git", rev = "479805765d4c277115e534bf26f0a3ed6144bb73" }
 
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["time"] }
+toml = "0.8"
+
+[features]
+default = []
+bounded-scan-certification = ["zallet-core/bounded-scan-certification"]
+
 [patch.crates-io]
 equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
 f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "0531f9d89450d5def16d4c320972e4ce960f9175" }
