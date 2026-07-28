@@ -41,6 +41,10 @@ be considered breaking changes.
   Windows, matching the owner-only mode `0600` it already used on Unix
   (previously it inherited the data directory's access control there). An
   existing database file is still tightened on Unix only.
+- `z_importviewingkey` with `rescan="yes"` for a viewing key the wallet already
+  tracks now rescans from `start_height` (default 0), as `zcashd` does.
+  Previously it returned without rescanning. The rescan re-queues those blocks
+  for every account, but lowers only that account's birthday.
 
 ### Fixed
 
