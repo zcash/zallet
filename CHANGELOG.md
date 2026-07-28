@@ -61,6 +61,15 @@ be considered breaking changes.
   above the connections sync retains.
 - Address-based transparent-history recovery now fails before advancing its
   scan watermark when the selected chain view omits a referenced transaction.
+- `z_getnewaccount`, `z_recoveraccounts`, `z_importkey`, and
+  `z_importviewingkey` no longer race wallet sync (#707). A block scanned while
+  one of these calls was committing could be decrypted without the new keys, so
+  the account's transactions in that block were missed until a rescan. These
+  methods now wait for any in-progress block scan to finish, and return once
+  the sync engine has loaded the new keys. History recovery for the new keys
+  starts immediately instead of after up to 30 seconds. `z_importviewingkey`
+  also loads the imported key into the running sync engine; previously the key
+  was not scanned until Zallet restarted.
 
 ## [0.1.0-beta.4] - 2026-11-01
 

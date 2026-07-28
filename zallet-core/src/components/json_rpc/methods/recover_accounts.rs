@@ -18,7 +18,7 @@ use crate::components::{
         },
     },
     keystore::KeyStore,
-    sync::WalletDecryptorHandle,
+    sync::WalletSyncReconfiguration,
 };
 
 /// Response to a `z_recoveraccounts` RPC request.
@@ -58,7 +58,7 @@ pub(crate) async fn call<C: Chain>(
     wallet: &Database,
     keystore: &KeyStore,
     chain: C,
-    decryptor: &WalletDecryptorHandle,
+    reconfiguration: &WalletSyncReconfiguration,
     accounts: Vec<AccountParameter<'_>>,
 ) -> Response {
     ensure_wallet_is_unlocked(keystore).await?;
@@ -111,9 +111,11 @@ pub(crate) async fn call<C: Chain>(
         }
     }
 
-    // All key material is in hand; import the accounts on a connection scoped to this
-    // block, so it is provably released before the decryptor is signalled below (a
-    // send on a bounded channel, which can wait while the decryptor is busy).
+    // All key material is in hand. Exclude block scans, then import the accounts on a
+    // connection scoped to this block, so it is provably released before the decryptor is
+    // signalled below (a send on a bounded channel, which can wait while the decryptor is
+    // busy).
+    let admitted = reconfiguration.admit_reconfiguration().await;
     let accounts = {
         let mut wallet = wallet_handle(wallet).await?;
         account_args
@@ -136,7 +138,7 @@ pub(crate) async fn call<C: Chain>(
     };
 
     // Reload viewing keys so recovered accounts are scanned without a restart (see z_importkey).
-    if decryptor.reload_keys().await.is_none() {
+    if !admitted.reload_keys_and_wake_history_recovery().await {
         tracing::warn!(
             "sync engine has shut down; recovered accounts won't be scanned until restart"
         );

@@ -11,8 +11,12 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::components::{
     chain::Chain,
-    database::DbConnection,
-    json_rpc::{server::LegacyCode, utils::fetch_account_birthday},
+    database::Database,
+    json_rpc::{
+        server::LegacyCode,
+        utils::{fetch_account_birthday, wallet_handle},
+    },
+    sync::WalletSyncReconfiguration,
 };
 
 /// Response to a `z_importviewingkey` RPC request.
@@ -78,8 +82,9 @@ fn decode_vkey_and_address(
 }
 
 pub(crate) async fn call<C: Chain>(
-    wallet: &mut DbConnection,
+    wallet: &Database,
     chain: C,
+    reconfiguration: &WalletSyncReconfiguration,
     vkey: &str,
     rescan: Option<&str>,
     start_height: Option<u64>,
@@ -96,7 +101,12 @@ pub(crate) async fn call<C: Chain>(
         })
         .transpose()?;
 
-    let chain_tip = wallet
+    // Each wallet read below takes its own scoped connection, released before the chain
+    // query and the reconfiguration admission. The existence check is repeated after
+    // admission, where its result decides the import.
+    let chain_tip = wallet_handle(wallet)
+        .await?
+        .as_ref()
         .chain_height()
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
@@ -119,10 +129,12 @@ pub(crate) async fn call<C: Chain>(
         .map_err(|e| LegacyCode::Wallet.with_message(e.to_string()))?;
 
     // Check if the key is already known to the wallet.
-    let existing_account = wallet
+    let existing_account = wallet_handle(wallet)
+        .await?
+        .as_ref()
         .get_account_for_ufvk(&ufvk)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
-    match existing_account {
+    let birthday = match existing_account {
         Some(account) => {
             if matches!(account.purpose(), AccountPurpose::Spending { .. }) {
                 return Err(LegacyCode::Wallet.with_message(format!(
@@ -134,6 +146,10 @@ pub(crate) async fn call<C: Chain>(
             // TODO: When rescan is "yes" and the key already exists, zcashd would force a
             // rescan from start_height. We could use `WalletWrite::rewind_to_chain_state`
             // for this (see `z_import_address` for an example).
+            return Ok(ResultType {
+                address_type: "sapling".to_string(),
+                address,
+            });
         }
         None => {
             // new key
@@ -149,18 +165,49 @@ pub(crate) async fn call<C: Chain>(
             let chain_view = chain.snapshot().await.map_err(|e| {
                 LegacyCode::Database.with_message(format!("Failed to obtain a chain snapshot: {e}"))
             })?;
-            let birthday = fetch_account_birthday(&chain_view, effective_height, None).await?;
-
-            wallet
-                .import_account_ufvk(
-                    &format!("Imported Sapling viewing key {address}"),
-                    &ufvk,
-                    &birthday,
-                    AccountPurpose::ViewOnly,
-                    None,
-                )
-                .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+            fetch_account_birthday(&chain_view, effective_height, None).await?
         }
+    };
+
+    // Exclude block scans before acquiring the connection for the import, so sync cannot
+    // commit a block that misses the imported key. Re-check existence there: a concurrent
+    // import of the same key may have created the account since the check above.
+    let admitted = reconfiguration.admit_reconfiguration().await;
+    let imported = {
+        let mut wallet = wallet_handle(wallet).await?;
+        match wallet
+            .as_ref()
+            .get_account_for_ufvk(&ufvk)
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+        {
+            Some(account) => {
+                if matches!(account.purpose(), AccountPurpose::Spending { .. }) {
+                    return Err(LegacyCode::Wallet.with_message(format!(
+                        "The wallet already contains the private key for this viewing key (address: {address})",
+                    )));
+                }
+                false
+            }
+            None => {
+                wallet
+                    .as_mut()
+                    .import_account_ufvk(
+                        &format!("Imported Sapling viewing key {address}"),
+                        &ufvk,
+                        &birthday,
+                        AccountPurpose::ViewOnly,
+                        None,
+                    )
+                    .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+                true
+            }
+        }
+    };
+
+    if imported && !admitted.reload_keys_and_wake_history_recovery().await {
+        tracing::warn!(
+            "sync engine has shut down; imported viewing key won't be scanned until restart"
+        );
     }
 
     Ok(ResultType {
