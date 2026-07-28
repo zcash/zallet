@@ -20,6 +20,11 @@ should be considered breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Wallet scans now discard and reacquire a fixed chain view when a pinned block,
+  Sapling tree, Orchard tree, or Ironwood tree has reorged away.
+
 ## [0.1.0-beta.2] - 2026-07-28
 
 ### Changed

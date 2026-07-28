@@ -275,7 +275,7 @@ impl<R: ChainReader> ZebraChainView<R> {
                 .block_header_by_hash(cur_hash)
                 .await?
                 .ok_or_else(|| {
-                    ChainError::unavailable("pinned block reorged away during resolve")
+                    ChainError::view_expired("pinned block reorged away during resolve")
                 })?;
             cur_hash = header.previous_block_hash;
             cur_height = BlockHeight::from_u32(u32::from(cur_height) - 1);
@@ -339,7 +339,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
             }
             None if pinned_finalized => CommitmentTree::empty(),
             None => {
-                return Err(ChainError::unavailable(
+                return Err(ChainError::view_expired(
                     "pinned sapling treestate reorged away",
                 ));
             }
@@ -355,7 +355,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
             .map_err(ChainError::invalid_data)?,
             None if pinned_finalized => CommitmentTree::empty(),
             None => {
-                return Err(ChainError::unavailable(
+                return Err(ChainError::view_expired(
                     "pinned orchard treestate reorged away",
                 ));
             }
@@ -373,7 +373,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
             .map_err(ChainError::invalid_data)?,
             None if pinned_finalized => CommitmentTree::empty(),
             None => {
-                return Err(ChainError::unavailable(
+                return Err(ChainError::view_expired(
                     "pinned ironwood treestate reorged away",
                 ));
             }
@@ -651,6 +651,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use zcash_client_backend::data_api::chain::CommitmentTreeRoot;
+    use zcash_primitives::merkle_tree::write_commitment_tree;
     use zcash_protocol::consensus::NetworkType;
 
     use super::reader::{ChainReader, HeaderInfo, MinedTxInfo, SideTxInfo};
@@ -661,6 +662,35 @@ mod tests {
         BlockHash([height as u8; 32])
     }
 
+    #[derive(Clone, Copy, PartialEq)]
+    enum MissingPinnedData {
+        Header,
+        SaplingTree,
+        OrchardTree,
+        IronwoodTree,
+    }
+
+    fn empty_sapling_tree_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_commitment_tree::<sapling::Node, _, { sapling::NOTE_COMMITMENT_TREE_DEPTH }>(
+            &CommitmentTree::empty(),
+            &mut bytes,
+        )
+        .unwrap();
+        bytes
+    }
+
+    fn empty_orchard_tree_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_commitment_tree::<
+            orchard::tree::MerkleHashOrchard,
+            _,
+            { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+        >(&CommitmentTree::empty(), &mut bytes)
+        .unwrap();
+        bytes
+    }
+
     /// A mock linear chain: `block_header_by_hash([n; 32])` yields parent `[n-1; 32]`,
     /// and counts header lookups so tests can assert the resolve walk doesn't re-fetch
     /// cached ranges.
@@ -668,6 +698,7 @@ mod tests {
     struct MockChainReader {
         tip_height: u32,
         header_calls: Arc<AtomicU32>,
+        missing_pinned_data: Option<MissingPinnedData>,
     }
 
     impl ChainReader for MockChainReader {
@@ -691,6 +722,9 @@ mod tests {
             hash: BlockHash,
         ) -> Result<Option<HeaderInfo>, ChainError> {
             self.header_calls.fetch_add(1, Ordering::SeqCst);
+            if self.missing_pinned_data == Some(MissingPinnedData::Header) {
+                return Ok(None);
+            }
             let height = u32::from(hash.0[0]);
             Ok(Some(HeaderInfo {
                 height: BlockHeight::from_u32(height),
@@ -698,13 +732,22 @@ mod tests {
             }))
         }
         async fn sapling_tree_bytes(&self, _: BlockHash) -> Result<Option<Vec<u8>>, ChainError> {
-            Ok(None)
+            Ok(
+                (self.missing_pinned_data != Some(MissingPinnedData::SaplingTree))
+                    .then(empty_sapling_tree_bytes),
+            )
         }
         async fn orchard_tree_bytes(&self, _: BlockHash) -> Result<Option<Vec<u8>>, ChainError> {
-            Ok(None)
+            Ok(
+                (self.missing_pinned_data != Some(MissingPinnedData::OrchardTree))
+                    .then(empty_orchard_tree_bytes),
+            )
         }
         async fn ironwood_tree_bytes(&self, _: BlockHash) -> Result<Option<Vec<u8>>, ChainError> {
-            Ok(None)
+            Ok(
+                (self.missing_pinned_data != Some(MissingPinnedData::IronwoodTree))
+                    .then(empty_orchard_tree_bytes),
+            )
         }
         async fn find_fork_point(
             &self,
@@ -759,6 +802,7 @@ mod tests {
         tip_height: u32,
         floor: u32,
         calls: Arc<AtomicU32>,
+        missing_pinned_data: Option<MissingPinnedData>,
     ) -> ZebraChainView<MockChainReader> {
         let tip = ChainBlock::new(BlockHeight::from_u32(tip_height), h(tip_height));
         let mut cache = BTreeMap::new();
@@ -767,6 +811,7 @@ mod tests {
             reader: MockChainReader {
                 tip_height,
                 header_calls: calls,
+                missing_pinned_data,
             },
             validator_rpc: ValidatorRpcClient::new("127.0.0.1:1", "", "", None).unwrap(),
             params: Network::from_type(NetworkType::Main, &[]),
@@ -779,7 +824,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_walks_and_memoizes() {
         let calls = Arc::new(AtomicU32::new(0));
-        let view = test_view(10, 2, calls.clone());
+        let view = test_view(10, 2, calls.clone(), None);
 
         // The tip is seeded in the cache: a hit, no header walk.
         assert_eq!(
@@ -815,12 +860,10 @@ mod tests {
 
     #[tokio::test]
     async fn tree_state_as_of_supplies_an_empty_ironwood_tree() {
-        // The mock reader returns no tree bytes, so for a finalized height every pool's
-        // final tree is empty. For Ironwood this pins the `None` fallback: Zebra returns no
-        // tree for finalized heights where the pool was not yet active (pre-NU6.3), and the
-        // chain view must map that to an empty frontier like the Sapling and Orchard reads.
+        // The mock reader returns no Ironwood tree bytes. At a finalized pre-NU6.3
+        // height, the chain view must interpret that absence as an empty frontier.
         let calls = Arc::new(AtomicU32::new(0));
-        let view = test_view(10, 5, calls);
+        let view = test_view(10, 5, calls, Some(MissingPinnedData::IronwoodTree));
 
         let state = view
             .tree_state_as_of(BlockHeight::from_u32(3))
@@ -832,5 +875,65 @@ mod tests {
         assert_eq!(state.final_sapling_tree().tree_size(), 0);
         assert_eq!(state.final_orchard_tree().tree_size(), 0);
         assert_eq!(state.final_ironwood_tree().tree_size(), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_pinned_header_expires_the_current_view() {
+        let view = test_view(
+            10,
+            2,
+            Arc::new(AtomicU32::new(0)),
+            Some(MissingPinnedData::Header),
+        );
+
+        assert!(matches!(
+            view.resolve(BlockHeight::from_u32(9)).await,
+            Err(ChainError::ViewExpired(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_non_finalized_sapling_tree_expires_the_current_view() {
+        let view = test_view(
+            10,
+            2,
+            Arc::new(AtomicU32::new(0)),
+            Some(MissingPinnedData::SaplingTree),
+        );
+
+        assert!(matches!(
+            view.tree_state_as_of(BlockHeight::from_u32(9)).await,
+            Err(ChainError::ViewExpired(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_non_finalized_orchard_tree_expires_the_current_view() {
+        let view = test_view(
+            10,
+            2,
+            Arc::new(AtomicU32::new(0)),
+            Some(MissingPinnedData::OrchardTree),
+        );
+
+        assert!(matches!(
+            view.tree_state_as_of(BlockHeight::from_u32(9)).await,
+            Err(ChainError::ViewExpired(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_non_finalized_ironwood_tree_expires_the_current_view() {
+        let view = test_view(
+            10,
+            2,
+            Arc::new(AtomicU32::new(0)),
+            Some(MissingPinnedData::IronwoodTree),
+        );
+
+        assert!(matches!(
+            view.tree_state_as_of(BlockHeight::from_u32(9)).await,
+            Err(ChainError::ViewExpired(_))
+        ));
     }
 }
