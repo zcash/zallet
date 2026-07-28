@@ -5171,7 +5171,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zallet-zinder-tracer"
+name = "zallet-zinder"
 version = "0.0.0"
 dependencies = [
  "futures",
@@ -5568,7 +5568,7 @@ dependencies = [
 [[package]]
 name = "zinder-client"
 version = "0.5.0-rc.8"
-source = "git+https://github.com/gustavovalverde/zinder.git?rev=479805765d4c277115e534bf26f0a3ed6144bb73#479805765d4c277115e534bf26f0a3ed6144bb73"
+source = "git+https://github.com/gustavovalverde/zinder.git?rev=d8afdb9dd0bfbf5b57f44a110b293a84add5f4ef#d8afdb9dd0bfbf5b57f44a110b293a84add5f4ef"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5586,7 +5586,7 @@ dependencies = [
 [[package]]
 name = "zinder-core"
 version = "0.5.0-rc.8"
-source = "git+https://github.com/gustavovalverde/zinder.git?rev=479805765d4c277115e534bf26f0a3ed6144bb73#479805765d4c277115e534bf26f0a3ed6144bb73"
+source = "git+https://github.com/gustavovalverde/zinder.git?rev=d8afdb9dd0bfbf5b57f44a110b293a84add5f4ef#d8afdb9dd0bfbf5b57f44a110b293a84add5f4ef"
 dependencies = [
  "blake2b_simd",
  "hex",
@@ -5600,7 +5600,7 @@ dependencies = [
 [[package]]
 name = "zinder-proto"
 version = "0.5.0-rc.8"
-source = "git+https://github.com/gustavovalverde/zinder.git?rev=479805765d4c277115e534bf26f0a3ed6144bb73#479805765d4c277115e534bf26f0a3ed6144bb73"
+source = "git+https://github.com/gustavovalverde/zinder.git?rev=d8afdb9dd0bfbf5b57f44a110b293a84add5f4ef#d8afdb9dd0bfbf5b57f44a110b293a84add5f4ef"
 dependencies = [
  "prost",
  "thiserror 2.0.19",

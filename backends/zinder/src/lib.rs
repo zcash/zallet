@@ -1,9 +1,9 @@
-//! Unshippable P1 integration tracer for Zallet's Zinder chain backend.
+//! Unshippable integration backend for Zallet's Zinder wallet runtime.
 //!
-//! The crate implements the methods needed for a bounded shielded scan through
-//! Zallet's [`zallet_core::components::chain`] traits. It satisfies the traits
-//! structurally, but methods assigned to later vertical slices fail explicitly.
-//! It is not a complete chain backend and cannot run Zallet's full sync loop.
+//! The crate implements the chain-read methods needed by the current wallet
+//! runtime through Zallet's [`zallet_core::components::chain`] traits. It
+//! satisfies the traits structurally, but methods assigned to later vertical
+//! slices fail explicitly. It is not yet a complete chain backend.
 
 #![deny(warnings, missing_docs, trivial_casts, unused_qualifications)]
 #![forbid(unsafe_code)]
@@ -16,15 +16,16 @@ mod chain;
 
 pub use chain::{ZinderBackend, ZinderChain, ZinderChainView};
 
-/// Capabilities required by Zallet's bounded shielded-scan tracer.
+/// Capabilities required to construct Zallet's Zinder wallet runtime.
 ///
 /// The list deliberately excludes transparent history, mempool observation,
 /// and transaction broadcast. Those operations belong to later vertical
-/// slices and must not be inferred from bounded-scan readiness.
-pub const BOUNDED_SCAN_REQUIRED_CAPABILITIES: [Capability; 8] = [
+/// slices and must not be inferred from chain-read readiness.
+pub const WALLET_RUNTIME_REQUIRED_CAPABILITIES: [Capability; 9] = [
     Capability::ServerInfo,
     Capability::NetworkUpgradeActivations,
     Capability::VisibleTipBlock,
+    Capability::BlockIdBySelector,
     Capability::TreeState,
     Capability::SubtreeRoots,
     Capability::SubtreeRootsIronwood,
@@ -47,21 +48,23 @@ pub fn open_zinder_index(
     })
 }
 
-/// Reads endpoint metadata and returns every bounded-scan capability missing.
+/// Reads endpoint metadata and returns every wallet-runtime capability missing.
 ///
-/// Returning the complete set gives the tracer one actionable preflight result
-/// instead of a sequence of one-capability-at-a-time failures.
-pub async fn probe_missing_bounded_scan_capabilities(
+/// Returning the complete set gives the composition root one actionable
+/// preflight result instead of a sequence of one-capability-at-a-time failures.
+pub async fn probe_missing_wallet_runtime_capabilities(
     index: &RemoteChainIndex,
 ) -> Result<Vec<Capability>, IndexerError> {
     let server_info = index.server_info().await?;
-    Ok(missing_bounded_scan_capabilities(&server_info.capabilities))
+    Ok(missing_wallet_runtime_capabilities(
+        &server_info.capabilities,
+    ))
 }
 
-/// Returns every bounded-scan capability absent from an advertised set.
+/// Returns every wallet-runtime capability absent from an advertised set.
 #[must_use]
-pub fn missing_bounded_scan_capabilities(advertised: &[Capability]) -> Vec<Capability> {
-    BOUNDED_SCAN_REQUIRED_CAPABILITIES
+pub fn missing_wallet_runtime_capabilities(advertised: &[Capability]) -> Vec<Capability> {
+    WALLET_RUNTIME_REQUIRED_CAPABILITIES
         .iter()
         .filter(|required| !advertised.contains(required))
         .cloned()
@@ -72,7 +75,7 @@ pub fn missing_bounded_scan_capabilities(advertised: &[Capability]) -> Vec<Capab
 mod tests {
     use zinder_client::Capability;
 
-    use super::{BOUNDED_SCAN_REQUIRED_CAPABILITIES, missing_bounded_scan_capabilities};
+    use super::{WALLET_RUNTIME_REQUIRED_CAPABILITIES, missing_wallet_runtime_capabilities};
 
     #[test]
     fn preflight_reports_every_missing_capability_in_requirement_order() {
@@ -83,9 +86,10 @@ mod tests {
         ];
 
         assert_eq!(
-            missing_bounded_scan_capabilities(&advertised),
+            missing_wallet_runtime_capabilities(&advertised),
             vec![
                 Capability::NetworkUpgradeActivations,
+                Capability::BlockIdBySelector,
                 Capability::SubtreeRoots,
                 Capability::SubtreeRootsIronwood,
                 Capability::FullBlock,
@@ -100,6 +104,7 @@ mod tests {
             Capability::ServerInfo,
             Capability::NetworkUpgradeActivations,
             Capability::VisibleTipBlock,
+            Capability::BlockIdBySelector,
             Capability::TreeState,
             Capability::SubtreeRoots,
             Capability::SubtreeRootsIronwood,
@@ -108,10 +113,10 @@ mod tests {
         ];
 
         assert_eq!(
-            BOUNDED_SCAN_REQUIRED_CAPABILITIES,
+            WALLET_RUNTIME_REQUIRED_CAPABILITIES,
             advertised_capabilities.as_slice()
         );
         advertised_capabilities.push(Capability::Broadcast);
-        assert!(missing_bounded_scan_capabilities(&advertised_capabilities).is_empty());
+        assert!(missing_wallet_runtime_capabilities(&advertised_capabilities).is_empty());
     }
 }

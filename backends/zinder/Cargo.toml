@@ -1,9 +1,9 @@
 [package]
-name = "zallet-zinder-tracer"
+name = "zallet-zinder"
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.95"
-description = "Unshippable P1 integration tracer for the Zallet and Zinder chain boundary"
+description = "Unshippable Zallet backend for the Zinder wallet runtime"
 repository = "https://github.com/zcash/zallet"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -27,7 +27,7 @@ transparent = { package = "zcash_transparent", version = "0.9.0" }
 zcash_client_backend = "0.24.0-rc.1"
 zcash_primitives = "0.29.0"
 zcash_protocol = "0.10.1"
-zinder-client = { git = "https://github.com/gustavovalverde/zinder.git", rev = "479805765d4c277115e534bf26f0a3ed6144bb73" }
+zinder-client = { git = "https://github.com/gustavovalverde/zinder.git", rev = "d8afdb9dd0bfbf5b57f44a110b293a84add5f4ef" }
 
 [dev-dependencies]
 tempfile = "3"

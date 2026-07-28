@@ -50,14 +50,21 @@ use zcash_protocol::{
     consensus::{self, BlockHeight},
 };
 use zinder_client::{
-    BlockHeight as ZinderBlockHeight, BlockHeightRange as ZinderBlockHeightRange,
-    BlockId as ZinderBlockId, Capability, ChainEpochId, ChainIndex, IndexerError,
-    MAX_SUBTREE_ROOTS_PER_REQUEST, Network as ZinderNetwork, OwnedChainSnapshot, RemoteChainIndex,
-    RetryPolicy, ShieldedProtocol, SubtreeRootArtifact, SubtreeRootIndex, SubtreeRootRange,
-    TreeStateArtifact,
+    BlockBlobArtifact, BlockHash as ZinderBlockHash, BlockHeight as ZinderBlockHeight,
+    BlockHeightRange as ZinderBlockHeightRange, BlockId as ZinderBlockId, BlockSelector,
+    Capability, ChainEpochId, ChainIndex, IndexStream, IndexerError, MAX_SUBTREE_ROOTS_PER_REQUEST,
+    Network as ZinderNetwork, OwnedChainSnapshot, RemoteChainIndex, RetryPolicy, ShieldedProtocol,
+    SubtreeRootArtifact, SubtreeRootIndex, SubtreeRootRange, TreeStateArtifact,
 };
 
-use crate::{open_zinder_index, probe_missing_bounded_scan_capabilities};
+use crate::{open_zinder_index, probe_missing_wallet_runtime_capabilities};
+
+/// Maximum full blocks requested from Zinder in one range call.
+///
+/// Zinder's native wallet endpoint rejects wider full-block ranges. Paging
+/// here keeps an arbitrarily long Zallet sync demand-driven while every page
+/// remains bound to the same captured chain epoch.
+const FULL_BLOCK_PAGE_SIZE: u64 = 1_000;
 
 #[cfg(all(test, feature = "bounded-scan-certification"))]
 const RANGE_BARRIER_DIRECTORY_ENV: &str = "ZIT_RANGE_BARRIER_DIR";
@@ -76,18 +83,18 @@ const CONTINUE_RANGE_REQUEST_MARKER_FILENAME: &str = "continue-range-request";
 #[cfg(all(test, feature = "bounded-scan-certification"))]
 static RANGE_REQUEST_ATTEMPT_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Factory-shaped entry point for the P1 Zinder chain backend tracer.
+/// Factory-shaped entry point for the Zinder chain backend.
 ///
 /// The endpoint is supplied by the composition root rather than added to
 /// Zallet's production configuration. This type is not registered by a Zallet
-/// binary and does not make the tracer a production backend.
+/// binary and does not make this crate a production backend.
 #[derive(Clone)]
 pub struct ZinderBackend {
     endpoint: String,
 }
 
 impl ZinderBackend {
-    /// Creates a P1 backend factory for one native Zinder wallet endpoint.
+    /// Creates a backend factory for one native Zinder wallet endpoint.
     #[must_use]
     pub fn new(endpoint: String) -> Self {
         Self { endpoint }
@@ -122,19 +129,19 @@ pub struct ZinderChain {
 }
 
 impl ZinderChain {
-    /// Connects to Zinder and verifies every P1 bounded-scan requirement.
+    /// Connects to Zinder and verifies every wallet-runtime requirement.
     ///
     /// Construction performs a real `ServerInfo` request so an unreachable
     /// endpoint, network mismatch, or incomplete capability set fails before
     /// this function returns a chain value.
     pub async fn connect(endpoint: String, params: Network) -> Result<Self, Error> {
         let index = open_zinder_index(endpoint, zinder_network(params)).map_err(init_error)?;
-        let missing = probe_missing_bounded_scan_capabilities(&index)
+        let missing = probe_missing_wallet_runtime_capabilities(&index)
             .await
             .map_err(init_error)?;
         if !missing.is_empty() {
             return Err(ErrorKind::Init
-                .context(bounded_scan_preflight_message(&missing))
+                .context(wallet_runtime_preflight_message(&missing))
                 .into());
         }
 
@@ -187,6 +194,51 @@ impl<I: ChainIndex + ?Sized> SubtreeRootSnapshot for OwnedChainSnapshot<I> {
         subtree_root_range: SubtreeRootRange,
     ) -> impl Future<Output = Result<Vec<Self::SubtreeRoot>, IndexerError>> {
         OwnedChainSnapshot::subtree_roots_in_range(self, subtree_root_range)
+    }
+}
+
+trait PinnedChainSnapshot: Clone + Send + Sync + 'static {
+    fn block_id_by_selector(
+        &self,
+        selector: BlockSelector,
+    ) -> impl Future<Output = Result<ZinderBlockId, IndexerError>> + Send;
+
+    fn retained_full_block_at(
+        &self,
+        height: ZinderBlockHeight,
+    ) -> impl Future<Output = Result<BlockBlobArtifact, IndexerError>> + Send;
+
+    fn retained_full_blocks_in_range(
+        &self,
+        block_range: ZinderBlockHeightRange,
+    ) -> impl Future<Output = Result<IndexStream<BlockBlobArtifact>, IndexerError>> + Send;
+}
+
+impl PinnedChainSnapshot for OwnedChainSnapshot<RemoteChainIndex> {
+    fn block_id_by_selector(
+        &self,
+        selector: BlockSelector,
+    ) -> impl Future<Output = Result<ZinderBlockId, IndexerError>> + Send {
+        OwnedChainSnapshot::block_id_by_selector(self, selector)
+    }
+
+    async fn retained_full_block_at(
+        &self,
+        height: ZinderBlockHeight,
+    ) -> Result<BlockBlobArtifact, IndexerError> {
+        OwnedChainSnapshot::full_block_at(self, height).await
+    }
+
+    async fn retained_full_blocks_in_range(
+        &self,
+        block_range: ZinderBlockHeightRange,
+    ) -> Result<IndexStream<BlockBlobArtifact>, IndexerError> {
+        #[cfg(all(test, feature = "bounded-scan-certification"))]
+        {
+            await_range_request_barrier(self, block_range).await?;
+        }
+
+        OwnedChainSnapshot::full_blocks_in_range(self, block_range).await
     }
 }
 
@@ -276,7 +328,7 @@ impl Chain for ZinderChain {
     }
 
     async fn broadcast_transaction(&self, _tx: &Transaction) -> Result<(), ChainError> {
-        Err(unsupported_by_bounded_scan_tracer("broadcast_transaction"))
+        Err(unsupported_chain_operation("broadcast_transaction"))
     }
 
     async fn get_sapling_subtree_roots(
@@ -345,9 +397,9 @@ impl ChainView for ZinderChainView {
 
     async fn find_fork_point(
         &self,
-        _locator: &BlockLocator,
+        locator: &BlockLocator,
     ) -> Result<Option<ChainBlock>, ChainError> {
-        Err(unsupported_by_bounded_scan_tracer("find_fork_point"))
+        find_fork_point_in_snapshot(&self.snapshot, locator).await
     }
 
     async fn tree_state_as_of(
@@ -368,55 +420,54 @@ impl ChainView for ZinderChainView {
 
     async fn get_block_header(
         &self,
-        _height: BlockHeight,
+        height: BlockHeight,
     ) -> Result<Option<BlockHeader>, ChainError> {
-        Err(unsupported_by_bounded_scan_tracer("get_block_header"))
+        block_header_from_snapshot(&self.snapshot, self.tip.height(), height).await
     }
 
     async fn get_block(&self, height: BlockHeight) -> Result<Option<Block>, ChainError> {
-        self.full_block_bytes(height)
+        self.retained_full_block(height)
             .await?
-            .map(|bytes| decode_block(bytes, &self.params, height))
+            .map(|block| decode_retained_block(block, &self.params, height))
             .transpose()
     }
 
-    fn stream_blocks_to_tip(
-        &self,
-        _start: BlockHeight,
-    ) -> BoxStream<'_, Result<Block, ChainError>> {
-        unsupported_stream_by_bounded_scan_tracer("stream_blocks_to_tip")
+    fn stream_blocks_to_tip(&self, start: BlockHeight) -> BoxStream<'_, Result<Block, ChainError>> {
+        self.decode_retained_full_blocks(stream_retained_full_blocks_to_tip(
+            self.snapshot.clone(),
+            start,
+            self.tip.height(),
+        ))
     }
 
     fn stream_blocks(
         &self,
         range: &Range<BlockHeight>,
     ) -> BoxStream<'_, Result<Block, ChainError>> {
-        let Some(range) = zinder_range_from_half_open(range, self.tip.height()) else {
-            return stream::empty().boxed();
-        };
-
-        self.stream_zinder_range(range)
+        self.decode_retained_full_blocks(stream_retained_full_blocks_in_half_open_range(
+            self.snapshot.clone(),
+            range,
+            self.tip.height(),
+        ))
     }
 
     async fn get_mempool_stream(&self) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
-        Err(unsupported_by_bounded_scan_tracer("get_mempool_stream"))
+        Err(unsupported_chain_operation("get_mempool_stream"))
     }
 
     async fn get_transaction(&self, _txid: TxId) -> Result<Option<ChainTx>, ChainError> {
-        Err(unsupported_by_bounded_scan_tracer("get_transaction"))
+        Err(unsupported_chain_operation("get_transaction"))
     }
 
     async fn get_transaction_status(&self, _txid: TxId) -> Result<TransactionStatus, ChainError> {
-        Err(unsupported_by_bounded_scan_tracer("get_transaction_status"))
+        Err(unsupported_chain_operation("get_transaction_status"))
     }
 
     async fn get_address_unspent_outpoints(
         &self,
         _address: &TransparentAddress,
     ) -> Result<Vec<(TxId, u32)>, ChainError> {
-        Err(unsupported_by_bounded_scan_tracer(
-            "get_address_unspent_outpoints",
-        ))
+        Err(unsupported_chain_operation("get_address_unspent_outpoints"))
     }
 
     async fn get_address_tx_ids(
@@ -424,47 +475,139 @@ impl ChainView for ZinderChainView {
         _address: &TransparentAddress,
         _range: Range<BlockHeight>,
     ) -> Result<Vec<TxId>, ChainError> {
-        Err(unsupported_by_bounded_scan_tracer("get_address_tx_ids"))
+        Err(unsupported_chain_operation("get_address_tx_ids"))
     }
 }
 
 impl ZinderChainView {
-    async fn full_block_bytes(&self, height: BlockHeight) -> Result<Option<Vec<u8>>, ChainError> {
-        if height > self.tip.height() {
-            return Ok(None);
-        }
-
-        match self.snapshot.full_block_at(zinder_height(height)).await {
-            Ok(artifact) => Ok(Some(artifact.raw_block_bytes)),
-            Err(IndexerError::NotFound { .. }) => Ok(None),
-            Err(error) => Err(chain_error(error)),
-        }
+    async fn retained_full_block(
+        &self,
+        height: BlockHeight,
+    ) -> Result<Option<BlockBlobArtifact>, ChainError> {
+        retained_full_block_from_snapshot(&self.snapshot, self.tip.height(), height).await
     }
 
-    fn stream_zinder_range(
+    fn decode_retained_full_blocks(
         &self,
-        range: ZinderBlockHeightRange,
+        retained_blocks: BoxStream<'static, Result<BlockBlobArtifact, ChainError>>,
     ) -> BoxStream<'_, Result<Block, ChainError>> {
-        let snapshot = self.snapshot.clone();
         let params = self.params;
 
-        stream::once(async move {
-            #[cfg(all(test, feature = "bounded-scan-certification"))]
-            {
-                await_range_request_barrier(&snapshot, range).await?;
+        retained_blocks
+            .map(move |result| {
+                result.and_then(|block| {
+                    let height = BlockHeight::from_u32(block.height.value());
+                    decode_retained_block(block, &params, height)
+                })
+            })
+            .boxed()
+    }
+}
+
+async fn find_fork_point_in_snapshot<S: PinnedChainSnapshot>(
+    snapshot: &S,
+    locator: &BlockLocator,
+) -> Result<Option<ChainBlock>, ChainError> {
+    for hash in locator.hashes() {
+        let selector = BlockSelector::from_hash(ZinderBlockHash::from_bytes(hash.0));
+        match snapshot.block_id_by_selector(selector).await {
+            Ok(block) => return Ok(Some(chain_block(block))),
+            Err(IndexerError::NotFound { resource: "block" }) => {}
+            Err(error) => return Err(chain_error(error)),
+        }
+    }
+
+    Ok(None)
+}
+
+async fn retained_full_block_from_snapshot<S: PinnedChainSnapshot>(
+    snapshot: &S,
+    tip: BlockHeight,
+    height: BlockHeight,
+) -> Result<Option<BlockBlobArtifact>, ChainError> {
+    if height > tip {
+        return Ok(None);
+    }
+
+    match snapshot.retained_full_block_at(zinder_height(height)).await {
+        Ok(block) => Ok(Some(block)),
+        Err(IndexerError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(chain_error(error)),
+    }
+}
+
+async fn block_header_from_snapshot<S: PinnedChainSnapshot>(
+    snapshot: &S,
+    tip: BlockHeight,
+    height: BlockHeight,
+) -> Result<Option<BlockHeader>, ChainError> {
+    retained_full_block_from_snapshot(snapshot, tip, height)
+        .await?
+        .map(|block| decode_retained_block_header(block, height))
+        .transpose()
+}
+
+fn stream_retained_full_blocks_to_tip<S: PinnedChainSnapshot>(
+    snapshot: S,
+    start: BlockHeight,
+    tip: BlockHeight,
+) -> BoxStream<'static, Result<BlockBlobArtifact, ChainError>> {
+    stream_retained_full_blocks_in_range(
+        snapshot,
+        ZinderBlockHeightRange::inclusive(zinder_height(start), zinder_height(tip)),
+    )
+}
+
+fn stream_retained_full_blocks_in_half_open_range<S: PinnedChainSnapshot>(
+    snapshot: S,
+    range: &Range<BlockHeight>,
+    tip: BlockHeight,
+) -> BoxStream<'static, Result<BlockBlobArtifact, ChainError>> {
+    match zinder_range_from_half_open(range, tip) {
+        Some(block_range) => stream_retained_full_blocks_in_range(snapshot, block_range),
+        None => stream::empty().boxed(),
+    }
+}
+
+fn stream_retained_full_blocks_in_range<S: PinnedChainSnapshot>(
+    snapshot: S,
+    block_range: ZinderBlockHeightRange,
+) -> BoxStream<'static, Result<BlockBlobArtifact, ChainError>> {
+    let next_start_height = u64::from(block_range.start.value());
+    let range_end_height = u64::from(block_range.end.value());
+
+    stream::try_unfold(next_start_height, move |next_start_height| {
+        let snapshot = snapshot.clone();
+        async move {
+            if next_start_height > range_end_height {
+                return Ok(None);
             }
 
-            snapshot.full_blocks_in_range(range).await
-        })
-        .try_flatten()
-        .map(move |result| {
-            result.map_err(chain_error).and_then(|artifact| {
-                let height = BlockHeight::from_u32(artifact.height.value());
-                decode_block(artifact.raw_block_bytes, &params, height)
-            })
-        })
-        .boxed()
-    }
+            let page_end_height = next_start_height
+                .saturating_add(FULL_BLOCK_PAGE_SIZE - 1)
+                .min(range_end_height);
+            let page_start = u32::try_from(next_start_height).map_err(|error| {
+                invalid_data(format!("full-block page start is invalid: {error}"))
+            })?;
+            let page_end = u32::try_from(page_end_height).map_err(|error| {
+                invalid_data(format!("full-block page end is invalid: {error}"))
+            })?;
+            let block_range = ZinderBlockHeightRange::inclusive(
+                ZinderBlockHeight::new(page_start),
+                ZinderBlockHeight::new(page_end),
+            );
+            let page = snapshot
+                .retained_full_blocks_in_range(block_range)
+                .await
+                .map_err(chain_error)?
+                .map_err(chain_error)
+                .boxed();
+
+            Ok(Some((page, page_end_height + 1)))
+        }
+    })
+    .try_flatten()
+    .boxed()
 }
 
 #[cfg(all(test, feature = "bounded-scan-certification"))]
@@ -618,14 +761,14 @@ fn range_request_barrier_error(message: impl Into<String>) -> IndexerError {
     }
 }
 
-fn bounded_scan_preflight_message(missing: &[Capability]) -> String {
+fn wallet_runtime_preflight_message(missing: &[Capability]) -> String {
     let missing_names = missing
         .iter()
         .map(Capability::as_str)
         .collect::<Vec<_>>()
         .join(", ");
     let mut preflight_error =
-        format!("Zinder endpoint is missing bounded-scan capabilities: {missing_names}");
+        format!("Zinder endpoint is missing wallet-runtime capabilities: {missing_names}");
 
     if missing.iter().any(|capability| {
         matches!(
@@ -677,23 +820,72 @@ fn zinder_range_from_half_open(
     ))
 }
 
-fn decode_block(
-    bytes: Vec<u8>,
+fn decode_retained_block(
+    retained_block: BlockBlobArtifact,
     params: &Network,
     requested_height: BlockHeight,
 ) -> Result<Block, ChainError> {
-    let block = Block::read(bytes.as_slice(), params).map_err(|error| {
-        invalid_data(format!(
-            "invalid full block at height {requested_height}: {error}"
-        ))
-    })?;
+    let block =
+        Block::read(retained_block.raw_block_bytes.as_slice(), params).map_err(|error| {
+            invalid_data(format!(
+                "invalid full block at height {requested_height}: {error}"
+            ))
+        })?;
     if block.claimed_height() != requested_height {
         return Err(invalid_data(format!(
             "full block claimed height {} for requested height {requested_height}",
             block.claimed_height()
         )));
     }
+    validate_retained_block_identity(&retained_block, block.header(), requested_height)?;
     Ok(block)
+}
+
+fn decode_retained_block_header(
+    retained_block: BlockBlobArtifact,
+    requested_height: BlockHeight,
+) -> Result<BlockHeader, ChainError> {
+    let header = BlockHeader::read(retained_block.raw_block_bytes.as_slice()).map_err(|error| {
+        invalid_data(format!(
+            "invalid full-block header at height {requested_height}: {error}"
+        ))
+    })?;
+    validate_retained_block_identity(&retained_block, &header, requested_height)?;
+    Ok(header)
+}
+
+fn validate_retained_block_identity(
+    retained_block: &BlockBlobArtifact,
+    header: &BlockHeader,
+    requested_height: BlockHeight,
+) -> Result<(), ChainError> {
+    let retained_height = BlockHeight::from_u32(retained_block.height.value());
+    if retained_height != requested_height {
+        return Err(invalid_data(format!(
+            "retained full block identified height {retained_height} for requested height \
+             {requested_height}"
+        )));
+    }
+
+    let retained_hash = BlockHash(retained_block.block_hash.as_bytes());
+    if header.hash() != retained_hash {
+        return Err(invalid_data(format!(
+            "full-block header hash {} differs from retained block hash {retained_hash} at height \
+             {requested_height}",
+            header.hash()
+        )));
+    }
+
+    let retained_parent_hash = BlockHash(retained_block.parent_hash.as_bytes());
+    if header.prev_block != retained_parent_hash {
+        return Err(invalid_data(format!(
+            "full-block header parent {} differs from retained parent {retained_parent_hash} at \
+             height {requested_height}",
+            header.prev_block
+        )));
+    }
+
+    Ok(())
 }
 
 fn chain_state(artifact: TreeStateArtifact) -> Result<ChainState, ChainError> {
@@ -874,22 +1066,21 @@ fn invalid_data(message: impl Into<String>) -> ChainError {
     ChainError::invalid_data(io::Error::new(io::ErrorKind::InvalidData, message.into()))
 }
 
-fn unsupported_by_bounded_scan_tracer(method: &'static str) -> ChainError {
+fn unsupported_chain_operation(method: &'static str) -> ChainError {
     ChainError::backend(io::Error::new(
         io::ErrorKind::Unsupported,
-        format!("{method} is unsupported by the bounded-scan tracer"),
+        format!("{method} is not implemented by the Zinder backend"),
     ))
-}
-
-fn unsupported_stream_by_bounded_scan_tracer(
-    method: &'static str,
-) -> BoxStream<'static, Result<Block, ChainError>> {
-    stream::once(async move { Err(unsupported_by_bounded_scan_tracer(method)) }).boxed()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, future};
+    use std::{
+        cell::RefCell,
+        collections::HashMap,
+        future,
+        sync::{Arc, Mutex},
+    };
 
     #[cfg(feature = "bounded-scan-certification")]
     use std::{
@@ -904,10 +1095,23 @@ mod tests {
         BoundedScanCertificationConfig, BoundedScanCertificationOutcome, certify_bounded_scan,
     };
 
+    use transparent::{
+        builder::Coinbase,
+        bundle::{Bundle, TxIn},
+    };
+    use zcash_primitives::{
+        block::BlockHeaderData,
+        transaction::{Authorized, TransactionData, TxVersion},
+    };
+    use zcash_protocol::consensus::BranchId;
+
     use super::*;
-    use zinder_client::{BlockHash as ZinderBlockHash, ChainEpochId};
+    use zinder_client::ChainEpochId;
 
     const CAPTURED_CHAIN_EPOCH_ID: ChainEpochId = ChainEpochId::new(41);
+    const CONFIGURED_RECOVERY_BATCH_SIZE: u32 = 10_000;
+    const TEST_STREAM_START_HEIGHT: u32 = 5;
+    const TEST_BLOCK_TRANSACTION_COUNT: u8 = 1;
 
     #[cfg(feature = "bounded-scan-certification")]
     const ZINDER_ENDPOINT_ENV: &str = "ZIT_ZINDER_ENDPOINT";
@@ -1202,6 +1406,774 @@ mod tests {
         ));
     }
 
+    #[derive(Clone, Copy)]
+    enum BlockLookupResponse {
+        Canonical(ZinderBlockId),
+        BlockNotFound,
+        UnrelatedNotFound,
+        RemoteBlockNotInBestChain,
+        ViewExpired,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingPinnedChainSnapshot {
+        block_lookup_by_hash: Arc<HashMap<ZinderBlockHash, BlockLookupResponse>>,
+        requested_block_selectors: Arc<Mutex<Vec<BlockSelector>>>,
+        full_blocks_by_height: Arc<HashMap<ZinderBlockHeight, BlockBlobArtifact>>,
+        requested_full_block_heights: Arc<Mutex<Vec<ZinderBlockHeight>>>,
+        requested_full_block_ranges: Arc<Mutex<Vec<ZinderBlockHeightRange>>>,
+        expiring_range_request_number: Option<usize>,
+    }
+
+    impl RecordingPinnedChainSnapshot {
+        fn with_block_lookup(
+            mut self,
+            block_hash: ZinderBlockHash,
+            response: BlockLookupResponse,
+        ) -> Self {
+            Arc::make_mut(&mut self.block_lookup_by_hash).insert(block_hash, response);
+            self
+        }
+
+        fn with_retained_full_block_at(
+            mut self,
+            requested_height: ZinderBlockHeight,
+            retained_block: BlockBlobArtifact,
+        ) -> Self {
+            Arc::make_mut(&mut self.full_blocks_by_height).insert(requested_height, retained_block);
+            self
+        }
+
+        fn expiring_on_range_request(mut self, request_number: usize) -> Self {
+            self.expiring_range_request_number = Some(request_number);
+            self
+        }
+
+        fn requested_block_selectors(&self) -> Vec<BlockSelector> {
+            self.requested_block_selectors
+                .lock()
+                .expect("focused test block-selector request lock is not poisoned")
+                .clone()
+        }
+
+        fn requested_full_block_heights(&self) -> Vec<ZinderBlockHeight> {
+            self.requested_full_block_heights
+                .lock()
+                .expect("focused test full-block request lock is not poisoned")
+                .clone()
+        }
+
+        fn requested_full_block_ranges(&self) -> Vec<ZinderBlockHeightRange> {
+            self.requested_full_block_ranges
+                .lock()
+                .expect("focused test full-block range lock is not poisoned")
+                .clone()
+        }
+    }
+
+    impl PinnedChainSnapshot for RecordingPinnedChainSnapshot {
+        async fn block_id_by_selector(
+            &self,
+            selector: BlockSelector,
+        ) -> Result<ZinderBlockId, IndexerError> {
+            self.requested_block_selectors
+                .lock()
+                .expect("focused test block-selector request lock is not poisoned")
+                .push(selector);
+
+            let response = match selector {
+                BlockSelector::Hash(block_hash) => self
+                    .block_lookup_by_hash
+                    .get(&block_hash)
+                    .copied()
+                    .unwrap_or(BlockLookupResponse::BlockNotFound),
+                BlockSelector::Height(_) => {
+                    return Err(IndexerError::InvalidRequest {
+                        reason: "focused test snapshot accepts only hash selectors".to_owned(),
+                    });
+                }
+                _ => {
+                    return Err(IndexerError::InvalidRequest {
+                        reason: "focused test snapshot received an unknown selector".to_owned(),
+                    });
+                }
+            };
+
+            match response {
+                BlockLookupResponse::Canonical(block_id) => Ok(block_id),
+                BlockLookupResponse::BlockNotFound => {
+                    Err(IndexerError::NotFound { resource: "block" })
+                }
+                BlockLookupResponse::UnrelatedNotFound => Err(IndexerError::NotFound {
+                    resource: "transaction",
+                }),
+                BlockLookupResponse::RemoteBlockNotInBestChain => {
+                    Err(IndexerError::RemoteFailure {
+                        reason: zinder_client::ErrorReason::BlockNotInBestChain,
+                        message: "block is not in the best chain".to_owned(),
+                        retry_policy: RetryPolicy::RetryWithBackoff,
+                    })
+                }
+                BlockLookupResponse::ViewExpired => Err(IndexerError::ChainEpochPinUnavailable),
+            }
+        }
+
+        async fn retained_full_block_at(
+            &self,
+            height: ZinderBlockHeight,
+        ) -> Result<BlockBlobArtifact, IndexerError> {
+            self.requested_full_block_heights
+                .lock()
+                .expect("focused test full-block request lock is not poisoned")
+                .push(height);
+            self.full_blocks_by_height
+                .get(&height)
+                .cloned()
+                .ok_or(IndexerError::NotFound {
+                    resource: "full block",
+                })
+        }
+
+        async fn retained_full_blocks_in_range(
+            &self,
+            block_range: ZinderBlockHeightRange,
+        ) -> Result<IndexStream<BlockBlobArtifact>, IndexerError> {
+            let request_number = {
+                let mut requested_ranges = self
+                    .requested_full_block_ranges
+                    .lock()
+                    .expect("focused test full-block range lock is not poisoned");
+                requested_ranges.push(block_range);
+                requested_ranges.len()
+            };
+            if self.expiring_range_request_number == Some(request_number) {
+                return Err(IndexerError::ChainEpochPinUnavailable);
+            }
+
+            Ok(Box::pin(stream::iter(block_range.into_iter().map(
+                |height| {
+                    Ok(BlockBlobArtifact::new(
+                        height,
+                        zinder_block_hash(height.value()),
+                        zinder_block_hash(height.value().saturating_sub(1)),
+                        Vec::new(),
+                    ))
+                },
+            ))))
+        }
+    }
+
+    fn wallet_block_hash(height: u32) -> BlockHash {
+        let encoded_height = height.to_le_bytes();
+        BlockHash(std::array::from_fn(|index| {
+            encoded_height[index % encoded_height.len()]
+        }))
+    }
+
+    fn zinder_block_hash(height: u32) -> ZinderBlockHash {
+        ZinderBlockHash::from_bytes(wallet_block_hash(height).0)
+    }
+
+    fn locator_block(height: u32) -> ChainBlock {
+        ChainBlock::new(BlockHeight::from_u32(height), wallet_block_hash(height))
+    }
+
+    fn retained_test_block(
+        height: BlockHeight,
+        equihash_solution: Vec<u8>,
+    ) -> (BlockBlobArtifact, Vec<u8>) {
+        let nonce_byte =
+            u8::try_from(u32::from(height)).expect("focused test height fits one nonce byte");
+        let header = BlockHeaderData {
+            version: 4,
+            prev_block: BlockHash([nonce_byte.saturating_sub(1); 32]),
+            merkle_root: [0; 32],
+            final_sapling_root: [0; 32],
+            time: 0,
+            bits: 0,
+            nonce: [nonce_byte; 32],
+            solution: equihash_solution,
+        }
+        .freeze()
+        .expect("focused test block header is structurally valid");
+        let coinbase_authorization = Coinbase;
+        let transparent_bundle = Bundle {
+            vin: vec![
+                TxIn::<Coinbase>::coinbase(height, None)
+                    .expect("focused test coinbase height is structurally valid"),
+            ],
+            vout: Vec::new(),
+            authorization: coinbase_authorization.clone(),
+        }
+        .map_authorization(coinbase_authorization);
+        let transaction = TransactionData::<Authorized>::from_parts(
+            TxVersion::suggested_for_branch(BranchId::Sprout),
+            BranchId::Sprout,
+            0,
+            height,
+            Some(transparent_bundle),
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .expect("focused test coinbase transaction is structurally valid");
+
+        let mut header_bytes = Vec::new();
+        header
+            .write(&mut header_bytes)
+            .expect("serializes the complete focused test header");
+        let mut block_bytes = header_bytes.clone();
+        block_bytes.push(TEST_BLOCK_TRANSACTION_COUNT);
+        transaction
+            .write(&mut block_bytes)
+            .expect("serializes the focused test coinbase transaction");
+
+        (
+            BlockBlobArtifact::new(
+                zinder_height(height),
+                ZinderBlockHash::from_bytes(header.hash().0),
+                ZinderBlockHash::from_bytes(header.prev_block.0),
+                block_bytes,
+            ),
+            header_bytes,
+        )
+    }
+
+    fn full_block_page_size() -> u32 {
+        u32::try_from(FULL_BLOCK_PAGE_SIZE).expect("full-block page size fits u32")
+    }
+
+    async fn collect_half_open_block_heights(
+        snapshot: &RecordingPinnedChainSnapshot,
+        range: Range<BlockHeight>,
+        tip: BlockHeight,
+    ) -> Result<Vec<u32>, ChainError> {
+        stream_retained_full_blocks_in_half_open_range(snapshot.clone(), &range, tip)
+            .map_ok(|block| block.height.value())
+            .try_collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn fork_lookup_returns_the_highest_matching_ancestor_below_tip() {
+        let tip_height = 12;
+        let highest_ancestor_height = 11;
+        let lower_ancestor_height = 10;
+        let snapshot = RecordingPinnedChainSnapshot::default()
+            .with_block_lookup(
+                zinder_block_hash(highest_ancestor_height),
+                BlockLookupResponse::Canonical(ZinderBlockId::new(
+                    ZinderBlockHeight::new(highest_ancestor_height),
+                    zinder_block_hash(highest_ancestor_height),
+                )),
+            )
+            .with_block_lookup(
+                zinder_block_hash(lower_ancestor_height),
+                BlockLookupResponse::Canonical(ZinderBlockId::new(
+                    ZinderBlockHeight::new(lower_ancestor_height),
+                    zinder_block_hash(lower_ancestor_height),
+                )),
+            );
+        let locator = BlockLocator::from_blocks([
+            locator_block(tip_height),
+            locator_block(highest_ancestor_height),
+            locator_block(lower_ancestor_height),
+        ]);
+
+        let fork_point = find_fork_point_in_snapshot(&snapshot, &locator)
+            .await
+            .expect("canonical ancestor lookup succeeds");
+
+        assert_eq!(fork_point, Some(locator_block(highest_ancestor_height)));
+        assert_eq!(
+            snapshot.requested_block_selectors(),
+            vec![
+                BlockSelector::from_hash(zinder_block_hash(tip_height)),
+                BlockSelector::from_hash(zinder_block_hash(highest_ancestor_height)),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_lookup_skips_unknown_hash_and_returns_lower_canonical_ancestor() {
+        let unknown_height = 12;
+        let canonical_height = 11;
+        let snapshot = RecordingPinnedChainSnapshot::default()
+            .with_block_lookup(
+                zinder_block_hash(unknown_height),
+                BlockLookupResponse::BlockNotFound,
+            )
+            .with_block_lookup(
+                zinder_block_hash(canonical_height),
+                BlockLookupResponse::Canonical(ZinderBlockId::new(
+                    ZinderBlockHeight::new(canonical_height),
+                    zinder_block_hash(canonical_height),
+                )),
+            );
+        let locator = BlockLocator::from_blocks([
+            locator_block(unknown_height),
+            locator_block(canonical_height),
+        ]);
+
+        let fork_point = find_fork_point_in_snapshot(&snapshot, &locator)
+            .await
+            .expect("ordinary absent hashes do not fail fork lookup");
+
+        assert_eq!(fork_point, Some(locator_block(canonical_height)));
+        assert_eq!(snapshot.requested_block_selectors().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fork_lookup_propagates_not_found_for_an_unrelated_resource() {
+        let unavailable_height = 12;
+        let snapshot = RecordingPinnedChainSnapshot::default().with_block_lookup(
+            zinder_block_hash(unavailable_height),
+            BlockLookupResponse::UnrelatedNotFound,
+        );
+        let locator = BlockLocator::from_blocks([locator_block(unavailable_height)]);
+
+        let error = find_fork_point_in_snapshot(&snapshot, &locator)
+            .await
+            .expect_err("an unrelated absent resource must not advance the block locator");
+        let ChainError::Unavailable(source) = error else {
+            panic!("an unrelated not-found failure must remain unavailable");
+        };
+
+        assert!(matches!(
+            source.downcast_ref::<IndexerError>(),
+            Some(IndexerError::NotFound {
+                resource: "transaction"
+            })
+        ));
+        assert_eq!(snapshot.requested_block_selectors().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fork_lookup_propagates_remote_failure_with_block_not_in_best_chain_reason() {
+        let unavailable_height = 12;
+        let snapshot = RecordingPinnedChainSnapshot::default().with_block_lookup(
+            zinder_block_hash(unavailable_height),
+            BlockLookupResponse::RemoteBlockNotInBestChain,
+        );
+        let locator = BlockLocator::from_blocks([locator_block(unavailable_height)]);
+
+        let error = find_fork_point_in_snapshot(&snapshot, &locator)
+            .await
+            .expect_err("a reason-only remote failure must not be treated as absence");
+        let ChainError::Unavailable(source) = error else {
+            panic!("a retryable remote failure must remain unavailable");
+        };
+
+        assert!(matches!(
+            source.downcast_ref::<IndexerError>(),
+            Some(IndexerError::RemoteFailure {
+                reason: zinder_client::ErrorReason::BlockNotInBestChain,
+                ..
+            })
+        ));
+        assert_eq!(snapshot.requested_block_selectors().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fork_lookup_preserves_view_expiry() {
+        let expired_height = 12;
+        let snapshot = RecordingPinnedChainSnapshot::default().with_block_lookup(
+            zinder_block_hash(expired_height),
+            BlockLookupResponse::ViewExpired,
+        );
+        let locator = BlockLocator::from_blocks([locator_block(expired_height)]);
+
+        let error = find_fork_point_in_snapshot(&snapshot, &locator)
+            .await
+            .expect_err("epoch expiry must invalidate the owning workflow's snapshot");
+
+        assert!(matches!(error, ChainError::ViewExpired(_)));
+    }
+
+    #[tokio::test]
+    async fn block_header_is_decoded_from_complete_retained_block_bytes() {
+        const HEADER_HEIGHT: u32 = 7;
+        const TIP_HEIGHT: u32 = 9;
+        const EQUIHASH_SOLUTION: &[u8] = &[0xaa, 0xbb, 0xcc, 0xdd];
+
+        let height = BlockHeight::from_u32(HEADER_HEIGHT);
+        let (retained_block, expected_header_bytes) =
+            retained_test_block(height, EQUIHASH_SOLUTION.to_vec());
+        let snapshot = RecordingPinnedChainSnapshot::default()
+            .with_retained_full_block_at(ZinderBlockHeight::new(HEADER_HEIGHT), retained_block);
+
+        let header =
+            block_header_from_snapshot(&snapshot, BlockHeight::from_u32(TIP_HEIGHT), height)
+                .await
+                .expect("retained full-block read succeeds")
+                .expect("requested height is at or below the tip");
+        let mut actual_header_bytes = Vec::new();
+        header
+            .write(&mut actual_header_bytes)
+            .expect("serializes the decoded complete header");
+
+        assert_eq!(actual_header_bytes, expected_header_bytes);
+        assert_eq!(header.solution, EQUIHASH_SOLUTION);
+        assert_eq!(
+            snapshot.requested_full_block_heights(),
+            vec![ZinderBlockHeight::new(HEADER_HEIGHT)]
+        );
+    }
+
+    #[tokio::test]
+    async fn block_header_rejects_mismatched_retained_identity() {
+        const HEADER_HEIGHT: u32 = 7;
+        const TIP_HEIGHT: u32 = 9;
+        const DIFFERENT_HEIGHT: u32 = 8;
+        const MISMATCH_HASH_BYTES: [u8; 32] = [0xff; 32];
+
+        let height = BlockHeight::from_u32(HEADER_HEIGHT);
+        let (retained_block, _) = retained_test_block(height, Vec::new());
+
+        let mut wrong_height = retained_block.clone();
+        wrong_height.height = ZinderBlockHeight::new(DIFFERENT_HEIGHT);
+        let mut wrong_hash = retained_block.clone();
+        wrong_hash.block_hash = ZinderBlockHash::from_bytes(MISMATCH_HASH_BYTES);
+        let mut wrong_parent = retained_block;
+        wrong_parent.parent_hash = ZinderBlockHash::from_bytes(MISMATCH_HASH_BYTES);
+
+        for mismatched_block in [wrong_height, wrong_hash, wrong_parent] {
+            let snapshot = RecordingPinnedChainSnapshot::default().with_retained_full_block_at(
+                ZinderBlockHeight::new(HEADER_HEIGHT),
+                mismatched_block,
+            );
+
+            let error =
+                block_header_from_snapshot(&snapshot, BlockHeight::from_u32(TIP_HEIGHT), height)
+                    .await
+                    .expect_err("retained identity must match the decoded consensus header");
+
+            assert!(matches!(error, ChainError::InvalidData(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn half_open_empty_range_issues_no_page() {
+        let start = BlockHeight::from_u32(TEST_STREAM_START_HEIGHT);
+        let snapshot = RecordingPinnedChainSnapshot::default();
+
+        let heights = collect_half_open_block_heights(&snapshot, start..start, start)
+            .await
+            .expect("empty half-open range succeeds");
+
+        assert!(heights.is_empty());
+        assert!(snapshot.requested_full_block_ranges().is_empty());
+    }
+
+    #[tokio::test]
+    async fn half_open_one_block_range_uses_one_inclusive_page() {
+        let start = BlockHeight::from_u32(TEST_STREAM_START_HEIGHT);
+        let end = start + 1;
+        let snapshot = RecordingPinnedChainSnapshot::default();
+
+        let heights = collect_half_open_block_heights(&snapshot, start..end, start)
+            .await
+            .expect("one-block half-open range succeeds");
+
+        assert_eq!(heights, vec![TEST_STREAM_START_HEIGHT]);
+        assert_eq!(
+            snapshot.requested_full_block_ranges(),
+            vec![ZinderBlockHeightRange::inclusive(
+                zinder_height(start),
+                zinder_height(start),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn half_open_exactly_1000_blocks_use_one_page() {
+        let page_size = full_block_page_size();
+        let start = BlockHeight::from_u32(TEST_STREAM_START_HEIGHT);
+        let end = start + page_size;
+        let snapshot = RecordingPinnedChainSnapshot::default();
+
+        let heights = collect_half_open_block_heights(&snapshot, start..end, end)
+            .await
+            .expect("one full half-open page succeeds");
+
+        assert_eq!(
+            heights,
+            (TEST_STREAM_START_HEIGHT..TEST_STREAM_START_HEIGHT + page_size).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            snapshot.requested_full_block_ranges(),
+            vec![ZinderBlockHeightRange::inclusive(
+                zinder_height(start),
+                zinder_height(end - 1),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn half_open_more_than_1000_blocks_preserve_order_across_pages() {
+        let page_size = full_block_page_size();
+        let start = BlockHeight::from_u32(TEST_STREAM_START_HEIGHT);
+        let second_page_start = start + page_size;
+        let end = second_page_start + 1;
+        let snapshot = RecordingPinnedChainSnapshot::default();
+
+        let heights = collect_half_open_block_heights(&snapshot, start..end, end)
+            .await
+            .expect("two-page half-open range succeeds");
+
+        assert_eq!(
+            heights,
+            (TEST_STREAM_START_HEIGHT..TEST_STREAM_START_HEIGHT + page_size + 1)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            snapshot.requested_full_block_ranges(),
+            vec![
+                ZinderBlockHeightRange::inclusive(
+                    zinder_height(start),
+                    zinder_height(second_page_start - 1),
+                ),
+                ZinderBlockHeightRange::inclusive(
+                    zinder_height(second_page_start),
+                    zinder_height(second_page_start),
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn half_open_10000_block_recovery_batch_uses_bounded_pages() {
+        let page_size = full_block_page_size();
+        let start = BlockHeight::from_u32(TEST_STREAM_START_HEIGHT);
+        let end = start + CONFIGURED_RECOVERY_BATCH_SIZE;
+        let expected_page_count = CONFIGURED_RECOVERY_BATCH_SIZE / page_size;
+        let snapshot = RecordingPinnedChainSnapshot::default();
+
+        let heights = collect_half_open_block_heights(&snapshot, start..end, end)
+            .await
+            .expect("configured-size recovery range succeeds");
+        let requests = snapshot.requested_full_block_ranges();
+        let expected_requests = (0..expected_page_count)
+            .map(|page_index| {
+                let page_start = start + page_index * page_size;
+                ZinderBlockHeightRange::inclusive(
+                    zinder_height(page_start),
+                    zinder_height(page_start + page_size - 1),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            heights.len(),
+            usize::try_from(CONFIGURED_RECOVERY_BATCH_SIZE)
+                .expect("configured recovery batch size fits usize")
+        );
+        assert_eq!(
+            heights.first(),
+            Some(&TEST_STREAM_START_HEIGHT),
+            "the configured-size range starts at its requested height"
+        );
+        assert_eq!(
+            heights.last(),
+            Some(&(TEST_STREAM_START_HEIGHT + CONFIGURED_RECOVERY_BATCH_SIZE - 1)),
+            "the configured-size range ends before its half-open bound"
+        );
+        assert_eq!(requests, expected_requests);
+    }
+
+    #[tokio::test]
+    async fn half_open_page_two_expiry_remains_view_expired() {
+        const EXPIRING_REQUEST_NUMBER: usize = 2;
+
+        let page_size = full_block_page_size();
+        let start = BlockHeight::from_u32(TEST_STREAM_START_HEIGHT);
+        let end = start + page_size + 1;
+        let snapshot = RecordingPinnedChainSnapshot::default()
+            .expiring_on_range_request(EXPIRING_REQUEST_NUMBER);
+
+        let error = collect_half_open_block_heights(&snapshot, start..end, end)
+            .await
+            .expect_err("the second half-open page expires the captured view");
+
+        assert!(matches!(error, ChainError::ViewExpired(_)));
+        assert_eq!(snapshot.requested_full_block_ranges().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn second_page_request_waits_until_first_page_is_consumed() {
+        let page_size = full_block_page_size();
+        let start = BlockHeight::from_u32(TEST_STREAM_START_HEIGHT);
+        let second_page_start = start + page_size;
+        let end = second_page_start + 1;
+        let snapshot = RecordingPinnedChainSnapshot::default();
+        let mut blocks =
+            stream_retained_full_blocks_in_half_open_range(snapshot.clone(), &(start..end), end);
+
+        assert!(snapshot.requested_full_block_ranges().is_empty());
+        for expected_height in TEST_STREAM_START_HEIGHT..TEST_STREAM_START_HEIGHT + page_size {
+            let block = blocks
+                .try_next()
+                .await
+                .expect("first-page block read succeeds")
+                .expect("first page contains every requested block");
+            assert_eq!(block.height.value(), expected_height);
+        }
+        assert_eq!(
+            snapshot.requested_full_block_ranges().len(),
+            1,
+            "page two must not be requested while page one still has data"
+        );
+
+        let first_second_page_block = blocks
+            .try_next()
+            .await
+            .expect("second-page block read succeeds")
+            .expect("the second page contains its first block");
+        assert_eq!(
+            first_second_page_block.height,
+            zinder_height(second_page_start)
+        );
+        assert_eq!(snapshot.requested_full_block_ranges().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn stream_to_tip_issues_no_page_when_start_is_above_tip() {
+        const START_HEIGHT: u32 = 5;
+
+        let snapshot = RecordingPinnedChainSnapshot::default();
+        let blocks = stream_retained_full_blocks_to_tip(
+            snapshot.clone(),
+            BlockHeight::from_u32(START_HEIGHT),
+            BlockHeight::from_u32(START_HEIGHT - 1),
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("empty stream succeeds");
+
+        assert!(blocks.is_empty());
+        assert!(snapshot.requested_full_block_ranges().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_to_tip_uses_one_inclusive_page_for_one_block() {
+        const HEIGHT: u32 = 5;
+
+        let snapshot = RecordingPinnedChainSnapshot::default();
+        let blocks = stream_retained_full_blocks_to_tip(
+            snapshot.clone(),
+            BlockHeight::from_u32(HEIGHT),
+            BlockHeight::from_u32(HEIGHT),
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("one-block stream succeeds");
+
+        assert_eq!(
+            blocks
+                .into_iter()
+                .map(|block| block.height.value())
+                .collect::<Vec<_>>(),
+            vec![HEIGHT]
+        );
+        assert_eq!(
+            snapshot.requested_full_block_ranges(),
+            vec![ZinderBlockHeightRange::inclusive(
+                ZinderBlockHeight::new(HEIGHT),
+                ZinderBlockHeight::new(HEIGHT),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_to_tip_keeps_exactly_1000_blocks_in_one_page() {
+        const START_HEIGHT: u32 = 5;
+
+        let page_size = u32::try_from(FULL_BLOCK_PAGE_SIZE).expect("full-block page size fits u32");
+        let tip_height = START_HEIGHT + page_size - 1;
+        let snapshot = RecordingPinnedChainSnapshot::default();
+        let blocks = stream_retained_full_blocks_to_tip(
+            snapshot.clone(),
+            BlockHeight::from_u32(START_HEIGHT),
+            BlockHeight::from_u32(tip_height),
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("one complete page succeeds");
+
+        assert_eq!(
+            blocks.len(),
+            usize::try_from(page_size).expect("full-block page size fits usize")
+        );
+        assert_eq!(
+            snapshot.requested_full_block_ranges(),
+            vec![ZinderBlockHeightRange::inclusive(
+                ZinderBlockHeight::new(START_HEIGHT),
+                ZinderBlockHeight::new(tip_height),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_to_tip_pages_more_than_1000_blocks_in_order() {
+        const START_HEIGHT: u32 = 5;
+
+        let page_size = u32::try_from(FULL_BLOCK_PAGE_SIZE).expect("full-block page size fits u32");
+        let second_page_height = START_HEIGHT + page_size;
+        let snapshot = RecordingPinnedChainSnapshot::default();
+        let blocks = stream_retained_full_blocks_to_tip(
+            snapshot.clone(),
+            BlockHeight::from_u32(START_HEIGHT),
+            BlockHeight::from_u32(second_page_height),
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("two-page stream succeeds");
+
+        assert_eq!(
+            blocks
+                .into_iter()
+                .map(|block| block.height.value())
+                .collect::<Vec<_>>(),
+            (START_HEIGHT..=second_page_height).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            snapshot.requested_full_block_ranges(),
+            vec![
+                ZinderBlockHeightRange::inclusive(
+                    ZinderBlockHeight::new(START_HEIGHT),
+                    ZinderBlockHeight::new(second_page_height - 1),
+                ),
+                ZinderBlockHeightRange::inclusive(
+                    ZinderBlockHeight::new(second_page_height),
+                    ZinderBlockHeight::new(second_page_height),
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_to_tip_preserves_page_two_view_expiry() {
+        const START_HEIGHT: u32 = 5;
+        const EXPIRING_REQUEST_NUMBER: usize = 2;
+
+        let page_size = u32::try_from(FULL_BLOCK_PAGE_SIZE).expect("full-block page size fits u32");
+        let second_page_height = START_HEIGHT + page_size;
+        let snapshot = RecordingPinnedChainSnapshot::default()
+            .expiring_on_range_request(EXPIRING_REQUEST_NUMBER);
+        let error = stream_retained_full_blocks_to_tip(
+            snapshot.clone(),
+            BlockHeight::from_u32(START_HEIGHT),
+            BlockHeight::from_u32(second_page_height),
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .expect_err("the second page expires the captured chain view");
+
+        assert!(matches!(error, ChainError::ViewExpired(_)));
+        assert_eq!(snapshot.requested_full_block_ranges().len(), 2);
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct RecordedSubtreeRootRequest {
         range: SubtreeRootRange,
@@ -1456,7 +2428,7 @@ mod tests {
     #[test]
     fn missing_full_blocks_explain_retention_rebuild_and_cutover() {
         let message =
-            bounded_scan_preflight_message(&[Capability::FullBlock, Capability::FullBlockRange]);
+            wallet_runtime_preflight_message(&[Capability::FullBlock, Capability::FullBlockRange]);
 
         assert!(message.contains("raw_blob_policy=all"));
         assert!(message.contains("rebuild the canonical store"));
@@ -1465,7 +2437,7 @@ mod tests {
 
     #[test]
     fn non_retention_capability_failure_omits_store_rebuild_guidance() {
-        let message = bounded_scan_preflight_message(&[Capability::NetworkUpgradeActivations]);
+        let message = wallet_runtime_preflight_message(&[Capability::NetworkUpgradeActivations]);
 
         assert!(!message.contains("raw_blob_policy"));
         assert!(!message.contains("blue-green"));
@@ -1559,38 +2531,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn whole_sync_methods_are_explicit_unsupported_errors() {
-        for method in [
-            "find_fork_point",
-            "get_block_header",
-            "stream_blocks_to_tip",
-        ] {
-            let ChainError::Backend(source) = unsupported_by_bounded_scan_tracer(method) else {
-                panic!("whole-sync methods must remain backend errors");
-            };
-            let error = source
-                .downcast_ref::<io::Error>()
-                .expect("whole-sync method error must retain its unsupported I/O kind");
-
-            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-            assert_eq!(
-                error.to_string(),
-                format!("{method} is unsupported by the bounded-scan tracer")
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_to_tip_reports_one_explicit_error() {
-        let items = unsupported_stream_by_bounded_scan_tracer("stream_blocks_to_tip")
-            .collect::<Vec<_>>()
-            .await;
-
-        assert_eq!(items.len(), 1);
-        assert!(matches!(&items[0], Err(ChainError::Backend(_))));
-    }
-
     #[cfg(feature = "bounded-scan-certification")]
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires an externally orchestrated Zinder certification runtime"]
@@ -1627,11 +2567,11 @@ mod tests {
             certification_environment.zinder_endpoint.clone(),
             zinder_network(params),
         )?;
-        let missing_capabilities = probe_missing_bounded_scan_capabilities(&index).await?;
+        let missing_capabilities = probe_missing_wallet_runtime_capabilities(&index).await?;
         let expected_missing_capabilities = vec![Capability::FullBlock, Capability::FullBlockRange];
         if missing_capabilities != expected_missing_capabilities {
             return Err(certification_failure(format!(
-                "Transactions endpoint missing-capability list differs from the exact bounded-scan \
+                "Transactions endpoint missing-capability list differs from the exact wallet-runtime \
                  requirement order: actual {missing_capabilities:?}, \
                  expected {expected_missing_capabilities:?}"
             ))
@@ -1642,13 +2582,13 @@ mod tests {
             match ZinderChain::connect(certification_environment.zinder_endpoint, params).await {
                 Ok(_) => {
                     return Err(certification_failure(
-                        "Transactions endpoint unexpectedly passed bounded-scan admission",
+                        "Transactions endpoint unexpectedly passed wallet-runtime admission",
                     )
                     .into());
                 }
                 Err(error) => error,
             };
-        let expected_rejection = bounded_scan_preflight_message(&expected_missing_capabilities);
+        let expected_rejection = wallet_runtime_preflight_message(&expected_missing_capabilities);
         if !connection_error.to_string().contains(&expected_rejection) {
             return Err(certification_failure(format!(
                 "ZinderChain::connect rejected for an unexpected reason: {connection_error}"
