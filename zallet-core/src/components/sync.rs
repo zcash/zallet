@@ -38,7 +38,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use futures::{StreamExt as _, TryStreamExt as _};
+use futures::{TryStreamExt as _, stream::BoxStream};
 use jsonrpsee::tracing::{self, debug, info, warn};
 #[cfg(not(feature = "spend-index"))]
 use std::collections::HashSet;
@@ -61,7 +61,7 @@ use zcash_client_backend::{
 };
 use zcash_client_sqlite::AccountUuid;
 use zcash_client_sqlite::error::SqliteClientError;
-use zcash_primitives::block::BlockHash;
+use zcash_primitives::{block::BlockHash, transaction::Transaction};
 #[cfg(not(feature = "spend-index"))]
 use zcash_protocol::TxId;
 use zcash_protocol::consensus::BlockHeight;
@@ -693,14 +693,7 @@ async fn steady_state_iteration<C: Chain>(
     {
         Some(mempool_stream) => {
             info!("Reached chain tip, streaming mempool");
-            tokio::pin!(mempool_stream);
-            while let Some(tx) = mempool_stream.next().await {
-                info!("Scanning mempool tx {}", tx.txid());
-                // TODO: Route individual-transaction scanning through the batch
-                // decryptor (`Handle::queue_tx`) once a single-tx store path exists.
-                // See zcash/zallet#477.
-                decrypt_and_store_transaction(params, db_data, &tx, None)?;
-            }
+            scan_mempool_stream(params, db_data, mempool_stream).await?;
 
             // Mempool stream ended, signalling that the chain tip has changed.
         }
@@ -714,6 +707,22 @@ async fn steady_state_iteration<C: Chain>(
     }
 
     Ok(ControlFlow::Continue(()))
+}
+
+async fn scan_mempool_stream(
+    params: &Network,
+    db_data: &mut DbConnection,
+    mut mempool_stream: BoxStream<'_, Result<Transaction, ChainError>>,
+) -> Result<(), SyncError> {
+    while let Some(tx) = mempool_stream.try_next().await.map_err(SyncError::Chain)? {
+        info!("Scanning mempool tx {}", tx.txid());
+        // TODO: Route individual-transaction scanning through the batch
+        // decryptor (`Handle::queue_tx`) once a single-tx store path exists.
+        // See zcash/zallet#477.
+        decrypt_and_store_transaction(params, db_data, &tx, None)?;
+    }
+
+    Ok(())
 }
 
 /// Recovers historic wallet state.
@@ -1030,7 +1039,13 @@ async fn batch_decryptor(
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainError, SyncError, is_retryable, rewind_step, select_initial_scan_range};
+    use futures::{StreamExt as _, stream};
+
+    use super::{
+        ChainError, SyncError, is_retryable, rewind_step, scan_mempool_stream,
+        select_initial_scan_range,
+    };
+    use crate::{components::database::Database, config::ZalletConfig};
     use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
     use zcash_protocol::consensus::BlockHeight;
 
@@ -1040,6 +1055,61 @@ mod tests {
 
     fn range(start: u32, end: u32, priority: ScanPriority) -> ScanRange {
         ScanRange::from_parts(h(start)..h(end), priority)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mempool_item_failure_stops_steady_state_sync() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates a wallet database");
+        let mut wallet = database.handle().await.expect("opens the wallet database");
+        let params = config.consensus.network();
+        let mempool_stream = stream::iter([Err(ChainError::unavailable(
+            "injected mempool transport failure",
+        ))])
+        .boxed();
+
+        let error = scan_mempool_stream(&params, &mut wallet, mempool_stream)
+            .await
+            .expect_err("mempool item failure stops steady-state sync");
+
+        assert!(
+            matches!(&error, SyncError::Chain(ChainError::Unavailable(_))),
+            "mempool item failure retains its chain error category: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("injected mempool transport failure"),
+            "mempool item failure retains its source: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mempool_stream_completion_remains_a_tip_change_signal() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates a wallet database");
+        let mut wallet = database.handle().await.expect("opens the wallet database");
+        let params = config.consensus.network();
+
+        scan_mempool_stream(&params, &mut wallet, stream::empty().boxed())
+            .await
+            .expect("clean mempool completion lets steady-state sync reacquire its view");
     }
 
     // The #636 repro: the wallet DB has recorded a higher chain tip than the current
@@ -1313,7 +1383,7 @@ mod fork_fallback_tests {
 
         async fn get_mempool_stream(
             &self,
-        ) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+        ) -> Result<Option<BoxStream<'_, Result<Transaction, ChainError>>>, ChainError> {
             Ok(None)
         }
 
