@@ -177,6 +177,8 @@ impl StartCmd {
 
         // Build the decryptor up front so the RPC server has its handle before the initial scan.
         let (decryptor_handle, decryptor_engine) = WalletSync::build_decryptor();
+        let reconfiguration =
+            crate::components::sync::WalletSyncReconfiguration::new(decryptor_handle);
 
         // The sync engine publishes its status over this channel; the RPC server reads it
         // to gate balance and spend methods while the wallet is not trustworthy.
@@ -191,7 +193,7 @@ impl StartCmd {
             keystore,
             chain.clone(),
             #[cfg(zallet_build = "wallet")]
-            decryptor_handle.clone(),
+            reconfiguration.clone(),
             sync_status_reader,
         )
         .await?;
@@ -208,7 +210,7 @@ impl StartCmd {
             db,
             chain,
             shutdown_height,
-            decryptor_handle,
+            reconfiguration,
             decryptor_engine,
             sync_status_writer,
         )

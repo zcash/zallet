@@ -44,7 +44,11 @@ use jsonrpsee::tracing::{self, debug, info, warn};
 use std::collections::HashSet;
 #[cfg(not(feature = "spend-index"))]
 use std::ops::Range;
-use tokio::{sync::Notify, task::AbortHandle, time};
+use tokio::{
+    sync::{Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock},
+    task::AbortHandle,
+    time,
+};
 #[cfg(not(feature = "spend-index"))]
 use zcash_client_backend::data_api::{
     CoinbaseFilter, InputSource, TransactionsInvolvingAddress,
@@ -91,6 +95,89 @@ pub(crate) type WalletDecryptorHandle = decryptor::Handle<AccountUuid, (AccountU
 
 /// Engine half of the batch decryptor, driven by the sync tasks spawned by [`WalletSync::spawn`].
 pub(crate) type WalletDecryptorEngine = decryptor::Engine<AccountUuid, (AccountUuid, Scope)>;
+
+#[derive(Clone)]
+pub(crate) struct WalletSyncReconfiguration {
+    inner: Arc<WalletSyncReconfigurationInner>,
+}
+
+struct WalletSyncReconfigurationInner {
+    admission: Arc<RwLock<()>>,
+    decryptor: WalletDecryptorHandle,
+    history_recovery: Notify,
+}
+
+pub(crate) struct AdmittedWalletSyncReconfiguration {
+    inner: Arc<WalletSyncReconfigurationInner>,
+    _admission: OwnedRwLockWriteGuard<()>,
+}
+
+pub(crate) struct AdmittedWalletBlockScan {
+    inner: Arc<WalletSyncReconfigurationInner>,
+    _admission: OwnedRwLockReadGuard<()>,
+}
+
+impl WalletSyncReconfiguration {
+    pub(crate) fn new(decryptor: WalletDecryptorHandle) -> Self {
+        Self {
+            inner: Arc::new(WalletSyncReconfigurationInner {
+                admission: Arc::new(RwLock::new(())),
+                decryptor,
+                history_recovery: Notify::new(),
+            }),
+        }
+    }
+
+    pub(crate) async fn admit_reconfiguration(&self) -> AdmittedWalletSyncReconfiguration {
+        AdmittedWalletSyncReconfiguration {
+            _admission: self.inner.admission.clone().write_owned().await,
+            inner: self.inner.clone(),
+        }
+    }
+
+    async fn admit_block_scan(&self) -> AdmittedWalletBlockScan {
+        AdmittedWalletBlockScan {
+            _admission: self.inner.admission.clone().read_owned().await,
+            inner: self.inner.clone(),
+        }
+    }
+
+    async fn wait_for_history_recovery(&self) {
+        self.inner.history_recovery.notified().await;
+    }
+}
+
+impl AdmittedWalletSyncReconfiguration {
+    pub(crate) fn wake_history_recovery(&self) {
+        self.inner.history_recovery.notify_one();
+    }
+
+    pub(crate) async fn reload_keys_and_wake_history_recovery(self) -> bool {
+        let completion = tokio::spawn(async move {
+            let reload_finished = self.inner.decryptor.reload_keys().await;
+            self.wake_history_recovery();
+
+            match reload_finished {
+                Some(reload_finished) => reload_finished.await.is_ok(),
+                None => false,
+            }
+        });
+
+        match completion.await {
+            Ok(reload_finished) => reload_finished,
+            Err(error) => {
+                tracing::error!(%error, "post-commit wallet-key reload task failed");
+                false
+            }
+        }
+    }
+}
+
+impl AdmittedWalletBlockScan {
+    fn decryptor(&self) -> &WalletDecryptorHandle {
+        &self.inner.decryptor
+    }
+}
 
 /// Owns cancellation for wallet-sync tasks until the complete task set is returned.
 struct PendingWalletSyncTasks {
@@ -139,7 +226,7 @@ impl WalletSync {
         db: Database,
         chain: C,
         shutdown_height: Option<BlockHeight>,
-        decryptor: WalletDecryptorHandle,
+        reconfiguration: WalletSyncReconfiguration,
         decryptor_engine: WalletDecryptorEngine,
         status: SyncStatusWriter,
     ) -> Result<(TaskHandle, TaskHandle, TaskHandle, TaskHandle), Error> {
@@ -162,7 +249,7 @@ impl WalletSync {
             &chain,
             &params,
             db_data.as_mut(),
-            decryptor.clone(),
+            reconfiguration.clone(),
             shutdown_height,
             &status,
         )
@@ -182,7 +269,7 @@ impl WalletSync {
         let steady_state_task = {
             let chain = chain.clone();
             let lower_boundary = current_boundary.clone();
-            let decryptor = decryptor.clone();
+            let reconfiguration = reconfiguration.clone();
             let status = status.clone();
             crate::spawn!("Steady state sync", async move {
                 steady_state(
@@ -192,7 +279,7 @@ impl WalletSync {
                     starting_tip,
                     lower_boundary,
                     tip_change_signal_source,
-                    decryptor,
+                    reconfiguration,
                     shutdown_height,
                     status,
                 )
@@ -206,13 +293,14 @@ impl WalletSync {
             let chain = chain.clone();
             let mut db_data = db.handle().await?;
             let upper_boundary = current_boundary.clone();
+            let reconfiguration = reconfiguration.clone();
             crate::spawn!("Recover history", async move {
                 recover_history(
                     chain,
                     &params,
                     db_data.as_mut(),
                     upper_boundary,
-                    decryptor,
+                    reconfiguration,
                     recover_batch_size,
                     shutdown_height,
                     status,
@@ -299,7 +387,7 @@ async fn initialize<C: Chain>(
     chain: &C,
     params: &Network,
     db_data: &mut DbConnection,
-    decryptor: WalletDecryptorHandle,
+    reconfiguration: WalletSyncReconfiguration,
     shutdown_height: Option<BlockHeight>,
     status: &SyncStatusWriter,
 ) -> Result<(ChainBlock, BlockHeight), SyncError> {
@@ -366,12 +454,13 @@ async fn initialize<C: Chain>(
                                     current_tip.height()
                                 )))
                             })?;
+                        let admitted_scan = reconfiguration.admit_block_scan().await;
                         steps::scan_block(
                             &chain_view,
                             db_data,
                             params,
                             tip_block,
-                            &decryptor,
+                            admitted_scan.decryptor(),
                             shutdown_height,
                         )
                         .await
@@ -397,16 +486,18 @@ async fn initialize<C: Chain>(
             }
         };
 
-        match steps::scan_blocks(
+        let admitted_scan = reconfiguration.admit_block_scan().await;
+        let scan_result = steps::scan_blocks(
             chain_view,
             db_data,
             params,
             &scan_range,
-            &decryptor,
+            admitted_scan.decryptor(),
             shutdown_height,
         )
-        .await
-        {
+        .await;
+        drop(admitted_scan);
+        match scan_result {
             Ok(flow) if flow.is_break() => {
                 // The chain has already reached the consensus-divergence height during
                 // initial scanning. Stop here with the tip we have; `steady_state` will
@@ -790,7 +881,7 @@ async fn steady_state<C: Chain>(
     mut prev_tip: ChainBlock,
     lower_boundary: Arc<AtomicU32>,
     tip_change_signal: Arc<Notify>,
-    decryptor: WalletDecryptorHandle,
+    reconfiguration: WalletSyncReconfiguration,
     shutdown_height: Option<BlockHeight>,
     status: SyncStatusWriter,
 ) -> Result<(), SyncError> {
@@ -810,7 +901,7 @@ async fn steady_state<C: Chain>(
             &mut prev_tip,
             &lower_boundary,
             &tip_change_signal,
-            &decryptor,
+            &reconfiguration,
             shutdown_height,
             &status,
         )
@@ -923,7 +1014,7 @@ async fn steady_state_iteration<C: Chain>(
     prev_tip: &mut ChainBlock,
     lower_boundary: &AtomicU32,
     tip_change_signal: &Notify,
-    decryptor: &WalletDecryptorHandle,
+    reconfiguration: &WalletSyncReconfiguration,
     shutdown_height: Option<BlockHeight>,
     status: &SyncStatusWriter,
 ) -> Result<ControlFlow<BlockHeight>, SyncError> {
@@ -993,12 +1084,13 @@ async fn steady_state_iteration<C: Chain>(
             // reporting the boundary instead. From there the backing node follows rules this
             // build cannot interpret, so we stop without recording the unscanned block as our
             // tip; ending the task triggers a graceful shutdown.
+            let admitted_scan = reconfiguration.admit_block_scan().await;
             match steps::scan_block(
                 &chain_view,
                 db_data,
                 params,
                 block,
-                decryptor,
+                admitted_scan.decryptor(),
                 shutdown_height,
             )
             .await?
@@ -1087,7 +1179,7 @@ async fn recover_history<C: Chain>(
     params: &Network,
     db_data: &mut DbConnection,
     upper_boundary: Arc<AtomicU32>,
-    decryptor: WalletDecryptorHandle,
+    reconfiguration: WalletSyncReconfiguration,
     batch_size: u32,
     shutdown_height: Option<BlockHeight>,
     status: SyncStatusWriter,
@@ -1112,9 +1204,13 @@ async fn recover_history<C: Chain>(
         {
             Some(r) => r,
             None => {
-                // Wait for scan ranges to become available.
+                // Wait for scan ranges to become available or for a wallet mutation to
+                // schedule historical recovery.
                 debug!("No scan ranges, sleeping");
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    () = reconfiguration.wait_for_history_recovery() => {}
+                }
                 continue;
             }
         };
@@ -1142,16 +1238,18 @@ async fn recover_history<C: Chain>(
             let mut attempt = 0;
             let outcome = loop {
                 let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
-                match steps::scan_blocks(
+                let admitted_scan = reconfiguration.admit_block_scan().await;
+                let scan_result = steps::scan_blocks(
                     chain_view,
                     db_data,
                     params,
                     &scan_range,
-                    &decryptor,
+                    admitted_scan.decryptor(),
                     shutdown_height,
                 )
-                .await
-                {
+                .await;
+                drop(admitted_scan);
+                match scan_result {
                     Ok(outcome) => break outcome,
                     Err(error)
                         if is_tree_divergence(&error) && attempt < TREE_DIVERGENCE_RETRIES =>
@@ -1426,8 +1524,8 @@ mod tests {
 
     use super::{
         ChainError, PendingWalletSyncTasks, SyncError, TREE_RECOVERY_LADDER, TreeRecovery,
-        WalletSync, is_retryable, is_tree_divergence, resume_point, rewind_step,
-        select_initial_scan_range, status, steady_state, tree_recovery_target,
+        WalletSync, WalletSyncReconfiguration, is_retryable, is_tree_divergence, resume_point,
+        rewind_step, select_initial_scan_range, status, steady_state, tree_recovery_target,
     };
     use crate::{
         components::{
@@ -1619,6 +1717,97 @@ mod tests {
         ScanRange::from_parts(h(start)..h(end), priority)
     }
 
+    #[tokio::test]
+    async fn rescan_waits_for_active_block_scan() {
+        let (decryptor, _engine) = WalletSync::build_decryptor();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
+        let active_scan = reconfiguration.admit_block_scan().await;
+        let pending_reconfiguration = reconfiguration.admit_reconfiguration();
+        tokio::pin!(pending_reconfiguration);
+
+        assert!(futures::poll!(&mut pending_reconfiguration).is_pending());
+
+        drop(active_scan);
+        tokio::time::timeout(Duration::from_secs(1), &mut pending_reconfiguration)
+            .await
+            .expect("reconfiguration is admitted after the active scan commits");
+    }
+
+    #[tokio::test]
+    async fn queued_rescan_blocks_later_scan_admission() {
+        let (decryptor, _engine) = WalletSync::build_decryptor();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
+        let active_scan = reconfiguration.admit_block_scan().await;
+        let pending_reconfiguration = reconfiguration.admit_reconfiguration();
+        tokio::pin!(pending_reconfiguration);
+        assert!(futures::poll!(&mut pending_reconfiguration).is_pending());
+
+        let later_scan = reconfiguration.admit_block_scan();
+        tokio::pin!(later_scan);
+        assert!(futures::poll!(&mut later_scan).is_pending());
+        drop(active_scan);
+
+        let admitted_reconfiguration =
+            tokio::time::timeout(Duration::from_secs(1), &mut pending_reconfiguration)
+                .await
+                .expect("queued reconfiguration is admitted first");
+        assert!(futures::poll!(&mut later_scan).is_pending());
+
+        drop(admitted_reconfiguration);
+        tokio::time::timeout(Duration::from_secs(1), &mut later_scan)
+            .await
+            .expect("later scan is admitted after reconfiguration completes");
+    }
+
+    #[tokio::test]
+    async fn rescan_wakes_history_recovery_without_restart() {
+        let (decryptor, engine) = WalletSync::build_decryptor();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
+        drop(engine);
+        let history_recovery_woken = reconfiguration.wait_for_history_recovery();
+        let admitted = reconfiguration.admit_reconfiguration().await;
+
+        admitted.wake_history_recovery();
+
+        tokio::time::timeout(Duration::from_secs(1), history_recovery_woken)
+            .await
+            .expect("history recovery is woken by wallet reconfiguration");
+    }
+
+    #[tokio::test]
+    async fn committed_key_reload_survives_rpc_cancellation() {
+        let (decryptor, engine) = WalletSync::build_decryptor();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
+        let history_recovery_woken = reconfiguration.wait_for_history_recovery();
+        let admitted = reconfiguration.admit_reconfiguration().await;
+        let rpc_request =
+            tokio::spawn(async move { admitted.reload_keys_and_wake_history_recovery().await });
+
+        tokio::time::timeout(Duration::from_secs(1), history_recovery_woken)
+            .await
+            .expect("key reload wakes history before waiting for acknowledgement");
+        rpc_request.abort();
+        let rpc_error = rpc_request
+            .await
+            .expect_err("aborting the RPC request cancels its response future");
+        assert!(rpc_error.is_cancelled());
+
+        assert!(
+            reconfiguration
+                .inner
+                .admission
+                .clone()
+                .try_read_owned()
+                .is_err(),
+            "post-commit completion retains admission after RPC cancellation"
+        );
+
+        drop(engine);
+        tokio::time::timeout(Duration::from_secs(1), reconfiguration.admit_block_scan())
+            .await
+            .expect("sync-engine shutdown releases post-commit admission");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn late_wallet_sync_error_cancels_all_earlier_tasks() {
         let (batch_cancelled, batch_cancelled_receiver) = mpsc::channel();
@@ -1691,6 +1880,7 @@ mod tests {
             .expect("creates a wallet database");
         let (decryptor, decryptor_engine) = WalletSync::build_decryptor();
         let decryptor_observer = decryptor.clone();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
         let (status, _status_reader) = status::channel(config.sync.lock_threshold());
 
         let result = WalletSync::spawn(
@@ -1698,7 +1888,7 @@ mod tests {
             database,
             MockChain::reporting(Vec::new(), 0),
             None,
-            decryptor,
+            reconfiguration,
             decryptor_engine,
             status,
         )
@@ -1743,6 +1933,7 @@ mod tests {
         // Drop the engine half; the steady-state task only needs the handle, and we
         // do not drive batch decryption here.
         drop(decryptor_engine);
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
 
         // A MockChain whose every view operation returns `Poll::Ready`: `snapshot`
         // and `tip` are synchronous, and `get_mempool_stream` returns `Ok(None)`.
@@ -1774,7 +1965,7 @@ mod tests {
                 prev_tip,
                 lower_boundary,
                 tip_change_signal,
-                decryptor,
+                reconfiguration,
                 None,
                 status,
             )

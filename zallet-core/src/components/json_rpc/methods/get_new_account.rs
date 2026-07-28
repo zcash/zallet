@@ -6,13 +6,13 @@ use zcash_client_backend::data_api::{AccountBirthday, WalletRead, WalletWrite};
 
 use crate::components::{
     chain::{Chain, ChainView},
-    database::DbConnection,
+    database::DbHandle,
     json_rpc::{
         server::LegacyCode,
         utils::{ensure_wallet_is_unlocked, parse_seedfp_parameter},
     },
     keystore::KeyStore,
-    sync::WalletDecryptorHandle,
+    sync::WalletSyncReconfiguration,
 };
 
 /// Response to a `z_getnewaccount` RPC request.
@@ -35,10 +35,10 @@ pub(super) const PARAM_SEEDFP_DESC: &str =
     "ZIP 32 seed fingerprint for the BIP 39 mnemonic phrase from which to derive the account.";
 
 pub(crate) async fn call<C: Chain>(
-    wallet: &mut DbConnection,
+    mut wallet: DbHandle,
     keystore: &KeyStore,
     chain: C,
-    decryptor: &WalletDecryptorHandle,
+    reconfiguration: &WalletSyncReconfiguration,
     account_name: &str,
     seedfp: Option<&str>,
 ) -> Response {
@@ -100,12 +100,14 @@ pub(crate) async fn call<C: Chain>(
         .await
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
+    let admitted = reconfiguration.admit_reconfiguration().await;
     let (account_id, _usk) = wallet
         .create_account(account_name, &seed, &birthday, None)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+    drop(wallet);
 
     // Reload viewing keys so the new account is scanned without a restart (see z_importkey).
-    if decryptor.reload_keys().await.is_none() {
+    if !admitted.reload_keys_and_wake_history_recovery().await {
         tracing::warn!("sync engine has shut down; new account won't be scanned until restart");
     }
 

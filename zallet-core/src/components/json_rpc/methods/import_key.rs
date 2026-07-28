@@ -9,10 +9,10 @@ use zcash_protocol::consensus::{BlockHeight, NetworkConstants};
 
 use crate::components::{
     chain::Chain,
-    database::DbConnection,
+    database::DbHandle,
     json_rpc::{server::LegacyCode, utils::fetch_account_birthday},
     keystore::KeyStore,
-    sync::WalletDecryptorHandle,
+    sync::WalletSyncReconfiguration,
 };
 
 /// Response to a `z_importkey` RPC request.
@@ -83,10 +83,10 @@ impl From<rusqlite::Error> for ImportError {
 }
 
 pub(crate) async fn call<C: Chain>(
-    wallet: &mut DbConnection,
+    wallet: DbHandle,
     keystore: &KeyStore,
     chain: C,
-    decryptor: &WalletDecryptorHandle,
+    reconfiguration: &WalletSyncReconfiguration,
     key: &str,
     rescan: Option<&str>,
     start_height: Option<u64>,
@@ -170,6 +170,7 @@ pub(crate) async fn call<C: Chain>(
     // wallet-database transaction: the account and its key commit together or not at all, so
     // the wallet can never track an account whose key is missing, nor hold a key for an
     // account it doesn't scan.
+    let admitted = reconfiguration.admit_reconfiguration().await;
     wallet
         .with_mut(|mut db_data| {
             db_data.transactionally_with_extension(|wdb, ext| -> Result<(), ImportError> {
@@ -201,12 +202,13 @@ pub(crate) async fn call<C: Chain>(
             ImportError::Database(e) => LegacyCode::Database.with_message(e.to_string()),
             ImportError::Keystore(e) => LegacyCode::Wallet.with_message(e.to_string()),
         })?;
+    drop(wallet);
 
     // Reload viewing keys so the key is scanned without a restart. Run this unconditionally:
-    // a re-import must be able to repair an account the sync engine never loaded. Don't wait
-    // for the reload to be processed; the marker is queued behind any blocks already in the
-    // decryptor, so awaiting it could block this call for a long time during sync.
-    if decryptor.reload_keys().await.is_none() {
+    // a re-import must be able to repair an account the sync engine never loaded. The admitted
+    // reconfiguration orders the reload after earlier block scans and keeps later scans out until
+    // the decryptor acknowledges it.
+    if !admitted.reload_keys_and_wake_history_recovery().await {
         tracing::warn!("sync engine has shut down; imported key won't be scanned until restart");
     }
 

@@ -11,8 +11,9 @@ use zcash_protocol::consensus::{BlockHeight, NetworkConstants};
 
 use crate::components::{
     chain::Chain,
-    database::DbConnection,
+    database::DbHandle,
     json_rpc::{server::LegacyCode, utils::fetch_account_birthday},
+    sync::WalletSyncReconfiguration,
 };
 
 /// Response to a `z_importviewingkey` RPC request.
@@ -78,8 +79,9 @@ fn decode_vkey_and_address(
 }
 
 pub(crate) async fn call<C: Chain>(
-    wallet: &mut DbConnection,
+    mut wallet: DbHandle,
     chain: C,
+    reconfiguration: &WalletSyncReconfiguration,
     vkey: &str,
     rescan: Option<&str>,
     start_height: Option<u64>,
@@ -119,7 +121,7 @@ pub(crate) async fn call<C: Chain>(
     let existing_account = wallet
         .get_account_for_ufvk(&ufvk)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
-    match existing_account {
+    let birthday = match existing_account {
         Some(account) => {
             if matches!(account.purpose(), AccountPurpose::Spending { .. }) {
                 return Err(LegacyCode::Wallet.with_message(format!(
@@ -131,6 +133,10 @@ pub(crate) async fn call<C: Chain>(
             // TODO: When rescan is "yes" and the key already exists, zcashd would force a
             // rescan from start_height. We could use `WalletWrite::rewind_to_chain_state`
             // for this (see `z_import_address` for an example).
+            return Ok(ResultType {
+                address_type: "sapling".to_string(),
+                address,
+            });
         }
         None => {
             // new key
@@ -143,8 +149,24 @@ pub(crate) async fn call<C: Chain>(
                 }
             };
 
-            let birthday = fetch_account_birthday(&chain, effective_height).await?;
+            fetch_account_birthday(&chain, effective_height).await?
+        }
+    };
 
+    let admitted = reconfiguration.admit_reconfiguration().await;
+    let existing_account = wallet
+        .get_account_for_ufvk(&ufvk)
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+    let mutated = match existing_account {
+        Some(account) => {
+            if matches!(account.purpose(), AccountPurpose::Spending { .. }) {
+                return Err(LegacyCode::Wallet.with_message(format!(
+                    "The wallet already contains the private key for this viewing key (address: {address})",
+                )));
+            }
+            false
+        }
+        None => {
             wallet
                 .import_account_ufvk(
                     &format!("Imported Sapling viewing key {address}"),
@@ -154,7 +176,15 @@ pub(crate) async fn call<C: Chain>(
                     None,
                 )
                 .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+            true
         }
+    };
+    drop(wallet);
+
+    if mutated && !admitted.reload_keys_and_wake_history_recovery().await {
+        tracing::warn!(
+            "sync engine has shut down; imported viewing key won't be scanned until restart"
+        );
     }
 
     Ok(ResultType {

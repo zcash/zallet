@@ -9,13 +9,13 @@ use zcash_protocol::consensus::BlockHeight;
 
 use crate::components::{
     chain::{Chain, ChainView},
-    database::DbConnection,
+    database::DbHandle,
     json_rpc::{
         server::LegacyCode,
         utils::{ensure_wallet_is_unlocked, parse_seedfp_parameter},
     },
     keystore::KeyStore,
-    sync::WalletDecryptorHandle,
+    sync::WalletSyncReconfiguration,
 };
 
 /// Response to a `z_recoveraccounts` RPC request.
@@ -52,10 +52,10 @@ pub(super) const PARAM_ACCOUNTS_DESC: &str =
 pub(super) const PARAM_ACCOUNTS_REQUIRED: bool = true;
 
 pub(crate) async fn call<C: Chain>(
-    wallet: &mut DbConnection,
+    mut wallet: DbHandle,
     keystore: &KeyStore,
     chain: C,
-    decryptor: &WalletDecryptorHandle,
+    reconfiguration: &WalletSyncReconfiguration,
     accounts: Vec<AccountParameter<'_>>,
 ) -> Response {
     ensure_wallet_is_unlocked(keystore).await?;
@@ -119,6 +119,7 @@ pub(crate) async fn call<C: Chain>(
     }
 
     // Import the accounts.
+    let admitted = reconfiguration.admit_reconfiguration().await;
     let accounts = account_args
         .into_iter()
         .map(|(account_name, seed_fp, account_index, birthday)| {
@@ -135,9 +136,10 @@ pub(crate) async fn call<C: Chain>(
             })
         })
         .collect::<Result<_, _>>()?;
+    drop(wallet);
 
     // Reload viewing keys so recovered accounts are scanned without a restart (see z_importkey).
-    if decryptor.reload_keys().await.is_none() {
+    if !admitted.reload_keys_and_wake_history_recovery().await {
         tracing::warn!(
             "sync engine has shut down; recovered accounts won't be scanned until restart"
         );

@@ -44,6 +44,10 @@ should be considered breaking changes.
 
 ### Changed
 
+- Shielded account and key mutations now exclude concurrent block-scan commits,
+  reload scanning keys before releasing mutation admission, and wake historical
+  recovery without requiring a wallet restart.
+
 - Migrated to `zcash_client_backend`/`zcash_client_sqlite` 0.24.0-rc.7 /
   0.22.0-rc.7 (as of rc.5, output-locking — `lock_outputs`, `unlock_output`,
   `clear_locked_outputs`, `get_locked_outputs` — is extracted off `WalletWrite`

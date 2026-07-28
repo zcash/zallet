@@ -41,11 +41,17 @@ use crate::{
     network::Network,
 };
 
+/// Four wallet-sync tasks retain connections for their lifetimes, and shielded-key mutations
+/// must be able to reserve one foreground connection before waiting for sync reconfiguration.
+const WALLET_CONNECTION_POOL_SIZE: usize = 5;
+
 pub(super) fn pool(path: impl AsRef<Path>, params: Network) -> Result<WalletPool, Error> {
     let config = deadpool_sqlite::Config::new(path.as_ref());
     let manager = WalletManager::from_config(&config, params);
     WalletPool::builder(manager)
-        .config(deadpool::managed::PoolConfig::default())
+        .config(deadpool::managed::PoolConfig::new(
+            WALLET_CONNECTION_POOL_SIZE,
+        ))
         .build()
         .map_err(|e| ErrorKind::Generic.context(e).into())
 }
@@ -979,5 +985,23 @@ impl WalletCommitmentTrees for DbConnection {
         index: u64,
     ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
         self.with_mut(|mut db_data| db_data.get_ironwood_subtree_root(index))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WALLET_CONNECTION_POOL_SIZE, pool};
+    use crate::network::Network;
+
+    #[test]
+    fn pool_reserves_foreground_capacity_beyond_long_lived_sync_connections() {
+        let datadir = tempfile::tempdir().expect("creates temporary database directory");
+        let pool = pool(
+            datadir.path().join("wallet.sqlite"),
+            Network::Consensus(zcash_protocol::consensus::Network::TestNetwork),
+        )
+        .expect("creates wallet connection pool");
+
+        assert_eq!(pool.status().max_size, WALLET_CONNECTION_POOL_SIZE);
     }
 }
