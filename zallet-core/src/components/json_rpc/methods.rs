@@ -1228,7 +1228,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         seedfp: Option<&str>,
     ) -> get_new_account::Response {
         get_new_account::call(
-            self.wallet().await?,
+            &self.general.wallet,
             &self.keystore,
             self.chain().await?,
             &self.reconfiguration,
