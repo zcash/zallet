@@ -1445,7 +1445,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         zaddr: &str,
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response {
-        z_export_viewing_key::call(self.wallet().await?.as_ref(), &self.keystore, zaddr, ivk).await
+        z_export_viewing_key::call(self.wallet().await?, &self.keystore, zaddr, ivk).await
     }
 
     async fn pczt_create(

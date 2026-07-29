@@ -10,7 +10,7 @@ use zcash_keys::{
 use zcash_protocol::consensus::NetworkConstants;
 
 use crate::components::{
-    database::DbConnection,
+    database::DbHandle,
     json_rpc::{
         payments::get_account_for_address, server::LegacyCode, utils::ensure_wallet_is_unlocked,
     },
@@ -29,7 +29,7 @@ pub(super) const PARAM_ZADDR_DESC: &str = "The Sapling payment address or unifie
 pub(super) const PARAM_IVK_DESC: &str = "Whether to export the unified incoming viewing key (UIVK) instead of the full viewing key. Default is false.";
 
 pub(crate) async fn call(
-    wallet: &DbConnection,
+    wallet: DbHandle,
     keystore: &KeyStore,
     zaddr: &str,
     ivk: Option<bool>,
@@ -43,7 +43,7 @@ pub(crate) async fn call(
 
     match &address {
         Address::Unified(_) => {
-            let account = get_account_for_address(wallet, &address).map_err(|e| {
+            let account = get_account_for_address(wallet.as_ref(), &address).map_err(|e| {
                 // Align the "address not held" error with the Sapling path below;
                 // `get_account_for_address` reports it with a payment-oriented message.
                 if e.code() == LegacyCode::InvalidAddressOrKey as i32 {
@@ -102,10 +102,13 @@ pub(crate) async fn call(
                     "Wallet does not hold private key or viewing key for this zaddr",
                 ))?;
 
-            let derivation = account.source().key_derivation().ok_or_else(|| {
+            let derivation = account.source().key_derivation().cloned().ok_or_else(|| {
                 LegacyCode::Wallet
                     .with_static("Cannot export viewing key for an imported view-only account")
             })?;
+            let params = *wallet.params();
+            let ufvk = ufvk.clone();
+            drop(wallet);
 
             let seed = keystore
                 .decrypt_seed(derivation.seed_fingerprint())
@@ -120,7 +123,7 @@ pub(crate) async fn call(
                 })?;
 
             let usk = UnifiedSpendingKey::from_seed(
-                wallet.params(),
+                &params,
                 seed.expose_secret(),
                 derivation.account_index(),
             )
@@ -143,7 +146,7 @@ pub(crate) async fn call(
             #[allow(deprecated)]
             let extfvk = usk.sapling().to_extended_full_viewing_key();
 
-            let hrp = wallet.params().hrp_sapling_extended_full_viewing_key();
+            let hrp = params.hrp_sapling_extended_full_viewing_key();
             Ok(ResultType(encode_extended_full_viewing_key(hrp, &extfvk)))
         }
         _ => Err(LegacyCode::InvalidAddressOrKey
@@ -153,6 +156,12 @@ pub(crate) async fn call(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use age::secrecy::ExposeSecret as _;
+    use bip0039::{English, Mnemonic};
+    use secrecy::SecretVec;
+    use zcash_client_backend::data_api::{AccountBirthday, WalletWrite};
     use zcash_keys::{
         encoding::{
             decode_extended_full_viewing_key, encode_extended_full_viewing_key,
@@ -160,10 +169,22 @@ mod tests {
         },
         keys::UnifiedFullViewingKey,
     };
+    use zcash_primitives::block::BlockHash;
     use zcash_protocol::{
-        consensus::{MAIN_NETWORK, TEST_NETWORK},
+        consensus::{BlockHeight, MAIN_NETWORK, NetworkConstants, TEST_NETWORK},
         constants,
     };
+
+    use super::call;
+    use crate::{
+        components::{database::Database, keystore::KeyStore},
+        config::ZalletConfig,
+    };
+
+    const ACCOUNT_BIRTHDAY_HEIGHT: u32 = 1;
+    const EXPORT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
+    const LIFELONG_SYNC_CONNECTIONS: usize = 4;
+    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     /// Constructs a UFVK (with only a Sapling component) from seed `[0; 32]`.
     fn test_ufvk() -> UnifiedFullViewingKey {
@@ -301,5 +322,72 @@ mod tests {
         let reimported_addr = encode_payment_address(hrp_addr, &reimported_payment_addr);
 
         assert_eq!(original_addr, reimported_addr);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn full_sapling_export_releases_rpc_connection_before_keystore_lookup() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let identity = age::x25519::Identity::generate();
+        std::fs::write(
+            config.encryption_identity(),
+            identity.to_string().expose_secret(),
+        )
+        .expect("writes unencrypted identity");
+
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let keystore = KeyStore::new(&config, database.clone()).expect("creates keystore");
+        keystore
+            .initialize_recipients(vec![identity.to_public().to_string()])
+            .await
+            .expect("initializes unencrypted keystore");
+        let mnemonic =
+            Mnemonic::<English>::from_phrase(TEST_MNEMONIC).expect("parses test mnemonic");
+        let seed = SecretVec::new(mnemonic.to_seed("").to_vec());
+        keystore
+            .encrypt_and_store_mnemonic(mnemonic)
+            .await
+            .expect("stores test mnemonic");
+
+        let mut setup_wallet = database.handle().await.expect("reserves setup database");
+        let birthday = AccountBirthday::from_parts(
+            zcash_client_backend::data_api::chain::ChainState::empty(
+                BlockHeight::from_u32(ACCOUNT_BIRTHDAY_HEIGHT),
+                BlockHash([0; 32]),
+            ),
+            None,
+        );
+        let (_, usk) = setup_wallet
+            .create_account("export test account", &seed, &birthday, None)
+            .expect("creates HD account");
+        #[allow(deprecated)]
+        let extfvk = usk.sapling().to_extended_full_viewing_key();
+        let (_, sapling_address) = extfvk.default_address();
+        let zaddr = encode_payment_address(
+            setup_wallet.params().hrp_sapling_payment_address(),
+            &sapling_address,
+        );
+        drop(setup_wallet);
+
+        let mut sync_wallets = Vec::with_capacity(LIFELONG_SYNC_CONNECTIONS);
+        for _ in 0..LIFELONG_SYNC_CONNECTIONS {
+            sync_wallets.push(database.handle().await.expect("reserves sync database"));
+        }
+        let rpc_wallet = database.handle().await.expect("reserves RPC database");
+
+        let result = tokio::time::timeout(
+            EXPORT_COMPLETION_TIMEOUT,
+            call(rpc_wallet, &keystore, &zaddr, None),
+        )
+        .await
+        .expect("full Sapling export completes while sync retains database connections")
+        .expect("exports full Sapling viewing key");
+        assert!(result.0.starts_with("zxviews"));
     }
 }

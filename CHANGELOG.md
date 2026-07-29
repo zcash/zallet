@@ -165,6 +165,9 @@ be considered breaking changes.
 
 - Hot key imports, account creation, account recovery, and rescans now interrupt
   mempool following to scan newly scheduled work through the unchanged chain tip.
+- Full Sapling `z_exportviewingkey` requests release their wallet database handle
+  before reading encrypted seed material, avoiding a deadlock while wallet sync
+  retains its long-lived database connections.
 
 ## [0.1.0-beta.2] - 2026-07-28
 
