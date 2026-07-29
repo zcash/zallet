@@ -1131,7 +1131,7 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
 
     async fn view_transaction(&self, txid: &str) -> view_transaction::Response {
         view_transaction::call(
-            self.wallet().await?.as_ref(),
+            &self.wallet,
             #[cfg(zallet_build = "wallet")]
             &self.keystore,
             self.chain().await?,

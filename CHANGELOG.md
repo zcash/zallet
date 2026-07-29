@@ -172,6 +172,8 @@ be considered breaking changes.
   database connections.
 - `z_sendmany` and `z_shieldcoinbase` release their wallet database handle
   before decrypting spending keys, avoiding the same connection-pool deadlock.
+- `z_viewtransaction` releases its wallet database handle before reading legacy
+  shielding keys, avoiding the same connection-pool deadlock.
 
 ## [0.1.0-beta.2] - 2026-07-28
 
