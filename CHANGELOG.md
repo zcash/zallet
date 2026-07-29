@@ -74,6 +74,9 @@ be considered breaking changes.
   starts immediately instead of after up to 30 seconds. `z_importviewingkey`
   also loads the imported key into the running sync engine; previously the key
   was not scanned until Zallet restarted.
+- Keys imported, accounts created or recovered, and rescans requested while the
+  wallet is at the chain tip are now scanned right away. Previously the recent
+  blocks they needed were not scanned until the next block arrived.
 
 ## [0.1.0-beta.4] - 2026-11-01
 

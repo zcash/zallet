@@ -138,7 +138,7 @@ pub(crate) async fn call<C: Chain>(
     };
 
     // Reload viewing keys so recovered accounts are scanned without a restart (see z_importkey).
-    if !admitted.reload_keys_and_wake_history_recovery().await {
+    if !admitted.reload_keys_and_wake_wallet_recovery().await {
         tracing::warn!(
             "sync engine has shut down; recovered accounts won't be scanned until restart"
         );
