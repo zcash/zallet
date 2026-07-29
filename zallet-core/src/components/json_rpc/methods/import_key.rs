@@ -208,7 +208,7 @@ pub(crate) async fn call<C: Chain>(
     // a re-import must be able to repair an account the sync engine never loaded. The admitted
     // reconfiguration orders the reload after earlier block scans and keeps later scans out until
     // the decryptor acknowledges it.
-    if !admitted.reload_keys_and_wake_history_recovery().await {
+    if !admitted.reload_keys_and_wake_wallet_recovery().await {
         tracing::warn!("sync engine has shut down; imported key won't be scanned until restart");
     }
 

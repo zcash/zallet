@@ -203,9 +203,9 @@ pub(crate) async fn call<C: Chain>(
     drop(wallet);
 
     match effect {
-        ViewingKeyImportEffect::RescanScheduled => admitted.wake_history_recovery(),
+        ViewingKeyImportEffect::RescanScheduled => admitted.wake_wallet_recovery(),
         ViewingKeyImportEffect::KeyImported => {
-            if !admitted.reload_keys_and_wake_history_recovery().await {
+            if !admitted.reload_keys_and_wake_wallet_recovery().await {
                 tracing::warn!(
                     "sync engine has shut down; imported viewing key won't be scanned until restart"
                 );
@@ -222,18 +222,37 @@ pub(crate) async fn call<C: Chain>(
 
 #[cfg(test)]
 mod tests {
+    use std::{ops::Range, sync::Arc, time::Duration};
+
     use super::*;
     use crate::{
         components::{
-            chain::MockChain,
+            chain::{
+                BlockLocator, Chain, ChainBlock, ChainError, ChainTx, ChainView, MockChain,
+                ReportedUpgrade,
+            },
             database::Database,
-            sync::{WalletSync, WalletSyncReconfiguration},
+            sync::{WalletSync, WalletSyncReconfiguration, status},
         },
         config::ZalletConfig,
+        error::Error,
+        network::Network,
+    };
+    use futures::{
+        StreamExt as _,
+        stream::{self, BoxStream},
+    };
+    #[cfg(not(feature = "spend-index"))]
+    use transparent::address::TransparentAddress;
+    #[cfg(feature = "spend-index")]
+    use transparent::bundle::OutPoint;
+    use transparent::{
+        builder::Coinbase,
+        bundle::{Bundle, TxIn},
     };
     use zcash_client_backend::data_api::{
-        AccountBirthday, ScannedBlock, WalletRead, WalletWrite,
-        chain::ChainState,
+        AccountBirthday, ScannedBlock, TransactionStatus, WalletRead, WalletWrite,
+        chain::{ChainState, CommitmentTreeRoot},
         scanning::{ScanPriority, ScanRange},
     };
     use zcash_client_backend::{
@@ -241,9 +260,333 @@ mod tests {
         scanning::{Nullifiers, ScanningKeys, scan_block},
     };
     use zcash_client_sqlite::AccountUuid;
+    use zcash_encoding::CompactSize;
     use zcash_keys::encoding::encode_extended_full_viewing_key;
-    use zcash_primitives::block::BlockHash;
-    use zcash_protocol::constants;
+    use zcash_primitives::{
+        block::{Block, BlockHash, BlockHeader, BlockHeaderData},
+        transaction::{Authorized, Transaction, TransactionData, TxVersion},
+    };
+    use zcash_protocol::{
+        TxId,
+        consensus::{BranchId, Network as ConsensusNetwork},
+        constants,
+    };
+
+    const FIXED_TIP: u32 = 3;
+
+    #[derive(Clone)]
+    struct FixedTipChain {
+        network: Network,
+        mempool_follow_started: Arc<tokio::sync::Notify>,
+    }
+
+    impl FixedTipChain {
+        fn new(network: Network) -> Self {
+            Self {
+                network,
+                mempool_follow_started: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct FixedTipView {
+        mempool_follow_started: Arc<tokio::sync::Notify>,
+    }
+
+    impl Chain for FixedTipChain {
+        type View = FixedTipView;
+
+        fn params(&self) -> &Network {
+            &self.network
+        }
+
+        async fn reported_upgrades(&self) -> Result<Vec<ReportedUpgrade>, Error> {
+            Ok(Vec::new())
+        }
+
+        async fn broadcast_transaction(&self, _tx: &Transaction) -> Result<(), ChainError> {
+            Err(ChainError::backend(
+                "fixed-tip test chain does not broadcast transactions",
+            ))
+        }
+
+        async fn get_sapling_subtree_roots(
+            &self,
+        ) -> Result<Vec<CommitmentTreeRoot<sapling::Node>>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_orchard_subtree_roots(
+            &self,
+        ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_ironwood_subtree_roots(
+            &self,
+        ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        async fn snapshot(&self) -> Result<Self::View, ChainError> {
+            Ok(FixedTipView {
+                mempool_follow_started: self.mempool_follow_started.clone(),
+            })
+        }
+    }
+
+    impl ChainView for FixedTipView {
+        async fn tip(&self) -> Result<ChainBlock, ChainError> {
+            Ok(chain_block(height(FIXED_TIP)))
+        }
+
+        async fn find_fork_point(
+            &self,
+            locator: &BlockLocator,
+        ) -> Result<Option<ChainBlock>, ChainError> {
+            Ok((0..=FIXED_TIP).rev().find_map(|value| {
+                let block = chain_block(height(value));
+                locator.hashes().contains(&block.hash()).then_some(block)
+            }))
+        }
+
+        async fn tree_state_as_of(
+            &self,
+            height: BlockHeight,
+        ) -> Result<Option<ChainState>, ChainError> {
+            Ok((height <= BlockHeight::from_u32(FIXED_TIP))
+                .then(|| ChainState::empty(height, fixed_header(height).hash())))
+        }
+
+        async fn get_block_header(
+            &self,
+            height: BlockHeight,
+        ) -> Result<Option<BlockHeader>, ChainError> {
+            Ok((height <= BlockHeight::from_u32(FIXED_TIP)).then(|| fixed_header(height)))
+        }
+
+        async fn get_block(&self, height: BlockHeight) -> Result<Option<Block>, ChainError> {
+            Ok((height <= BlockHeight::from_u32(FIXED_TIP)).then(|| fixed_block(height)))
+        }
+
+        fn stream_blocks_to_tip(
+            &self,
+            start: BlockHeight,
+        ) -> BoxStream<'_, Result<Block, ChainError>> {
+            stream::iter(
+                (u32::from(start)..=FIXED_TIP)
+                    .map(|value| Ok(fixed_block(height(value))))
+                    .collect::<Vec<_>>(),
+            )
+            .boxed()
+        }
+
+        fn stream_blocks(
+            &self,
+            range: &Range<BlockHeight>,
+        ) -> BoxStream<'_, Result<Block, ChainError>> {
+            stream::iter(
+                (u32::from(range.start)..u32::from(range.end))
+                    .map(|value| Ok(fixed_block(height(value))))
+                    .collect::<Vec<_>>(),
+            )
+            .boxed()
+        }
+
+        async fn get_mempool_stream(
+            &self,
+        ) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+            self.mempool_follow_started.notify_one();
+            Ok(Some(stream::pending().boxed()))
+        }
+
+        async fn get_transaction(&self, _txid: TxId) -> Result<Option<ChainTx>, ChainError> {
+            Ok(None)
+        }
+
+        async fn get_transaction_status(
+            &self,
+            _txid: TxId,
+        ) -> Result<TransactionStatus, ChainError> {
+            Ok(TransactionStatus::TxidNotRecognized)
+        }
+
+        #[cfg(feature = "spend-index")]
+        async fn outpoint_spend_status(
+            &self,
+            _outpoint: &OutPoint,
+        ) -> Result<crate::components::chain::SpendStatus, ChainError> {
+            Ok(crate::components::chain::SpendStatus::Unspent)
+        }
+
+        #[cfg(not(feature = "spend-index"))]
+        async fn get_address_unspent_outpoints(
+            &self,
+            _address: &TransparentAddress,
+        ) -> Result<Vec<(TxId, u32)>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        #[cfg(not(feature = "spend-index"))]
+        async fn get_address_tx_ids(
+            &self,
+            _address: &TransparentAddress,
+            _range: Range<BlockHeight>,
+        ) -> Result<Vec<TxId>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+        async fn block_height(&self, _hash: &BlockHash) -> Result<Option<BlockHeight>, ChainError> {
+            Ok(None)
+        }
+    }
+
+    fn chain_block(height: BlockHeight) -> ChainBlock {
+        ChainBlock::new(height, fixed_header(height).hash())
+    }
+
+    fn fixed_header(height: BlockHeight) -> BlockHeader {
+        let value = u32::from(height);
+        BlockHeaderData {
+            version: 4,
+            prev_block: if value == 0 {
+                BlockHash([0; 32])
+            } else {
+                fixed_header(BlockHeight::from_u32(value - 1)).hash()
+            },
+            merkle_root: [0; 32],
+            final_sapling_root: [0; 32],
+            time: 0,
+            bits: 0,
+            nonce: [u8::try_from(value).expect("test height fits in one byte"); 32],
+            solution: vec![],
+        }
+        .freeze()
+        .expect("test block header is structurally valid")
+    }
+
+    fn fixed_block(height: BlockHeight) -> Block {
+        let header = fixed_header(height);
+        let coinbase_authorization = Coinbase;
+        let transparent_bundle = Bundle {
+            vin: vec![
+                TxIn::<Coinbase>::coinbase(height, None)
+                    .expect("test coinbase height is structurally valid"),
+            ],
+            vout: Vec::new(),
+            authorization: coinbase_authorization.clone(),
+        }
+        .map_authorization(coinbase_authorization);
+        let transaction = TransactionData::<Authorized>::from_parts(
+            TxVersion::suggested_for_branch(BranchId::Sprout),
+            BranchId::Sprout,
+            0,
+            height,
+            Some(transparent_bundle),
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .expect("test transaction is structurally valid");
+
+        let mut bytes = Vec::new();
+        header
+            .write(&mut bytes)
+            .expect("serializes test block header");
+        CompactSize::write(&mut bytes, 1).expect("serializes test transaction count");
+        transaction
+            .write(&mut bytes)
+            .expect("serializes test coinbase transaction");
+
+        Block::read(bytes.as_slice(), &ConsensusNetwork::MainNetwork)
+            .expect("test block is structurally valid")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hot_viewing_key_import_scans_to_an_unchanged_near_tip() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let chain = FixedTipChain::new(config.consensus.network());
+        let (decryptor, decryptor_engine) = WalletSync::build_decryptor();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
+        let (sync_status, _sync_status_reader) = status::channel(config.sync.lock_threshold());
+        let (steady_state, recover_history, batch_decryptor, data_requests) = WalletSync::spawn(
+            &config,
+            database.clone(),
+            chain.clone(),
+            None,
+            reconfiguration.clone(),
+            decryptor_engine,
+            sync_status,
+        )
+        .await
+        .expect("starts wallet sync against the fixed-tip chain");
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            chain.mempool_follow_started.notified(),
+        )
+        .await
+        .expect("steady-state sync reaches stable mempool follow");
+
+        call(
+            database
+                .handle()
+                .await
+                .expect("opens wallet for hot viewing-key import"),
+            chain,
+            &reconfiguration,
+            &encoded_mainnet_extfvk(),
+            Some("yes"),
+            Some(0),
+        )
+        .await
+        .expect("imports viewing key while wallet sync is running");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let wallet = database
+                    .handle()
+                    .await
+                    .expect("opens wallet while waiting for near-tip recovery");
+                let pending_ranges = wallet
+                    .suggest_scan_ranges()
+                    .expect("reads suggested scan ranges");
+                if pending_ranges.is_empty() {
+                    assert_eq!(
+                        wallet.chain_height().expect("reads wallet chain height"),
+                        Some(height(FIXED_TIP)),
+                    );
+                    break;
+                }
+                drop(wallet);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hot viewing-key import is scanned through the unchanged tip");
+
+        for task in [
+            steady_state,
+            recover_history,
+            batch_decryptor,
+            data_requests,
+        ] {
+            task.abort();
+            let error = task.await.expect_err("aborted wallet-sync test task stops");
+            assert!(error.is_cancelled());
+        }
+    }
 
     /// Derives a test extended full viewing key from seed [0; 32] and encodes it.
     fn encoded_mainnet_extfvk() -> String {

@@ -163,6 +163,9 @@ be considered breaking changes.
   `zallet` spinning at full CPU after a sibling task failure. A backend whose
   every view operation awaits real I/O is unaffected.
 
+- Hot key imports, account creation, account recovery, and rescans now interrupt
+  mempool following to scan newly scheduled work through the unchanged chain tip.
+
 ## [0.1.0-beta.2] - 2026-07-28
 
 ### Added

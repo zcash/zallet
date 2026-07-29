@@ -85,7 +85,7 @@ pub(crate) mod status;
 pub(crate) use status::{SyncStatus, SyncStatusReader, SyncStatusWriter};
 
 mod locator;
-mod steps;
+pub(super) mod steps;
 
 #[derive(Debug)]
 pub(crate) struct WalletSync {}
@@ -105,6 +105,7 @@ struct WalletSyncReconfigurationInner {
     admission: Arc<RwLock<()>>,
     decryptor: WalletDecryptorHandle,
     history_recovery: Notify,
+    near_tip_recovery: Notify,
 }
 
 pub(crate) struct AdmittedWalletSyncReconfiguration {
@@ -124,6 +125,7 @@ impl WalletSyncReconfiguration {
                 admission: Arc::new(RwLock::new(())),
                 decryptor,
                 history_recovery: Notify::new(),
+                near_tip_recovery: Notify::new(),
             }),
         }
     }
@@ -145,17 +147,22 @@ impl WalletSyncReconfiguration {
     async fn wait_for_history_recovery(&self) {
         self.inner.history_recovery.notified().await;
     }
+
+    async fn wait_for_near_tip_recovery(&self) {
+        self.inner.near_tip_recovery.notified().await;
+    }
 }
 
 impl AdmittedWalletSyncReconfiguration {
-    pub(crate) fn wake_history_recovery(&self) {
+    pub(crate) fn wake_wallet_recovery(&self) {
         self.inner.history_recovery.notify_one();
+        self.inner.near_tip_recovery.notify_one();
     }
 
-    pub(crate) async fn reload_keys_and_wake_history_recovery(self) -> bool {
+    pub(crate) async fn reload_keys_and_wake_wallet_recovery(self) -> bool {
         let completion = tokio::spawn(async move {
             let reload_finished = self.inner.decryptor.reload_keys().await;
-            self.wake_history_recovery();
+            self.wake_wallet_recovery();
 
             match reload_finished {
                 Some(reload_finished) => reload_finished.await.is_ok(),
@@ -375,6 +382,28 @@ fn select_initial_scan_range(
             } else {
                 None
             }
+        })
+        .next()
+}
+
+/// Selects suggested scan work owned by [`steady_state`].
+///
+/// The lower bound preserves [`recover_history`]'s ownership of finalized history, while
+/// the exclusive upper bound prevents a fixed chain view from scanning beyond its captured
+/// tip. As during initialization, only `Historic` or higher-priority work is admitted;
+/// lower-priority suggestions retain their existing semantics.
+fn select_near_tip_scan_range(
+    suggested: impl IntoIterator<Item = ScanRange>,
+    lower_boundary: BlockHeight,
+    current_tip: BlockHeight,
+) -> Option<ScanRange> {
+    suggested
+        .into_iter()
+        .filter(|range| range.priority() >= ScanPriority::Historic)
+        .filter_map(|range| {
+            range
+                .truncate_start(lower_boundary)?
+                .truncate_end(current_tip + 1)
         })
         .next()
 }
@@ -1114,6 +1143,47 @@ async fn steady_state_iteration<C: Chain>(
         return Ok(ControlFlow::Break(boundary));
     }
 
+    let lower_boundary = BlockHeight::from_u32(lower_boundary.load(Ordering::Acquire));
+    if let Some(scan_range) = select_near_tip_scan_range(
+        db_data.suggest_scan_ranges()?,
+        lower_boundary,
+        current_tip.height(),
+    ) {
+        let admitted_scan = reconfiguration.admit_block_scan().await;
+        let scan_result = steps::scan_blocks(
+            chain_view.clone(),
+            db_data,
+            params,
+            &scan_range,
+            admitted_scan.decryptor(),
+            shutdown_height,
+        )
+        .await;
+        if let ControlFlow::Break(boundary) = scan_result? {
+            return Ok(ControlFlow::Break(boundary));
+        }
+
+        let next_scan_range = select_near_tip_scan_range(
+            db_data.suggest_scan_ranges()?,
+            lower_boundary,
+            current_tip.height(),
+        );
+        // Keep scan admission through this queue snapshot so a waiting wallet
+        // mutation cannot schedule a new, identical range that looks like
+        // scanner no-progress.
+        drop(admitted_scan);
+        if next_scan_range.as_ref() == Some(&scan_range) {
+            return Err(SyncError::Chain(ChainError::backend(format!(
+                "near-tip scan made no progress through suggested range {scan_range}"
+            ))));
+        }
+
+        // Capture a fresh view before admitting the next suggested range. This bounds one
+        // iteration to one range and lets an expired or incomplete view make no further
+        // scheduling decisions.
+        return Ok(ControlFlow::Continue(()));
+    }
+
     // The wallet has applied every block up to the current tip. Publish how far it is
     // fully scanned (which also reflects `recover_history`'s backfill), mark that steady
     // state has reached the tip, and clear any recovering state now that the rewind (if
@@ -1133,16 +1203,26 @@ async fn steady_state_iteration<C: Chain>(
     {
         Some(mempool_stream) => {
             info!("Reached chain tip, streaming mempool");
-            tokio::pin!(mempool_stream);
-            while let Some(tx) = mempool_stream.next().await {
-                info!("Scanning mempool tx {}", tx.txid());
-                // TODO: Route individual-transaction scanning through the batch
-                // decryptor (`Handle::queue_tx`) once a single-tx store path exists.
-                // See zcash/zallet#477.
-                decrypt_and_store_transaction(params, db_data, &tx, None)?;
+            tokio::select! {
+                biased;
+                result = async {
+                    tokio::pin!(mempool_stream);
+                    while let Some(tx) = mempool_stream.next().await {
+                        info!("Scanning mempool tx {}", tx.txid());
+                        // TODO: Route individual-transaction scanning through the batch
+                        // decryptor (`Handle::queue_tx`) once a single-tx store path exists.
+                        // See zcash/zallet#477.
+                        decrypt_and_store_transaction(params, db_data, &tx, None)?;
+                    }
+                    Ok::<(), SyncError>(())
+                } => result?,
+                () = reconfiguration.wait_for_near_tip_recovery() => {
+                    debug!("Wallet recovery scheduled near-tip scan work");
+                }
             }
 
-            // Mempool stream ended, signalling that the chain tip has changed.
+            // A completed stream signals a tip change; wallet recovery instead drops this
+            // fixed view so the next iteration can admit its newly suggested near-tip work.
         }
         // The chain tip already changed since this view was captured; loop around
         // immediately to observe it.
@@ -1503,7 +1583,7 @@ async fn data_requests<C: Chain>(
 /// Processes the queue of transactions that need to be scanned with the wallet's viewing
 /// keys.
 #[tracing::instrument(skip_all)]
-async fn batch_decryptor(
+pub(super) async fn batch_decryptor(
     params: Network,
     db_data: &mut DbConnection,
     decryptor: decryptor::Engine<AccountUuid, (AccountUuid, Scope)>,
@@ -1525,7 +1605,8 @@ mod tests {
     use super::{
         ChainError, PendingWalletSyncTasks, SyncError, TREE_RECOVERY_LADDER, TreeRecovery,
         WalletSync, WalletSyncReconfiguration, is_retryable, is_tree_divergence, resume_point,
-        rewind_step, select_initial_scan_range, status, steady_state, tree_recovery_target,
+        rewind_step, select_initial_scan_range, select_near_tip_scan_range, status, steady_state,
+        tree_recovery_target,
     };
     use crate::{
         components::{
@@ -1760,18 +1841,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rescan_wakes_history_recovery_without_restart() {
+    async fn rescan_wakes_both_recovery_owners_without_restart() {
         let (decryptor, engine) = WalletSync::build_decryptor();
         let reconfiguration = WalletSyncReconfiguration::new(decryptor);
         drop(engine);
         let history_recovery_woken = reconfiguration.wait_for_history_recovery();
+        let near_tip_recovery_woken = reconfiguration.wait_for_near_tip_recovery();
         let admitted = reconfiguration.admit_reconfiguration().await;
 
-        admitted.wake_history_recovery();
+        admitted.wake_wallet_recovery();
 
-        tokio::time::timeout(Duration::from_secs(1), history_recovery_woken)
-            .await
-            .expect("history recovery is woken by wallet reconfiguration");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(history_recovery_woken, near_tip_recovery_woken);
+        })
+        .await
+        .expect("both recovery owners are woken by wallet reconfiguration");
     }
 
     #[tokio::test]
@@ -1779,13 +1863,16 @@ mod tests {
         let (decryptor, engine) = WalletSync::build_decryptor();
         let reconfiguration = WalletSyncReconfiguration::new(decryptor);
         let history_recovery_woken = reconfiguration.wait_for_history_recovery();
+        let near_tip_recovery_woken = reconfiguration.wait_for_near_tip_recovery();
         let admitted = reconfiguration.admit_reconfiguration().await;
         let rpc_request =
-            tokio::spawn(async move { admitted.reload_keys_and_wake_history_recovery().await });
+            tokio::spawn(async move { admitted.reload_keys_and_wake_wallet_recovery().await });
 
-        tokio::time::timeout(Duration::from_secs(1), history_recovery_woken)
-            .await
-            .expect("key reload wakes history before waiting for acknowledgement");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(history_recovery_woken, near_tip_recovery_woken);
+        })
+        .await
+        .expect("key reload wakes both recovery owners before waiting for acknowledgement");
         rpc_request.abort();
         let rpc_error = rpc_request
             .await
@@ -2077,6 +2164,18 @@ mod tests {
         assert_eq!(
             select_initial_scan_range(suggested, h(1_200), h(900)),
             Some(range(1_000, 1_100, ScanPriority::Historic)),
+        );
+    }
+
+    #[test]
+    fn near_tip_scan_range_preserves_priority_and_boundary_ownership() {
+        let suggested = vec![
+            range(950, 1_000, ScanPriority::Scanned),
+            range(500, 1_500, ScanPriority::Historic),
+        ];
+        assert_eq!(
+            select_near_tip_scan_range(suggested, h(900), h(1_200)),
+            Some(range(900, 1_201, ScanPriority::Historic)),
         );
     }
 
