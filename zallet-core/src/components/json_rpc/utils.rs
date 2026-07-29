@@ -60,27 +60,20 @@ pub(super) async fn ensure_wallet_is_unlocked(keystore: &KeyStore) -> RpcResult<
     }
 }
 
-/// Collects the standalone (non-HD) transparent spending keys required to sign the
-/// transparent inputs of `proposal`.
+/// Identifies standalone transparent inputs whose keys are needed to sign `proposal`.
 ///
 /// Determines which transparent receivers in this account were imported standalone
-/// (vs. HD-derived). Only those have an associated entry in the keystore's
-/// standalone-key table; HD-derived receivers are signed for using `usk` and must not
-/// be looked up via `decrypt_standalone_transparent_key` (which would error with
-/// `QueryReturnedNoRows`).
+/// rather than HD-derived. This database-only phase must finish before callers release
+/// their wallet handle and enter the keystore.
 ///
-/// Gated on `zcashd-import` because the keystore's standalone-key table (and the
-/// `decrypt_standalone_transparent_key` accessor) only exists under that feature.
-/// Also gated on the `wallet` build because its only callers (`z_send_many` and
-/// `z_shieldcoinbase`) are wallet-only, and the `DbConnection`/`KeyStore` types it
-/// uses are only imported in that build.
+/// Gated on `zcashd-import` because the keystore's standalone-key table and its
+/// corresponding signing path exist only under that feature.
 #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
-pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
+pub(super) fn standalone_transparent_input_addresses<NoteRef>(
     wallet: &DbConnection,
-    keystore: &KeyStore,
     account_id: AccountUuid,
     proposal: &Proposal<StandardFeeRule, NoteRef>,
-) -> RpcResult<HashMap<TransparentAddress, Vec<secp256k1::SecretKey>>> {
+) -> RpcResult<Vec<TransparentAddress>> {
     let standalone_addrs: HashSet<TransparentAddress> = wallet
         .get_transparent_receivers(account_id, true, true)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
@@ -95,7 +88,7 @@ pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
         })
         .collect();
 
-    let mut keys: HashMap<TransparentAddress, Vec<secp256k1::SecretKey>> = HashMap::new();
+    let mut input_addresses = Vec::new();
     for step in proposal.steps() {
         for input in step.transparent_inputs() {
             if let Some(address) = script::FromChain::parse(&input.txout().script_pubkey().0)
@@ -106,19 +99,32 @@ pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
                 if !standalone_addrs.contains(&address) {
                     continue;
                 }
-                let secret_key = keystore
-                    .decrypt_standalone_transparent_key(&address)
-                    .await
-                    .map_err(|e| match e.kind() {
-                        // TODO: Improve internal error types.
-                        ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
-                            LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
-                        }
-                        _ => LegacyCode::Database.with_message(e.to_string()),
-                    })?;
-                keys.entry(address).or_default().push(secret_key);
+                input_addresses.push(address);
             }
         }
+    }
+    Ok(input_addresses)
+}
+
+/// Decrypts the staged standalone transparent keys without retaining a wallet handle.
+#[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+pub(super) async fn decrypt_standalone_transparent_keys(
+    keystore: &KeyStore,
+    input_addresses: Vec<TransparentAddress>,
+) -> RpcResult<HashMap<TransparentAddress, Vec<secp256k1::SecretKey>>> {
+    let mut keys: HashMap<TransparentAddress, Vec<secp256k1::SecretKey>> = HashMap::new();
+    for address in input_addresses {
+        let secret_key = keystore
+            .decrypt_standalone_transparent_key(&address)
+            .await
+            .map_err(|e| match e.kind() {
+                // TODO: Improve internal error types.
+                ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
+                    LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
+                }
+                _ => LegacyCode::Database.with_message(e.to_string()),
+            })?;
+        keys.entry(address).or_default().push(secret_key);
     }
     Ok(keys)
 }

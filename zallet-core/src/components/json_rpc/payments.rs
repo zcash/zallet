@@ -33,6 +33,15 @@ use zcash_protocol::{
 };
 use zip32::{AccountId, fingerprint::SeedFingerprint};
 
+#[cfg(zallet_build = "wallet")]
+use {
+    crate::{
+        components::{database::DbHandle, keystore::KeyStore},
+        error::ErrorKind,
+    },
+    secrecy::SecretVec,
+};
+
 use crate::{
     components::{chain::Chain, database::DbConnection},
     fl,
@@ -357,6 +366,97 @@ pub(super) fn propose_and_check(
     })?;
 
     Ok(proposal)
+}
+
+/// Decrypts an account seed without retaining the wallet connection used to select it.
+///
+/// Wallet sync retains all but one pooled connection. Consuming and releasing the foreground
+/// handle before the keystore lookup prevents spending RPCs from waiting for a sixth connection.
+#[cfg(zallet_build = "wallet")]
+pub(super) async fn decrypt_spending_seed(
+    wallet: DbHandle,
+    keystore: &KeyStore,
+    seed_fingerprint: &SeedFingerprint,
+) -> RpcResult<SecretVec<u8>> {
+    drop(wallet);
+    keystore
+        .decrypt_seed(seed_fingerprint)
+        .await
+        .map_err(|e| match e.kind() {
+            ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
+                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
+            }
+            _ => LegacyCode::Database.with_message(e.to_string()),
+        })
+}
+
+#[cfg(all(test, zallet_build = "wallet"))]
+mod spending_seed_tests {
+    use std::time::Duration;
+
+    use age::secrecy::ExposeSecret as _;
+    use bip0039::{English, Mnemonic};
+    use secrecy::ExposeSecret as _;
+    use zip32::fingerprint::SeedFingerprint;
+
+    use super::decrypt_spending_seed;
+    use crate::{
+        components::{database::Database, keystore::KeyStore},
+        config::ZalletConfig,
+    };
+
+    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const SYNC_CONNECTION_COUNT: usize = 4;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spending_seed_decryption_releases_wallet_connection() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let identity = age::x25519::Identity::generate();
+        std::fs::write(
+            config.encryption_identity(),
+            identity.to_string().expose_secret(),
+        )
+        .expect("writes unencrypted identity");
+
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let keystore = KeyStore::new(&config, database.clone()).expect("creates keystore");
+        keystore
+            .initialize_recipients(vec![identity.to_public().to_string()])
+            .await
+            .expect("initializes unencrypted keystore");
+        let mnemonic =
+            Mnemonic::<English>::from_phrase(TEST_MNEMONIC).expect("parses test mnemonic");
+        let expected_seed = mnemonic.to_seed("");
+        let seed_fingerprint =
+            SeedFingerprint::from_seed(&expected_seed).expect("derives seed fingerprint");
+        keystore
+            .encrypt_and_store_mnemonic(mnemonic)
+            .await
+            .expect("stores test mnemonic");
+
+        let mut sync_wallets = Vec::with_capacity(SYNC_CONNECTION_COUNT);
+        for _ in 0..SYNC_CONNECTION_COUNT {
+            sync_wallets.push(database.handle().await.expect("reserves sync database"));
+        }
+        let wallet = database.handle().await.expect("reserves RPC database");
+
+        let decrypted_seed = tokio::time::timeout(
+            Duration::from_secs(1),
+            decrypt_spending_seed(wallet, &keystore, &seed_fingerprint),
+        )
+        .await
+        .expect("seed decryption completes while sync retains database connections")
+        .expect("decrypts spending seed");
+
+        assert_eq!(decrypted_seed.expose_secret(), &expected_seed);
+    }
 }
 
 /// A strategy to use for managing privacy when constructing a transaction.

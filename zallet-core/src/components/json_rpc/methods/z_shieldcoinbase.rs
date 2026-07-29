@@ -5,6 +5,7 @@ use std::future::Future;
 
 use documented::Documented;
 use jsonrpsee::core::{JsonValue, RpcResult};
+use jsonrpsee::types::ErrorCode as RpcErrorCode;
 use schemars::JsonSchema;
 use secrecy::ExposeSecret;
 use serde::Serialize;
@@ -36,10 +37,13 @@ use crate::components::json_rpc::payments::{check_shielded_action_limits, enforc
 use crate::{
     components::{
         chain::Chain,
-        database::{DbConnection, DbHandle},
+        database::{Database, DbConnection, DbHandle},
         json_rpc::{
             asyncop::{ContextInfo, OperationId},
-            payments::{PrivacyPolicy, SendResult, parse_memo, verify_and_broadcast_transactions},
+            payments::{
+                PrivacyPolicy, SendResult, decrypt_spending_seed, parse_memo,
+                verify_and_broadcast_transactions,
+            },
             server::LegacyCode,
             utils::{JsonZec, value_from_zatoshis},
         },
@@ -50,7 +54,9 @@ use crate::{
 };
 
 #[cfg(feature = "zcashd-import")]
-use crate::components::json_rpc::utils::collect_standalone_transparent_keys;
+use crate::components::json_rpc::utils::{
+    decrypt_standalone_transparent_keys, standalone_transparent_input_addresses,
+};
 
 /// The result of a `z_shieldcoinbase` pre-flight call.
 ///
@@ -147,7 +153,7 @@ pub(super) const COINBASE_INPUTS_WARN_THRESHOLD: u64 = 400;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn call<C: Chain>(
-    mut wallet: DbHandle,
+    database: Database,
     keystore: KeyStore,
     chain: C,
     fromaddress: String,
@@ -180,6 +186,11 @@ pub(crate) async fn call<C: Chain>(
     // Parse the memo parameter (hex-encoded).
     let memo = memo.as_deref().map(parse_memo).transpose()?;
     let limit_usize = limit.map(|n| n as usize);
+
+    let mut wallet = database
+        .handle()
+        .await
+        .map_err(|_| RpcErrorCode::InternalError)?;
 
     // Classify `fromaddress` before touching the DB, so we can use its shape
     // (single t-addr vs account UUID) to pick the default privacy policy.
@@ -305,32 +316,30 @@ pub(crate) async fn call<C: Chain>(
     };
 
     // Derive the spending key for the source account.
-    let derivation = account.source().key_derivation().ok_or_else(|| {
+    let derivation = account.source().key_derivation().cloned().ok_or_else(|| {
         LegacyCode::InvalidAddressOrKey.with_message(format!(
             "No payment source found for account {}.",
             account_id.expose_uuid(),
         ))
     })?;
-    let seed = keystore
-        .decrypt_seed(derivation.seed_fingerprint())
-        .await
-        .map_err(|e| match e.kind() {
-            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
-                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
-            }
-            _ => LegacyCode::Database.with_message(e.to_string()),
-        })?;
-    let usk = UnifiedSpendingKey::from_seed(
-        wallet.params(),
-        seed.expose_secret(),
-        derivation.account_index(),
-    )
-    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
+
+    #[cfg(feature = "zcashd-import")]
+    let standalone_input_addresses =
+        standalone_transparent_input_addresses(wallet.as_ref(), account_id, &proposal)?;
+
+    let seed = decrypt_spending_seed(wallet, &keystore, derivation.seed_fingerprint()).await?;
+    let usk =
+        UnifiedSpendingKey::from_seed(&params, seed.expose_secret(), derivation.account_index())
+            .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
 
     #[cfg(feature = "zcashd-import")]
     let standalone_keys =
-        collect_standalone_transparent_keys(wallet.as_ref(), &keystore, account_id, &proposal)
-            .await?;
+        decrypt_standalone_transparent_keys(&keystore, standalone_input_addresses).await?;
+
+    let wallet = database
+        .handle()
+        .await
+        .map_err(|_| RpcErrorCode::InternalError)?;
 
     Ok((
         preflight,

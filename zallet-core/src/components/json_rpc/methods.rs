@@ -1377,7 +1377,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         // doing the expensive work of constructing a proposal.
         self.async_ops.check_capacity().await?;
         let (context, fut) = z_send_many::call(
-            self.wallet().await?,
+            self.general.wallet.clone(),
             self.keystore.clone(),
             self.chain().await?,
             fromaddress,
@@ -1425,7 +1425,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         // doing the expensive work of constructing a proposal.
         self.async_ops.check_capacity().await?;
         let (preflight, context, fut) = z_shieldcoinbase::call(
-            self.wallet().await?,
+            self.general.wallet.clone(),
             self.keystore.clone(),
             self.chain().await?,
             fromaddress,

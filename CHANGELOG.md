@@ -170,6 +170,8 @@ be considered breaking changes.
   retains its long-lived database connections.
 - `z_getnewaccount` no longer deadlocks while wallet sync retains its long-lived
   database connections.
+- `z_sendmany` and `z_shieldcoinbase` release their wallet database handle
+  before decrypting spending keys, avoiding the same connection-pool deadlock.
 
 ## [0.1.0-beta.2] - 2026-07-28
 
