@@ -1243,7 +1243,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         accounts: Vec<recover_accounts::AccountParameter<'_>>,
     ) -> recover_accounts::Response {
         recover_accounts::call(
-            self.wallet().await?,
+            &self.general.wallet,
             &self.keystore,
             self.chain().await?,
             &self.reconfiguration,

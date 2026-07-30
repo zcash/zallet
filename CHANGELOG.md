@@ -174,6 +174,8 @@ be considered breaking changes.
   before decrypting spending keys, avoiding the same connection-pool deadlock.
 - `z_viewtransaction` releases its wallet database handle before reading legacy
   shielding keys, avoiding the same connection-pool deadlock.
+- `z_recoveraccounts` releases its wallet database handle before decrypting
+  seed material, avoiding the same connection-pool deadlock.
 
 ## [0.1.0-beta.2] - 2026-07-28
 

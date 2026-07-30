@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use documented::Documented;
-use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
+use jsonrpsee::{
+    core::RpcResult,
+    types::{ErrorCode as RpcErrorCode, ErrorObjectOwned},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use zcash_client_backend::data_api::{Account as _, AccountBirthday, WalletRead, WalletWrite};
@@ -9,7 +12,7 @@ use zcash_protocol::consensus::BlockHeight;
 
 use crate::components::{
     chain::{Chain, ChainView},
-    database::DbHandle,
+    database::Database,
     json_rpc::{
         server::LegacyCode,
         utils::{ensure_wallet_is_unlocked, parse_seedfp_parameter},
@@ -52,7 +55,7 @@ pub(super) const PARAM_ACCOUNTS_DESC: &str =
 pub(super) const PARAM_ACCOUNTS_REQUIRED: bool = true;
 
 pub(crate) async fn call<C: Chain>(
-    mut wallet: DbHandle,
+    wallet: &Database,
     keystore: &KeyStore,
     chain: C,
     reconfiguration: &WalletSyncReconfiguration,
@@ -67,10 +70,17 @@ pub(crate) async fn call<C: Chain>(
         .await
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
-    let recover_until = wallet
+    let wallet_handle = wallet
+        .handle()
+        .await
+        .map_err(|_| RpcErrorCode::InternalError)?;
+    let recover_until = wallet_handle
         .chain_height()
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
         .ok_or(LegacyCode::InWarmup.with_static("Wallet sync required"))?;
+    // Keystore reads acquire their own pooled connection. Release this read handle before
+    // decrypting seeds while sync retains its four long-lived connections.
+    drop(wallet_handle);
 
     // Prepare arguments for the wallet.
     let mut account_args = vec![];
@@ -119,13 +129,19 @@ pub(crate) async fn call<C: Chain>(
     }
 
     // Import the accounts.
+    let mut wallet_handle = wallet
+        .handle()
+        .await
+        .map_err(|_| RpcErrorCode::InternalError)?;
+    // Reserve the mutation connection before waiting for exclusive sync admission so two
+    // concurrent key mutations cannot acquire those resources in opposite orders.
     let admitted = reconfiguration.admit_reconfiguration().await;
     let accounts = account_args
         .into_iter()
         .map(|(account_name, seed_fp, account_index, birthday)| {
             let seed = seeds.get(&seed_fp).expect("present");
 
-            let (account, _usk) = wallet
+            let (account, _usk) = wallet_handle
                 .import_account_hd(account_name, seed, account_index, &birthday, None)
                 .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
@@ -136,7 +152,7 @@ pub(crate) async fn call<C: Chain>(
             })
         })
         .collect::<Result<_, _>>()?;
-    drop(wallet);
+    drop(wallet_handle);
 
     // Reload viewing keys so recovered accounts are scanned without a restart (see z_importkey).
     if !admitted.reload_keys_and_wake_wallet_recovery().await {
@@ -146,4 +162,117 @@ pub(crate) async fn call<C: Chain>(
     }
 
     Ok(Accounts { accounts })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use age::secrecy::ExposeSecret as _;
+    use bip0039::{English, Mnemonic};
+    use secrecy::{ExposeSecret as _, SecretVec};
+    use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
+    use zcash_protocol::consensus::BlockHeight;
+    use zip32::fingerprint::SeedFingerprint;
+
+    use super::{
+        super::{WalletRpcImpl, WalletRpcServer},
+        AccountParameter,
+    };
+    use crate::{
+        components::{
+            chain::MockChain,
+            database::Database,
+            keystore::KeyStore,
+            sync::{WalletSync, WalletSyncReconfiguration, status},
+        },
+        config::ZalletConfig,
+    };
+
+    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const SYNC_CONNECTION_COUNT: usize = 4;
+    const TIP_HEIGHT: u32 = 500_100;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rpc_recovers_account_while_sync_retains_database_connections() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let identity = age::x25519::Identity::generate();
+        std::fs::write(
+            config.encryption_identity(),
+            identity.to_string().expose_secret(),
+        )
+        .expect("writes unencrypted identity");
+
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let keystore = KeyStore::new(&config, database.clone()).expect("creates keystore");
+        keystore
+            .initialize_recipients(vec![identity.to_public().to_string()])
+            .await
+            .expect("initializes unencrypted keystore");
+        let mnemonic =
+            Mnemonic::<English>::from_phrase(TEST_MNEMONIC).expect("parses test mnemonic");
+        let seed = SecretVec::new(mnemonic.to_seed("").to_vec());
+        let seedfp = SeedFingerprint::from_seed(seed.expose_secret())
+            .expect("derives seed fingerprint")
+            .to_string();
+        keystore
+            .encrypt_and_store_mnemonic(mnemonic)
+            .await
+            .expect("stores test mnemonic");
+
+        let mut setup_wallet = database.handle().await.expect("reserves setup database");
+        setup_wallet
+            .update_chain_tip(BlockHeight::from_u32(TIP_HEIGHT))
+            .expect("records chain tip");
+        drop(setup_wallet);
+
+        let (decryptor, decryptor_engine) = WalletSync::build_decryptor();
+        drop(decryptor_engine);
+        let (_sync_status_writer, sync_status) = status::channel(config.sync.lock_threshold());
+        let rpc = WalletRpcImpl::new(
+            database.clone(),
+            keystore,
+            MockChain::reporting(Vec::new(), TIP_HEIGHT).with_empty_tree_states(),
+            WalletSyncReconfiguration::new(decryptor),
+            sync_status,
+            config.rpc.async_operation_limit(),
+        );
+        let mut sync_wallets = Vec::with_capacity(SYNC_CONNECTION_COUNT);
+        for _ in 0..SYNC_CONNECTION_COUNT {
+            sync_wallets.push(database.handle().await.expect("reserves sync database"));
+        }
+
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(10),
+            WalletRpcServer::recover_accounts(
+                &rpc,
+                vec![AccountParameter {
+                    name: "saturation test",
+                    seedfp: &seedfp,
+                    zip32_account_index: 0,
+                    birthday_height: TIP_HEIGHT,
+                }],
+            ),
+        )
+        .await
+        .expect("account recovery completes while sync retains database connections")
+        .expect("recovers account");
+
+        let wallet = database.handle().await.expect("reopens wallet database");
+        assert_eq!(recovered.accounts.len(), 1);
+        assert_eq!(
+            wallet
+                .get_account_ids()
+                .expect("lists recovered wallet accounts")
+                .len(),
+            1
+        );
+    }
 }
