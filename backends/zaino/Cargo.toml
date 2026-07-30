@@ -34,7 +34,7 @@ transparent = { package = "zcash_transparent", version = "0.10.0" }
 zaino-common = "0.4"
 zaino-fetch = "0.4"
 zaino-state = "0.5"
-zcash_client_backend = "0.24.0-rc.4"
+zcash_client_backend = "=0.24.0-rc.4"
 zcash_keys = { version = "0.16.0", features = ["unstable"] }
 zcash_primitives = "0.30.0"
 zcash_protocol = "0.10.0"
