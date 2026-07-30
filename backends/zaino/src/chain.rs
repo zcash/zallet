@@ -62,15 +62,15 @@ use zallet_core::components::chain::{
 /// genuine backend errors.
 ///
 /// Zebra returns RPC error -5 ("block height not in best chain") when a block is requested
-/// by height but it no longer exists in the best chain — this happens during reorgs and is
-/// transient. Returning `Unavailable` instead of `Backend` lets callers retry rather than
-/// treating the error as fatal.
+/// by height but it no longer exists in the best chain. That means the fixed history
+/// represented by the current view has expired, so callers must discard the view rather
+/// than retry the individual request against it.
 fn block_fetch_error(
     e: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
 ) -> ChainError {
     let e: Box<dyn std::error::Error + Send + Sync + 'static> = e.into();
     if e.to_string().contains("block height not in best chain") {
-        ChainError::Unavailable(e)
+        ChainError::view_expired(e)
     } else {
         ChainError::Backend(e)
     }
@@ -825,12 +825,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn block_not_in_best_chain_is_unavailable() {
+    fn block_not_in_best_chain_expires_the_current_view() {
         // The exact message zebra returns (embedded inside a tonic Status message).
         let e = "unexpected error response from server: RPC Error (code: -5): block height not in best chain";
         assert!(
-            matches!(block_fetch_error(e), ChainError::Unavailable(_)),
-            "expected Unavailable for the reorg-window -5 error"
+            matches!(block_fetch_error(e), ChainError::ViewExpired(_)),
+            "expected ViewExpired for the reorg-window -5 error"
         );
     }
 

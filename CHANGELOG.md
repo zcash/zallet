@@ -37,6 +37,10 @@ be considered breaking changes.
 - `zallet start` now returns a failure when a supervised runtime task returns
   an error. Previously the first task exit was converted to a successful
   process result.
+- Wallet sync now loads a complete block range from one fixed-history view
+  before queueing decryption or database work. If the view expires partway
+  through the range, the partial batch is discarded and the entire range is
+  retried against a fresh view, including during history recovery.
 
 ## [0.1.0-beta.2] - 2026-07-28
 
