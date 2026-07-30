@@ -537,12 +537,17 @@ pub trait ChainView: Clone + Send + Sync + 'static {
     fn stream_blocks(&self, range: &Range<BlockHeight>)
     -> BoxStream<'_, Result<Block, ChainError>>;
 
-    /// Streams the current mempool. The stream ends when this view's tip changes.
+    /// Streams the current mempool.
     ///
-    /// Returns `None` if the tip has already changed since the view was captured.
+    /// The outer error reports failure to acquire the stream. After acquisition,
+    /// backends yield failures as item errors; wallet sync stops consuming the stream
+    /// after the first item error. Returns `None` if the tip changed before acquisition,
+    /// and reserves clean stream completion for a later change to this view's tip.
     fn get_mempool_stream(
         &self,
-    ) -> impl Future<Output = Result<Option<BoxStream<'_, Transaction>>, ChainError>> + Send;
+    ) -> impl Future<
+        Output = Result<Option<BoxStream<'_, Result<Transaction, ChainError>>>, ChainError>,
+    > + Send;
 
     /// Returns the transaction with the given txid, if known.
     fn get_transaction(
@@ -831,7 +836,7 @@ mod tests {
 
         async fn get_mempool_stream(
             &self,
-        ) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+        ) -> Result<Option<BoxStream<'_, Result<Transaction, ChainError>>>, ChainError> {
             Ok(None)
         }
 

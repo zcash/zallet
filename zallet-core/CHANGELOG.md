@@ -27,6 +27,9 @@ should be considered breaking changes.
   view has been invalidated. Wallet sync reacquires a view only for this
   precise condition instead of conflating it with general source
   unavailability.
+- `ChainView::get_mempool_stream` now yields fallible transaction items.
+  Steady-state sync propagates an item error instead of treating that item as
+  ordinary stream completion. Existing backend error classification is unchanged.
 
 ## [0.1.0-beta.2] - 2026-07-28
 
