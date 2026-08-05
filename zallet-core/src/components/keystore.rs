@@ -595,6 +595,29 @@ impl KeyStore {
         Ok(seed_fp)
     }
 
+    /// Deletes the mnemonic stored under `seed_fp`, returning whether a stored
+    /// mnemonic was deleted (`false` means no mnemonic was stored under `seed_fp`).
+    ///
+    /// A mnemonic that any account derives from must never be deleted; this exists
+    /// solely to roll back a provisionally stored mnemonic after a failed wallet
+    /// import, before any account references it.
+    #[cfg(feature = "zcashd-import")]
+    pub(crate) async fn delete_mnemonic(&self, seed_fp: &SeedFingerprint) -> Result<bool, Error> {
+        self.with_db_mut(|conn, _| {
+            let deleted = conn
+                .execute(
+                    "DELETE FROM ext_zallet_keystore_mnemonics
+                    WHERE hd_seed_fingerprint = :hd_seed_fingerprint",
+                    named_params! {
+                        ":hd_seed_fingerprint": seed_fp.to_bytes(),
+                    },
+                )
+                .map_err(|e| ErrorKind::Generic.context(e))?;
+            Ok(deleted > 0)
+        })
+        .await
+    }
+
     #[cfg(feature = "zcashd-import")]
     pub(crate) async fn encrypt_and_store_legacy_seed(
         &self,

@@ -123,10 +123,17 @@ migrate-beta-code =
 
 migrate-config-written = {-zallet} config written to {$conf}
 
+migrate-wallet-minted-seed =
+    The {-zcashd} wallet contains no HD seed, so a new BIP 39 mnemonic seed phrase
+    has been generated for the migrated wallet. This seed phrase never existed in
+    {-zcashd}: backups of your original wallet.dat do NOT cover it or any addresses
+    that will be derived from it, so be sure to back up your new {-zallet} wallet
+    as described below.
+
 migrate-wallet-legacy-seed-fp =
-    Importing zcashd legacy account for seed fingerprint '{$seed_fp}'. If you wish to
-    enable legacy zcashd semantics for wallet RPC methods, you should set
-    '{-legacy_pool_seed_fingerprint}' to this value in '{-zallet_toml}'.",
+    The zcashd legacy account is derived from the seed with fingerprint '{$seed_fp}'.
+    If you wish to enable legacy zcashd semantics for wallet RPC methods, you should
+    set '{-legacy_pool_seed_fingerprint}' to this value in '{-zallet_toml}'.
 
 ## General errors
 

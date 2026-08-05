@@ -3,8 +3,10 @@ use std::path::PathBuf;
 
 use abscissa_core::Runnable;
 
+use bip0039::{Count, English, Mnemonic};
+use rand::{RngCore, rngs::OsRng};
 use secp256k1::PublicKey;
-use secrecy::SecretVec;
+use secrecy::{SecretVec, Zeroize};
 use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::{
     Account as _, AccountSource, WalletRead, WalletWrite as _, chain::ChainState,
@@ -20,7 +22,7 @@ use crate::{
     cli::MigrateZcashdWalletCmd,
     components::{
         chain::{Chain, ChainError, ChainFactory, ChainView},
-        database::Database,
+        database::{Database, DbHandle},
         keystore::{
             KeyStore,
             zewif::{KeyStoreSecretSink, SecretSinkError, decode_seed_fingerprint},
@@ -311,6 +313,20 @@ impl MigrateZcashdWalletCmd {
             }
             None => (None, None),
         };
+        // A wallet with no HD seed material at all (created before zcashd had HD
+        // support, holding only standalone keys and watch-only addresses) gives its
+        // legacy account no derivation root; the importer would then skip that
+        // account and drop every standalone transparent key as unowned. Mint a fresh
+        // mnemonic to serve as the account's derivation root, creating a secret
+        // store to hold it if the wallet had no secrets at all.
+        let minted_seed = mnemonic_fp.is_none() && has_seedless_legacy_account(&document);
+        let (secret_store, mnemonic_fp) = if minted_seed {
+            let mut store = secret_store.unwrap_or_else(zewif::SecretStore::new);
+            let fp = mint_legacy_mnemonic(&mut store);
+            (Some(store), Some(fp))
+        } else {
+            (secret_store, mnemonic_fp)
+        };
 
         // Check whether this wallet (identified by its mnemonic seed fingerprint) has
         // already been imported, and whether additional wallet imports are permitted.
@@ -429,135 +445,249 @@ impl MigrateZcashdWalletCmd {
         // keystore shares that lock, so diverting secrets from within `import_wallet`
         // (which holds the write lock for its whole run) would deadlock.
         let mut sink = KeyStoreSecretSink::new(&keystore, network_params).await?;
-        if let Some(zewif::Secrets::Plain(store)) = document.secrets() {
-            info!(
-                "Storing {} seeds, {} transparent keys, and {} Sapling keys in the keystore",
-                store.seeds().len(),
-                store.transparent_keys().len(),
-                store.sapling_keys().len(),
-            );
-            for entry in store.seeds() {
-                sink.store_seed(entry).map_err(MigrateError::SecretSink)?;
+        let import_result = (|| -> Result<ZewifImportReport, MigrateError> {
+            if let Some(zewif::Secrets::Plain(store)) = document.secrets() {
+                info!(
+                    "Storing {} seeds, {} transparent keys, and {} Sapling keys in the keystore",
+                    store.seeds().len(),
+                    store.transparent_keys().len(),
+                    store.sapling_keys().len(),
+                );
+                for entry in store.seeds() {
+                    sink.store_seed(entry).map_err(MigrateError::SecretSink)?;
+                }
+                for entry in store.transparent_keys() {
+                    sink.store_transparent_key(entry)
+                        .map_err(MigrateError::SecretSink)?;
+                }
+                for entry in store.sapling_keys() {
+                    sink.store_sapling_key(entry)
+                        .map_err(MigrateError::SecretSink)?;
+                }
+                for entry in store.sprout_keys() {
+                    sink.store_sprout_key(entry)
+                        .map_err(MigrateError::SecretSink)?;
+                }
+                for entry in store.unified_keys() {
+                    sink.store_unified_key(entry)
+                        .map_err(MigrateError::SecretSink)?;
+                }
+                if sink.sprout_keys_ignored() > 0 {
+                    warn!(
+                        "The wallet contains {} Sprout spending keys, which Zallet does not \
+                         support; move any Sprout funds using zcashd before migrating.",
+                        sink.sprout_keys_ignored(),
+                    );
+                }
+                if sink.unified_keys_ignored() > 0 {
+                    warn!(
+                        "The wallet contains {} extracted unified spending keys, which \
+                         Zallet does not support storing.",
+                        sink.unified_keys_ignored(),
+                    );
+                }
             }
-            for entry in store.transparent_keys() {
-                sink.store_transparent_key(entry)
-                    .map_err(MigrateError::SecretSink)?;
-            }
-            for entry in store.sapling_keys() {
-                sink.store_sapling_key(entry)
-                    .map_err(MigrateError::SecretSink)?;
-            }
-            for entry in store.sprout_keys() {
-                sink.store_sprout_key(entry)
-                    .map_err(MigrateError::SecretSink)?;
-            }
-            for entry in store.unified_keys() {
-                sink.store_unified_key(entry)
-                    .map_err(MigrateError::SecretSink)?;
-            }
-            if sink.sprout_keys_ignored() > 0 {
-                warn!(
-                    "The wallet contains {} Sprout spending keys, which Zallet does not \
-                     support; move any Sprout funds using zcashd before migrating.",
-                    sink.sprout_keys_ignored(),
+            // For a minted seed, defer this recommendation until the import has
+            // succeeded: a failed import is retried with a freshly minted seed, so the
+            // fingerprint is only meaningful once the account is actually imported.
+            if !minted_seed && let Some(fp) = mnemonic_fp.as_ref() {
+                println!(
+                    "{}",
+                    fl!("migrate-wallet-legacy-seed-fp", seed_fp = fp.encoding())
                 );
             }
-            if sink.unified_keys_ignored() > 0 {
-                warn!(
-                    "The wallet contains {} extracted unified spending keys, which \
-                     Zallet does not support storing.",
-                    sink.unified_keys_ignored(),
-                );
-            }
-        }
-        if let Some(fp) = mnemonic_fp.as_ref() {
-            println!(
-                "{}",
-                fl!("migrate-wallet-legacy-seed-fp", seed_fp = fp.encoding())
-            );
-        }
 
-        // Import the document. All secret material was persisted above, so the
-        // importer's sink discards its (repeated) deliveries.
-        info!("Importing the ZeWIF document into the wallet database");
-        let report = db_data
-            .with_mut(|mut wdb| {
-                zcash_client_sqlite::zewif::import_wallet(&mut wdb, &document, &mut DiscardSecrets)
-            })
-            .map_err(MigrateError::Import)?;
+            // Import the document. All secret material was persisted above, so the
+            // importer's sink discards its (repeated) deliveries.
+            info!("Importing the ZeWIF document into the wallet database");
+            db_data
+                .with_mut(|mut wdb| {
+                    zcash_client_sqlite::zewif::import_wallet(
+                        &mut wdb,
+                        &document,
+                        &mut DiscardSecrets,
+                    )
+                })
+                .map_err(MigrateError::Import)
+        })();
+        // A minted seed is provisional until the import commits the legacy account
+        // that derives from it: if any step from keystore persistence through the
+        // import fails, remove it so that a retried migration cannot accumulate
+        // seeds in the keystore. Once the import has committed, the minted seed is
+        // in use and must never be deleted, even if a later step fails.
+        let report = match import_result {
+            Ok(report) => report,
+            Err(e) => {
+                if minted_seed && let Some(fp) = mnemonic_fp.as_ref() {
+                    remove_provisional_mnemonic(&db_data, &keystore, fp).await;
+                }
+                return Err(e);
+            }
+        };
 
         log_import_report(&report);
 
-        // Register watch-only transparent pubkeys (from zcashd's `importpubkey`) with
-        // the accounts whose address lists carry them. The ZeWIF importer registers
-        // spendable transparent keys from the secret store and P2SH redeem scripts,
-        // but has no path for pubkey-only (watch) addresses.
-        let accounts_by_name: HashMap<&str, zcash_client_sqlite::AccountUuid> = report
-            .imported_accounts
-            .iter()
-            .map(|a| (a.name.as_str(), a.account_uuid))
-            .collect();
+        if minted_seed {
+            println!("{}", fl!("migrate-wallet-minted-seed"));
+            if let Some(fp) = mnemonic_fp.as_ref() {
+                println!(
+                    "{}",
+                    fl!("migrate-wallet-legacy-seed-fp", seed_fp = fp.encoding())
+                );
+            }
+        }
+
         let exposure_height = birthday_chain_state
             .as_ref()
             .map(|cs| BlockHeight::from_u32(u32::from(cs.height()) + 1))
             .or(no_scan_birthday_estimate)
             .unwrap_or(sapling_activation);
-        let mut skipped_uncompressed_watch_pubkeys = 0usize;
-        for wallet in document.wallets() {
-            for account in wallet.accounts() {
-                let Some(account_uuid) = accounts_by_name.get(account.name()) else {
-                    continue;
-                };
-                let mut watch_pubkeys = Vec::new();
-                for address in account.addresses() {
-                    if let zewif::ProtocolAddress::Transparent(t) = address.address()
-                        && t.spend_authority().is_none()
-                        && let Some(pubkey) = t.pubkey()
-                    {
-                        // `import_standalone_transparent_pubkeys` derives the stored
-                        // P2PKH address from the compressed pubkey serialization, so an
-                        // uncompressed pubkey would be tracked under a different
-                        // address than zcashd had on-chain.
-                        match PublicKey::from_slice(pubkey.as_slice()) {
-                            Ok(pk) if pubkey.as_slice().len() == 33 => watch_pubkeys.push(pk),
-                            _ => skipped_uncompressed_watch_pubkeys += 1,
-                        }
-                    }
-                }
-                if !watch_pubkeys.is_empty() {
-                    info!(
-                        "Registering {} watch-only transparent pubkeys with account '{}'",
-                        watch_pubkeys.len(),
-                        account.name(),
-                    );
-                    let to_expose: Vec<(TransparentAddress, BlockHeight)> = watch_pubkeys
-                        .iter()
-                        .map(|pk| (TransparentAddress::from_pubkey(pk), exposure_height))
-                        .collect();
-                    db_data
-                        .import_standalone_transparent_pubkeys(
-                            *account_uuid,
-                            watch_pubkeys.into_iter(),
-                        )
-                        .map_err(MigrateError::Database)?;
-                    db_data
-                        .mark_transparent_addresses_exposed(&to_expose)
-                        .map_err(MigrateError::Database)?;
-                }
-            }
-        }
-        if skipped_uncompressed_watch_pubkeys > 0 {
-            warn!(
-                "Skipped {} watch-only entries with uncompressed or malformed public \
-                 keys; Zallet only supports compressed-form pubkey imports.",
-                skipped_uncompressed_watch_pubkeys,
-            );
-        }
-
+        // The import has committed: print the backup reminder (which the minted-seed
+        // notice above refers to) before propagating any error from the remaining
+        // registration step.
+        let post_import = register_watch_pubkeys(&mut db_data, &document, &report, exposure_height);
         print_backup_reminder();
+        post_import?;
 
         Ok(())
     }
+}
+
+/// Registers watch-only transparent pubkeys (from zcashd's `importpubkey`) with the
+/// accounts whose address lists carry them, exposing their addresses as of
+/// `exposure_height`.
+///
+/// The ZeWIF importer registers spendable transparent keys from the secret store
+/// and P2SH redeem scripts, but has no path for pubkey-only (watch) addresses.
+fn register_watch_pubkeys(
+    db_data: &mut DbHandle,
+    document: &zewif::Zewif,
+    report: &ZewifImportReport,
+    exposure_height: BlockHeight,
+) -> Result<(), MigrateError> {
+    let accounts_by_name: HashMap<&str, zcash_client_sqlite::AccountUuid> = report
+        .imported_accounts
+        .iter()
+        .map(|a| (a.name.as_str(), a.account_uuid))
+        .collect();
+    let mut skipped_uncompressed_watch_pubkeys = 0usize;
+    for wallet in document.wallets() {
+        for account in wallet.accounts() {
+            let Some(account_uuid) = accounts_by_name.get(account.name()) else {
+                continue;
+            };
+            let mut watch_pubkeys = Vec::new();
+            for address in account.addresses() {
+                if let zewif::ProtocolAddress::Transparent(t) = address.address()
+                    && t.spend_authority().is_none()
+                    && let Some(pubkey) = t.pubkey()
+                {
+                    // `import_standalone_transparent_pubkeys` derives the stored
+                    // P2PKH address from the compressed pubkey serialization, so an
+                    // uncompressed pubkey would be tracked under a different
+                    // address than zcashd had on-chain.
+                    match PublicKey::from_slice(pubkey.as_slice()) {
+                        Ok(pk) if pubkey.as_slice().len() == 33 => watch_pubkeys.push(pk),
+                        _ => skipped_uncompressed_watch_pubkeys += 1,
+                    }
+                }
+            }
+            if !watch_pubkeys.is_empty() {
+                info!(
+                    "Registering {} watch-only transparent pubkeys with account '{}'",
+                    watch_pubkeys.len(),
+                    account.name(),
+                );
+                let to_expose: Vec<(TransparentAddress, BlockHeight)> = watch_pubkeys
+                    .iter()
+                    .map(|pk| (TransparentAddress::from_pubkey(pk), exposure_height))
+                    .collect();
+                db_data
+                    .import_standalone_transparent_pubkeys(*account_uuid, watch_pubkeys.into_iter())
+                    .map_err(MigrateError::Database)?;
+                db_data
+                    .mark_transparent_addresses_exposed(&to_expose)
+                    .map_err(MigrateError::Database)?;
+            }
+        }
+    }
+    if skipped_uncompressed_watch_pubkeys > 0 {
+        warn!(
+            "Skipped {} watch-only entries with uncompressed or malformed public \
+             keys; Zallet only supports compressed-form pubkey imports.",
+            skipped_uncompressed_watch_pubkeys,
+        );
+    }
+    Ok(())
+}
+
+/// Best-effort removal of a provisionally stored mnemonic from the keystore, after
+/// a failed wallet import.
+///
+/// A minted seed is provisional until an account has been imported under it; once
+/// any account derives from it, it must never be removed. Callers must therefore
+/// only pass the fingerprint of a mnemonic minted in this migration run, after the
+/// import failed. Before deleting, the wallet database is checked to confirm that
+/// the failed import committed no account deriving from the seed; if one exists (or
+/// the check cannot be performed), the seed is left in place. If removal fails, a
+/// warning names the fingerprint of the orphaned seed left in the keystore.
+async fn remove_provisional_mnemonic(
+    db_data: &DbHandle,
+    keystore: &KeyStore,
+    fp: &zewif::SeedFingerprint,
+) {
+    let orphaned_seed_warning = || {
+        warn!(
+            "The failed import left a provisional seed with fingerprint '{}' stored \
+             in the keystore; no account references it.",
+            fp.encoding(),
+        );
+    };
+    let Some(decoded) = decode_seed_fingerprint(fp) else {
+        orphaned_seed_warning();
+        return;
+    };
+    match seed_is_referenced(db_data, &decoded) {
+        Ok(false) => (),
+        Ok(true) => {
+            warn!(
+                "The import failed after committing an account that derives from the \
+                 seed with fingerprint '{}'; leaving the seed in the keystore.",
+                fp.encoding(),
+            );
+            return;
+        }
+        Err(e) => {
+            warn!("Failed to check the wallet database for accounts derived from the seed: {e}");
+            orphaned_seed_warning();
+            return;
+        }
+    }
+    match keystore.delete_mnemonic(&decoded).await {
+        Ok(true) => info!("Removed the provisional seed from the keystore"),
+        // The mnemonic never reached the keystore, so there is nothing to remove.
+        Ok(false) => (),
+        Err(e) => {
+            warn!("Failed to remove the provisional seed from the keystore: {e}");
+            orphaned_seed_warning();
+        }
+    }
+}
+
+/// Returns whether any account in the wallet database derives from `seed_fp`.
+fn seed_is_referenced(
+    db_data: &DbHandle,
+    seed_fp: &SeedFingerprint,
+) -> Result<bool, SqliteClientError> {
+    for account_id in db_data.get_account_ids()? {
+        if let Some(account) = db_data.get_account(account_id)?
+            && let AccountSource::Derived { derivation, .. } = account.source()
+            && derivation.seed_fingerprint() == seed_fp
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn print_backup_reminder() {
@@ -580,6 +710,55 @@ fn print_backup_reminder() {
     println!("   Note that wallet.db itself is NOT encrypted (it also holds your transaction");
     println!("   history and viewing keys in the clear), so store the backup securely.");
     println!("{bar}\n");
+}
+
+/// Returns whether the document's synthesized legacy account lacks a seed-derivation
+/// root, i.e. the source wallet contained neither a mnemonic nor a legacy HD seed.
+fn has_seedless_legacy_account(document: &zewif::Zewif) -> bool {
+    document
+        .wallets()
+        .iter()
+        .flat_map(|wallet| wallet.accounts())
+        .any(is_seedless_legacy_account)
+}
+
+/// Returns whether `account` is the synthesized zcashd legacy account and lacks a
+/// seed-derivation root.
+fn is_seedless_legacy_account(account: &zewif::Account) -> bool {
+    account.provenance() == Some(ZCASHD_LEGACY_SOURCE)
+        && !matches!(account.key_source(), Some(zewif::KeySource::Derived(_)))
+}
+
+/// Generates a fresh 24-word English BIP 39 mnemonic, adds it to `store`, and
+/// returns its seed fingerprint.
+///
+/// This provides a derivation root for wallets that never had one, so that the
+/// legacy account — and the standalone key material attached to it — can be
+/// imported as a seed-derived account.
+fn mint_legacy_mnemonic(store: &mut zewif::SecretStore) -> zewif::SeedFingerprint {
+    // Matches the entropy handling of the `generate-mnemonic` command.
+    const BITS_PER_BYTE: usize = 8;
+    const ENTROPY_BYTES: usize = Count::Words24.entropy_bits() / BITS_PER_BYTE;
+
+    let mut entropy = [0u8; ENTROPY_BYTES];
+    OsRng.fill_bytes(&mut entropy);
+    // The mnemonic itself zeroizes its phrase and entropy on drop.
+    let mnemonic = Mnemonic::<English>::from_entropy(entropy)
+        .expect("valid entropy length won't fail to generate the mnemonic");
+    entropy.zeroize();
+
+    let mut seed_bytes = mnemonic.to_seed("");
+    let fp = SeedFingerprint::from_seed(&seed_bytes).expect("BIP 39 seeds have a valid length");
+    seed_bytes.zeroize();
+    let fp = zewif_zcashd::zcashd_wallet::encode_seed_fingerprint(&fp.to_bytes());
+    store.add_seed(zewif::SeedEntry::new(
+        fp.clone(),
+        zewif::SeedMaterial::Bip39Mnemonic(zewif::Bip39Mnemonic::new(
+            mnemonic.phrase(),
+            Some(zewif::MnemonicLanguage::English),
+        )),
+    ));
+    fp
 }
 
 /// Converts a chain-backend `ChainState` into its ZeWIF representation, preserving
@@ -630,7 +809,8 @@ fn to_zewif_frontier<H, const DEPTH: u8>(
 ///
 /// * the (possibly normalized) secret store replaces the original;
 /// * the legacy account's key source is re-pointed at the mnemonic seed, matching
-///   zcashd's post-v4.7.0 derivation semantics;
+///   zcashd's post-v4.7.0 derivation semantics (for a seedless wallet, this anchors
+///   the legacy account to the freshly minted mnemonic);
 /// * account birthdays are replaced with the chain-derived birthday state where one
 ///   was computed, and defaulted to the no-scan estimate where the document records
 ///   nothing.
@@ -667,6 +847,18 @@ fn enriched_document(
                     mnemonic_fp.clone(),
                     ZCASHD_LEGACY_ACCOUNT_INDEX,
                     legacy_address_index,
+                )));
+            } else if let Some(mnemonic_fp) = mnemonic_fp
+                && is_seedless_legacy_account(&account)
+            {
+                // A seedless wallet's legacy account arrives without a derivation
+                // root; anchor it to the (minted) mnemonic so that it imports as a
+                // seed-derived account and the standalone keys attached to it
+                // retain an owning account.
+                account.set_key_source(zewif::KeySource::Derived(zewif::DerivedKeySource::new(
+                    mnemonic_fp.clone(),
+                    ZCASHD_LEGACY_ACCOUNT_INDEX,
+                    None,
                 )));
             }
 
@@ -902,8 +1094,8 @@ mod tests {
     use zcash_protocol::consensus::{BlockHeight, NetworkType};
 
     use super::{
-        MigrateError, MigrateZcashdWalletCmd, ZCASHD_LEGACY_ACCOUNT_INDEX, enriched_document,
-        to_zewif_frontier,
+        MigrateError, MigrateZcashdWalletCmd, ZCASHD_LEGACY_ACCOUNT_INDEX, ZCASHD_LEGACY_SOURCE,
+        enriched_document, has_seedless_legacy_account, mint_legacy_mnemonic, to_zewif_frontier,
     };
 
     fn node(byte: u8) -> MerkleHashOrchard {
@@ -1065,5 +1257,115 @@ mod tests {
             Some(zewif::BlockHeight::from_u32(2_000_000))
         );
         assert_eq!(enriched.transactions().len(), 1);
+    }
+
+    /// A document as produced from a wallet with no HD seed material: the legacy
+    /// account arrives with `KeySource::Imported`, alongside an unrelated imported
+    /// account.
+    fn seedless_document() -> zewif::Zewif {
+        let mut document = zewif::Zewif::new(
+            zewif::BlockHeight::from_u32(2_000_000),
+            zewif::BlockHash::from_bytes([9u8; 32]),
+        );
+        let mut wallet = zewif::ZewifWallet::new(zewif::Network::Testnet);
+
+        let mut legacy = zewif::Account::new(zewif::AccountViewingKey::TransparentAddressSet);
+        legacy.set_name("Legacy");
+        legacy.set_key_source(zewif::KeySource::Imported);
+        legacy.set_provenance(ZCASHD_LEGACY_SOURCE);
+        wallet.add_account(legacy);
+
+        let mut other = zewif::Account::new(zewif::AccountViewingKey::TransparentAddressSet);
+        other.set_name("Other");
+        other.set_key_source(zewif::KeySource::Imported);
+        wallet.add_account(other);
+
+        document.add_wallet(wallet);
+        document
+    }
+
+    #[test]
+    fn minted_mnemonic_is_stored_and_its_fingerprint_round_trips() {
+        let mut store = zewif::SecretStore::new();
+        let fp = mint_legacy_mnemonic(&mut store);
+
+        let entry = store
+            .seeds()
+            .iter()
+            .find(|entry| entry.fingerprint() == &fp)
+            .expect("minted seed is stored under its fingerprint");
+        let phrase = match entry.material() {
+            zewif::SeedMaterial::Bip39Mnemonic(m) => m.mnemonic().clone(),
+            _ => panic!("minted seed material should be a BIP 39 mnemonic"),
+        };
+
+        // The stored phrase is a valid 24-word English mnemonic whose seed
+        // reproduces the stored fingerprint (the importer verifies exactly this).
+        let mnemonic = bip0039::Mnemonic::<bip0039::English>::from_phrase(&phrase)
+            .expect("stored phrase is a valid English mnemonic");
+        assert_eq!(phrase.split_whitespace().count(), 24);
+        let expected = zip32::fingerprint::SeedFingerprint::from_seed(&mnemonic.to_seed(""))
+            .expect("BIP 39 seeds have a valid length");
+        assert_eq!(
+            fp,
+            zewif_zcashd::zcashd_wallet::encode_seed_fingerprint(&expected.to_bytes())
+        );
+    }
+
+    #[test]
+    fn minting_twice_yields_distinct_mnemonics() {
+        let mut store = zewif::SecretStore::new();
+        let fp_a = mint_legacy_mnemonic(&mut store);
+        let fp_b = mint_legacy_mnemonic(&mut store);
+
+        assert_ne!(fp_a, fp_b);
+        let phrases: Vec<_> = store
+            .seeds()
+            .iter()
+            .map(|entry| match entry.material() {
+                zewif::SeedMaterial::Bip39Mnemonic(m) => m.mnemonic().clone(),
+                _ => panic!("minted seed material should be a BIP 39 mnemonic"),
+            })
+            .collect();
+        assert_eq!(phrases.len(), 2);
+        assert_ne!(phrases[0], phrases[1]);
+    }
+
+    #[test]
+    fn has_seedless_legacy_account_requires_missing_derivation_root() {
+        assert!(has_seedless_legacy_account(&seedless_document()));
+
+        // A wallet whose legacy account already has a derivation root does not
+        // trigger minting.
+        let (derived_document, _, _) = test_document();
+        assert!(!has_seedless_legacy_account(&derived_document));
+    }
+
+    #[test]
+    fn enrichment_anchors_seedless_legacy_account_to_minted_mnemonic() {
+        let document = seedless_document();
+        let mut store = zewif::SecretStore::new();
+        let minted_fp = mint_legacy_mnemonic(&mut store);
+
+        let enriched =
+            enriched_document(&document, Some(store), Some(&minted_fp), None, None, None);
+
+        let accounts = enriched.wallets()[0].accounts();
+        // The legacy account is anchored to the minted mnemonic.
+        match accounts[0].key_source() {
+            Some(zewif::KeySource::Derived(derived)) => {
+                assert_eq!(derived.seed_fingerprint(), &minted_fp);
+                assert_eq!(derived.account_index(), ZCASHD_LEGACY_ACCOUNT_INDEX);
+                assert_eq!(derived.legacy_address_index(), None);
+            }
+            other => panic!("unexpected key source: {other:?}"),
+        }
+        // A non-legacy imported account is left untouched.
+        assert_eq!(accounts[1].key_source(), Some(&zewif::KeySource::Imported));
+        // The minted seed travels with the document for the importer to resolve.
+        match enriched.secrets() {
+            Some(zewif::Secrets::Plain(store)) => assert_eq!(store.seeds().len(), 1),
+            other => panic!("unexpected secrets: {other:?}"),
+        }
     }
 }
