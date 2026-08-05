@@ -4,12 +4,13 @@ use abscissa_core::Application;
 use jsonrpsee::core::JsonValue;
 use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
 use schemars::JsonSchema;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use transparent::{address::TransparentAddress, keys::AccountPubKey};
 use zcash_address::{ZcashAddress, unified};
 use zcash_client_backend::{
     data_api::{
-        Account as _, WalletRead,
+        Account as _, WalletRead, Zip32Derivation,
         wallet::{
             ConfirmationsPolicy,
             input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy},
@@ -25,7 +26,10 @@ use zcash_client_backend::{
     zip321::{Payment, TransactionRequest},
 };
 use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, wallet::Account};
-use zcash_keys::{address::Address, keys::UnifiedFullViewingKey};
+use zcash_keys::{
+    address::Address,
+    keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
+};
 use zcash_protocol::{
     PoolType, ShieldedPool, TxId,
     memo::MemoBytes,
@@ -34,7 +38,7 @@ use zcash_protocol::{
 use zip32::{AccountId, fingerprint::SeedFingerprint};
 
 use crate::{
-    components::{chain::Chain, database::DbConnection},
+    components::{chain::Chain, database::DbConnection, keystore::KeyStore},
     fl,
     network::Network,
     prelude::APP,
@@ -152,6 +156,55 @@ pub(super) fn confirmations_policy_for_minconf(
             })
         }
     }
+}
+
+/// Decrypts the seed behind `derivation` and derives the spending key for `account_id`,
+/// requiring that the seed actually corresponds to the account it was fetched for.
+///
+/// Input selection runs against the account record in the wallet database, but signing
+/// uses a key derived from the seed. Those are the same key only if that record is intact,
+/// and it is not integrity-protected: a substituted `accounts.ufvk` would have the wallet
+/// select one key's notes and sign with another's. [`WalletRead::validate_seed`] closes
+/// that gap by checking the recorded viewing key against the one this seed derives, and
+/// fails closed.
+///
+/// The check is free at every call site: the seed is decrypted here anyway, so no
+/// operation loads a secret it did not already load, and a locked wallet still fails at
+/// the decryption step rather than at this one.
+pub(super) async fn spending_key_for_account(
+    wallet: &DbConnection,
+    keystore: &KeyStore,
+    account_id: AccountUuid,
+    derivation: &Zip32Derivation,
+) -> RpcResult<UnifiedSpendingKey> {
+    let seed = keystore
+        .decrypt_seed(derivation.seed_fingerprint())
+        .await
+        .map_err(|e| match e.kind() {
+            // TODO: Improve internal error types.
+            //       https://github.com/zcash/zallet/issues/256
+            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
+                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
+            }
+            _ => LegacyCode::Database.with_message(e.to_string()),
+        })?;
+
+    if !wallet
+        .validate_seed(account_id, &seed)
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+    {
+        return Err(LegacyCode::Wallet.with_message(fl!(
+            "err-account-seed-mismatch",
+            account = account_id.expose_uuid().to_string(),
+        )));
+    }
+
+    UnifiedSpendingKey::from_seed(
+        wallet.params(),
+        seed.expose_secret(),
+        derivation.account_index(),
+    )
+    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))
 }
 
 /// The sources of funds a transfer from `source` may draw upon.
