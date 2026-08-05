@@ -40,6 +40,16 @@ be considered breaking changes.
 - `getwalletstatus` now reports a `locked` field indicating whether the wallet
   is currently usable.
 
+### Changed
+
+- `z_sendmany`, `z_shieldcoinbase` and `z_sendfromaccount` now verify, after
+  decrypting the account's seed and before deriving the key they sign with, that
+  the seed actually derives the viewing key the wallet has recorded for that
+  account. Input selection runs against the account record while signing uses a
+  seed-derived key; a modified record could previously have the wallet select
+  one key's notes and sign with another's. A mismatch is reported as wallet
+  database corruption or tampering, and no transaction is created.
+
 ### Fixed
 
 - The queue of asynchronous RPC operations (`z_sendmany`, `z_shieldcoinbase`)
