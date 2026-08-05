@@ -4,7 +4,6 @@ use abscissa_core::Application;
 
 use jsonrpsee::core::{JsonValue, RpcResult};
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
-use secrecy::ExposeSecret;
 use serde_json::json;
 use zcash_client_backend::data_api::wallet::SpendingKeys;
 use zcash_client_backend::proposal::Proposal;
@@ -20,10 +19,7 @@ use zcash_client_backend::{
     wallet::OvkPolicy,
 };
 use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, util::SystemClock};
-use zcash_keys::{
-    address::Address,
-    keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
-};
+use zcash_keys::{address::Address, keys::UnifiedFullViewingKey};
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::TxId;
 
@@ -37,7 +33,8 @@ use crate::{
             payments::{
                 AmountParameter, SendResult, broadcast_transactions, build_request,
                 confirmations_policy_for_minconf, get_account_for_address, get_legacy_pool_account,
-                parse_privacy_policy, propose_and_check, spend_policy_for, verify_transactions,
+                parse_privacy_policy, propose_and_check, spend_policy_for,
+                spending_key_for_account, verify_transactions,
             },
             server::LegacyCode,
             utils::wallet_handle,
@@ -198,20 +195,7 @@ pub(crate) async fn call<C: Chain>(
     })?;
 
     // Fetch spending key last, to avoid a keystore decryption if unnecessary.
-    let seed = keystore
-        .decrypt_seed(derivation.seed_fingerprint())
-        .await
-        .map_err(|e| match e.kind() {
-            // TODO: Improve internal error types.
-            //       https://github.com/zcash/zallet/issues/256
-            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
-                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
-            }
-            _ => LegacyCode::Database.with_message(e.to_string()),
-        })?;
-    let usk =
-        UnifiedSpendingKey::from_seed(&params, seed.expose_secret(), derivation.account_index())
-            .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
+    let usk = spending_key_for_account(&wallet, &keystore, account.id(), derivation).await?;
 
     #[cfg(feature = "zcashd-import")]
     let standalone_keys =

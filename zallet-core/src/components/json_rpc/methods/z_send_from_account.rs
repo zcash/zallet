@@ -7,10 +7,8 @@
 //! that flow only in doing it in one call and broadcasting the result.
 
 use jsonrpsee::core::{JsonValue, RpcResult};
-use secrecy::ExposeSecret;
 use zcash_client_backend::data_api::{Account, WalletRead};
 use zcash_encoding::ReverseHex;
-use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_protocol::TxId;
 
 use super::pczt_common::encode_pczt_base64;
@@ -23,7 +21,8 @@ use crate::{
             fund_source::FundSource,
             payments::{
                 AmountParameter, SendResult, broadcast_transactions, build_request,
-                confirmations_policy_for_minconf, parse_privacy_policy, verify_transactions,
+                confirmations_policy_for_minconf, parse_privacy_policy, spending_key_for_account,
+                verify_transactions,
             },
             server::LegacyCode,
             utils::{parse_account_parameter, wallet_handle},
@@ -114,24 +113,9 @@ pub(crate) async fn call<C: Chain>(
         LegacyCode::InvalidAddressOrKey.with_message(fl!("err-account-no-payment-source"))
     })?;
 
-    let seed = keystore
-        .decrypt_seed(derivation.seed_fingerprint())
-        .await
-        .map_err(|e| match e.kind() {
-            // TODO: Improve internal error types.
-            //       https://github.com/zcash/zallet/issues/256
-            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
-                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
-            }
-            _ => LegacyCode::Database.with_message(e.to_string()),
-        })?;
-    let ufvk = UnifiedSpendingKey::from_seed(
-        wallet.params(),
-        seed.expose_secret(),
-        derivation.account_index(),
-    )
-    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?
-    .to_unified_full_viewing_key();
+    let ufvk = spending_key_for_account(&wallet, &keystore, account.id(), derivation)
+        .await?
+        .to_unified_full_viewing_key();
 
     // Drive the PCZT through the same pipeline the `pczt_*` methods expose.
     let proved = pczt_prove::call(&encode_pczt_base64(pczt)?).await?;
