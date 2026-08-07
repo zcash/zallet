@@ -143,6 +143,12 @@ pub struct ZalletConfig {
     /// Settings for the JSON-RPC interface.
     pub rpc: RpcSection,
 
+    /// Settings for HTTP readiness / liveness probes (dedicated port).
+    ///
+    /// Defaulted so that configs written before this section existed continue to parse.
+    #[serde(default)]
+    pub health: HealthSection,
+
     /// Settings controlling how Zallet synchronizes the wallet with the chain.
     ///
     /// Defaulted so that configs written before this section existed continue to parse.
@@ -746,6 +752,31 @@ impl NoteManagementSection {
     }
 }
 
+/// Settings for HTTP readiness and liveness endpoints.
+///
+/// Disabled by default. Enable by setting a listen address:
+/// ```toml
+/// [health]
+/// listen_addr = "127.0.0.1:8232"
+/// ```
+///
+/// Endpoints (Zebra-compatible path names, plus common k8s aliases):
+/// - `GET /healthy` (also `/healthz`) — process liveness
+/// - `GET /ready` (also `/readyz`) — wallet DB is usable
+///
+/// # Security
+///
+/// These endpoints are unauthenticated. Bind to loopback or a private network
+/// interface only.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Documented, DocumentedFields)]
+#[serde(deny_unknown_fields)]
+pub struct HealthSection {
+    /// Address to listen on for health probes.
+    ///
+    /// When unset, the health server is not started.
+    pub listen_addr: Option<SocketAddr>,
+}
+
 /// Settings for the JSON-RPC interface.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
@@ -932,6 +963,12 @@ impl ZalletConfig {
             rpc("async_operation_limit", conf.rpc.async_operation_limit()),
             rpc("bind", &conf.rpc.bind),
             rpc("timeout", conf.rpc.timeout().as_secs()),
+            health(
+                "listen_addr",
+                conf.health
+                    .listen_addr
+                    .unwrap_or_else(|| "127.0.0.1:8232".parse().expect("valid")),
+            ),
             sync("recover_batch_size", conf.sync.recover_batch_size()),
             sync("lock_threshold", conf.sync.lock_threshold()),
         ]
@@ -957,6 +994,7 @@ impl ZalletConfig {
         const NOTE_MANAGEMENT: &str = "note_management";
         const RPC: &str = "rpc";
         const RPC_AUTH: &str = "rpc.auth";
+        const HEALTH: &str = "health";
         const SYNC: &str = "sync";
         fn top_level<T: Serialize>(
             f: &'static str,
@@ -1031,6 +1069,12 @@ impl ZalletConfig {
             d: T,
         ) -> ((&'static str, &'static str), Option<toml::Value>) {
             field(RPC, f, d)
+        }
+        fn health<T: Serialize>(
+            f: &'static str,
+            d: T,
+        ) -> ((&'static str, &'static str), Option<toml::Value>) {
+            field(HEALTH, f, d)
         }
         fn sync<T: Serialize>(
             f: &'static str,
@@ -1253,6 +1297,7 @@ impl ZalletConfig {
                     write_section::<NoteManagementSection>(&mut config, field_name, &sec_def)
                 }
                 RPC => write_section::<RpcSection>(&mut config, field_name, &sec_def),
+                HEALTH => write_section::<HealthSection>(&mut config, field_name, &sec_def),
                 SYNC => write_section::<SyncSection>(&mut config, field_name, &sec_def),
                 // Top-level fields correspond to CLI settings, and cannot be configured
                 // via a file.

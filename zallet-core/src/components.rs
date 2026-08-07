@@ -9,6 +9,7 @@ use crate::error::Error;
 
 pub mod chain;
 pub(crate) mod database;
+pub(crate) mod health;
 pub(crate) mod json_rpc;
 pub(crate) mod sync;
 pub(crate) mod tracing;

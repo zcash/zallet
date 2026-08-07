@@ -91,7 +91,9 @@ rpassword = "7"
 
 # RPC
 http-body-util = "0.1"
-hyper = "1"
+bytes = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1"] }
 jsonrpsee = "0.24"
 jsonrpsee-http-client = { version = "0.24", default-features = false }
 nix = "0.29" # `stop` RPC method
