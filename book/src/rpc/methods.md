@@ -2,6 +2,29 @@
 edit. To regenerate after changing the rustdoc on the RPC traits, run:
 `ZALLET_BLESS=1 cargo test -p zallet-core --test book_rpc_reference` -->
 
+## `createmultisig`
+
+Creates a multisignature redeem script, and reports its P2SH address.
+
+Nothing is recorded in the wallet; use `addmultisigaddress` to both create the
+script and have the wallet track its address.
+
+The returned `redeemScript` is required in order to spend funds sent to the
+address, and cannot be recovered from the address, which commits only to its
+hash. Record it.
+
+Note that Zallet cannot presently spend from a multisig address: it has no way
+to assemble a P2SH `scriptSig`. Funds sent to one can be tracked but not moved.
+
+Naming a key by transparent address requires the wallet that holds its public
+key, so a merchant-terminal build accepts hex-encoded public keys only.
+
+#### Arguments
+- `nrequired` (numeric, required): The number of the supplied keys that must sign to spend.
+- `keys` (array, required): The keys the multisig address is composed of, each
+  either a hex-encoded public key or a transparent address this wallet holds the
+  public key for.
+
 ## `decoderawtransaction`
 
 Return a JSON object representing the serialized, hex-encoded transaction.

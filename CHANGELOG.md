@@ -85,6 +85,13 @@ be considered breaking changes.
   pre-Sapling wallet that has no HD seed. The minted seed never existed in
   zcashd, so backups of `wallet.dat` do not cover it; the migration prints a
   warning to that effect.
+- `createmultisig`, which builds an m-of-n multisignature redeem script and
+  reports its P2SH address. Each key may be given as a hex-encoded public key or
+  as a transparent address this wallet holds the public key for. A key given in
+  hex is placed in the script in the encoding it was given, so an address
+  created by `zcashd` from uncompressed keys can be reproduced exactly.
+  Note that Zallet cannot yet spend from a multisig address, as it has no way to
+  assemble a P2SH `scriptSig`; funds sent to one can be tracked but not moved.
 
 ### Changed
 

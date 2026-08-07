@@ -36,6 +36,7 @@ use {
 const REGTEST_ONLY_METHODS: &[&str] = &["stop"];
 
 mod convert_tex;
+mod create_multisig;
 mod decode_raw_transaction;
 mod decode_script;
 #[cfg(zallet_build = "wallet")]
@@ -307,6 +308,29 @@ pub(crate) trait Rpc {
     /// - `transparent_address` (string, required): The transparent P2PKH address to convert.
     #[method(name = "z_converttex")]
     async fn convert_tex(&self, transparent_address: &str) -> convert_tex::Response;
+
+    /// Creates a multisignature redeem script, and reports its P2SH address.
+    ///
+    /// Nothing is recorded in the wallet; use `addmultisigaddress` to both create the
+    /// script and have the wallet track its address.
+    ///
+    /// The returned `redeemScript` is required in order to spend funds sent to the
+    /// address, and cannot be recovered from the address, which commits only to its
+    /// hash. Record it.
+    ///
+    /// Note that Zallet cannot presently spend from a multisig address: it has no way
+    /// to assemble a P2SH `scriptSig`. Funds sent to one can be tracked but not moved.
+    ///
+    /// Naming a key by transparent address requires the wallet that holds its public
+    /// key, so a merchant-terminal build accepts hex-encoded public keys only.
+    ///
+    /// # Arguments
+    /// - `nrequired` (numeric, required): The number of the supplied keys that must sign to spend.
+    /// - `keys` (array, required): The keys the multisig address is composed of, each
+    ///   either a hex-encoded public key or a transparent address this wallet holds the
+    ///   public key for.
+    #[method(name = "createmultisig")]
+    async fn create_multisig(&self, nrequired: u8, keys: Vec<String>) -> create_multisig::Response;
 
     /// Decodes a hex-encoded script.
     ///
@@ -1194,6 +1218,10 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
 
     async fn convert_tex(&self, transparent_address: &str) -> convert_tex::Response {
         convert_tex::call(self.wallet().await?.params(), transparent_address)
+    }
+
+    async fn create_multisig(&self, nrequired: u8, keys: Vec<String>) -> create_multisig::Response {
+        create_multisig::call(self.wallet().await?.as_ref(), nrequired, &keys)
     }
 
     async fn decode_script(&self, hexstring: &str) -> decode_script::Response {

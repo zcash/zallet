@@ -98,6 +98,7 @@ Zallet also provides methods that `zcashd`'s wallet did not have:
 
 Zallet additionally implements these methods that lived outside `zcashd`'s
 wallet category: `getrawtransaction` (with
-[altered semantics](json_rpc.md#getrawtransaction)), `decoderawtransaction`,
-`decodescript`, `validateaddress`, `verifymessage`, `help`, and `stop`, plus
-the wallet encryption methods `walletlock` and `walletpassphrase`.
+[altered semantics](json_rpc.md#getrawtransaction)), `createmultisig`,
+`decoderawtransaction`, `decodescript`, `validateaddress`, `verifymessage`,
+`help`, and `stop`, plus the wallet encryption methods `walletlock` and
+`walletpassphrase`.
