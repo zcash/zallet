@@ -20,7 +20,7 @@ Statuses:
 
 | `zcashd` method | Status | Notes |
 |---|---|---|
-| `addmultisigaddress` | Not yet implemented | Blocked on P2SH support in `zcash_client_sqlite` ([#48](https://github.com/zcash/zallet/issues/48), [librustzcash#1370](https://github.com/zcash/librustzcash/issues/1370)) |
+| `addmultisigaddress` | Implemented | Creates the address and tracks it, but Zallet cannot yet spend from a multisig address: it has no way to assemble a P2SH `scriptSig`. The `account` argument is a Zallet account UUID rather than a `zcashd` account label, and defaults to the legacy pool |
 | `backupwallet` | Not planned | Not planned as an RPC; may become a CLI command ([#49](https://github.com/zcash/zallet/issues/49)); robust backup is tracked in [#195](https://github.com/zcash/zallet/issues/195) |
 | `dumpprivkey` | Not planned | [#50](https://github.com/zcash/zallet/issues/50) |
 | `dumpwallet` | Not planned | Already removed from `zcashd` itself ([zcash#5513](https://github.com/zcash/zcash/issues/5513)); a [ZeWIF](https://github.com/zcash/zewif) export is planned instead ([#71](https://github.com/zcash/zallet/issues/71)) |

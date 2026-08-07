@@ -2,6 +2,31 @@
 edit. To regenerate after changing the rustdoc on the RPC traits, run:
 `ZALLET_BLESS=1 cargo test -p zallet-core --test book_rpc_reference` -->
 
+## `addmultisigaddress`
+
+*Only available in wallet builds of Zallet.*
+
+Creates a multisignature address and adds it to the wallet, so that funds sent
+to it are detected.
+
+The address and its redeem script are the same ones `createmultisig` reports for
+the same arguments; this additionally records the script. Retrieve the script
+with `createmultisig` if you did not keep it: it is required in order to spend,
+and cannot be recovered from the address.
+
+Note that Zallet cannot presently spend from a multisig address: it has no way
+to assemble a P2SH `scriptSig`. Funds sent to one are tracked but cannot be
+moved.
+
+#### Arguments
+- `nrequired` (numeric, required): The number of the supplied keys that must sign to spend.
+- `keys` (array, required): The keys the multisig address is composed of, each
+  either a hex-encoded public key or a transparent address this wallet holds the
+  public key for.
+- `account` (string, optional) The UUID of the account to track the address in.
+  Defaults to the legacy `zcashd` pool of funds, which requires
+  `features.legacy_pool_seed_fingerprint` to be set in the Zallet config file.
+
 ## `createmultisig`
 
 Creates a multisignature redeem script, and reports its P2SH address.

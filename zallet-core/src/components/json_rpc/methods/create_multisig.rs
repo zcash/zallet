@@ -3,7 +3,7 @@
 //! This is the read-only half of the pair it forms with `addmultisigaddress`: it
 //! computes the script and address and returns them, without recording anything in
 //! the wallet. `zcashd` derived both from one helper, and so does Zallet — see
-//! [`build_multisig_redeem_script`], which `add_multisig_address` also uses.
+//! [`build_multisig`], which `add_multisig_address` also uses.
 
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
@@ -73,9 +73,6 @@ const MAX_REDEEM_SCRIPT_SIZE: usize = 520;
 /// multisig, validating the arguments the way `zcashd` did, and returns it with its
 /// serialization.
 ///
-/// Shared with `addmultisigaddress`, which stores the result rather than only
-/// reporting it.
-///
 /// The serialization is returned rather than left to be derived again by each caller
 /// that needs it: the size limit, the address, and the hex `createmultisig` reports
 /// must all be the same bytes, and serializing afresh for each is another chance for
@@ -86,7 +83,7 @@ const MAX_REDEEM_SCRIPT_SIZE: usize = 520;
 /// naming an uncompressed key hashes to a different address than the same key
 /// compressed. Recreating a known multisig address requires reproducing that choice,
 /// so the caller's encoding is carried through rather than canonicalized here.
-pub(super) fn build_multisig_redeem_script(
+fn build_multisig_redeem_script(
     nrequired: u8,
     pubkeys: &[Vec<u8>],
 ) -> RpcResult<(Redeem, Vec<u8>)> {
@@ -159,7 +156,7 @@ fn check_reads_back_as_intended(
 }
 
 /// The P2SH address committing to a serialized redeem script.
-pub(super) fn p2sh_address(params: &Network, bytes: &[u8]) -> String {
+fn p2sh_address(params: &Network, bytes: &[u8]) -> String {
     TransparentAddress::ScriptHash(hash160::hash(bytes)).encode(params)
 }
 
@@ -276,17 +273,47 @@ fn resolve_address_pubkey(
     )))
 }
 
-/// Creates a multisig redeem script and reports its P2SH address.
-pub(crate) fn call(wallet: &DbConnection, nrequired: u8, keys: &[String]) -> Response {
+/// The multisig a `keys` argument describes.
+pub(super) struct Multisig {
+    /// The redeem script itself, to record in the wallet.
+    pub(super) redeem: Redeem,
+    /// Its serialization, to report in hex.
+    pub(super) bytes: Vec<u8>,
+    /// The P2SH address committing to it.
+    pub(super) address: String,
+}
+
+/// Resolves the `keys` argument and builds the multisig it describes.
+///
+/// This is the whole of `createmultisig`, and everything `addmultisigaddress` does
+/// before recording the script. Sharing it is what makes the two report the same
+/// address for the same arguments, rather than merely intend to.
+pub(super) fn build_multisig(
+    wallet: &DbConnection,
+    nrequired: u8,
+    keys: &[String],
+) -> RpcResult<Multisig> {
     let pubkeys = keys
         .iter()
         .map(|key| resolve_key(wallet, key))
         .collect::<RpcResult<Vec<_>>>()?;
-    let (_, bytes) = build_multisig_redeem_script(nrequired, &pubkeys)?;
+    let (redeem, bytes) = build_multisig_redeem_script(nrequired, &pubkeys)?;
+    let address = p2sh_address(wallet.params(), &bytes);
+
+    Ok(Multisig {
+        redeem,
+        bytes,
+        address,
+    })
+}
+
+/// Creates a multisig redeem script and reports its P2SH address.
+pub(crate) fn call(wallet: &DbConnection, nrequired: u8, keys: &[String]) -> Response {
+    let multisig = build_multisig(wallet, nrequired, keys)?;
 
     Ok(ResultType {
-        address: p2sh_address(wallet.params(), &bytes),
-        redeem_script: hex::encode(bytes),
+        address: multisig.address,
+        redeem_script: hex::encode(multisig.bytes),
     })
 }
 

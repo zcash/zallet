@@ -35,6 +35,8 @@ use {
 #[cfg(zallet_build = "wallet")]
 const REGTEST_ONLY_METHODS: &[&str] = &["stop"];
 
+#[cfg(zallet_build = "wallet")]
+mod add_multisig_address;
 mod convert_tex;
 mod create_multisig;
 mod decode_raw_transaction;
@@ -390,6 +392,34 @@ pub(crate) trait Rpc {
 #[cfg(zallet_build = "wallet")]
 #[rpc(server)]
 pub(crate) trait WalletRpc {
+    /// Creates a multisignature address and adds it to the wallet, so that funds sent
+    /// to it are detected.
+    ///
+    /// The address and its redeem script are the same ones `createmultisig` reports for
+    /// the same arguments; this additionally records the script. Retrieve the script
+    /// with `createmultisig` if you did not keep it: it is required in order to spend,
+    /// and cannot be recovered from the address.
+    ///
+    /// Note that Zallet cannot presently spend from a multisig address: it has no way
+    /// to assemble a P2SH `scriptSig`. Funds sent to one are tracked but cannot be
+    /// moved.
+    ///
+    /// # Arguments
+    /// - `nrequired` (numeric, required): The number of the supplied keys that must sign to spend.
+    /// - `keys` (array, required): The keys the multisig address is composed of, each
+    ///   either a hex-encoded public key or a transparent address this wallet holds the
+    ///   public key for.
+    /// - `account` (string, optional) The UUID of the account to track the address in.
+    ///   Defaults to the legacy `zcashd` pool of funds, which requires
+    ///   `features.legacy_pool_seed_fingerprint` to be set in the Zallet config file.
+    #[method(name = "addmultisigaddress")]
+    async fn add_multisig_address(
+        &self,
+        nrequired: u8,
+        keys: Vec<String>,
+        account: Option<&str>,
+    ) -> add_multisig_address::Response;
+
     /// List all commands, or get help for a specified command.
     ///
     /// Commands that are not available on the network this node is running on (such as
@@ -1250,6 +1280,15 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
 
     fn openrpc(&self) -> openrpc::Response {
         openrpc::call()
+    }
+
+    async fn add_multisig_address(
+        &self,
+        nrequired: u8,
+        keys: Vec<String>,
+        account: Option<&str>,
+    ) -> add_multisig_address::Response {
+        add_multisig_address::call(self.wallet().await?.as_mut(), nrequired, &keys, account)
     }
 
     async fn list_operation_ids(&self, status: Option<&str>) -> list_operation_ids::Response {
