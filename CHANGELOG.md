@@ -296,6 +296,13 @@ be considered breaking changes.
   `walletpassphrase` unlocks a running server’s identities rather than this
   process’s, which cannot run concurrently with it in any case. The regtest
   account command is fixed the same way.
+- `listaddresses` now reports transparent addresses imported as a standalone
+  public key or redeem script, such as those imported by `z_importaddress`.
+  Previously such an address was not listed at all until funds arrived at it,
+  and was then listed among the account’s derived addresses. It is now reported
+  from the moment it is imported, in the `transparent` object rather than
+  `derived_transparent`, as it has no derivation information of its own even
+  when the account holding it does.
 
 ## [0.1.0-beta.2] - 2026-07-28
 

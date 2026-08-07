@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, mem};
+use std::{
+    collections::{BTreeMap, HashSet},
+    mem,
+};
 
 use documented::Documented;
 use jsonrpsee::{
@@ -161,32 +164,35 @@ struct TransparentBuckets {
 /// Splits an account's transparent addresses into the lists `listaddresses` reports.
 ///
 /// The wallet enumerates transparent addresses two ways and neither is complete on
-/// its own: `list_addresses` reports the account's derived and unified addresses but
-/// holds no record for a standalone imported redeem script, while
-/// `get_transparent_receivers` reports every receiver the account tracks, standalone
-/// imports included. Both are passed in, `listed` first so its ordering is preserved,
-/// and an address appearing in both is reported once.
+/// its own. `list_addresses` reports only addresses that have been exposed, and a
+/// standalone import never is, so it is missing from `listed` entirely.
+/// `get_transparent_receivers` applies no such filter and reports every receiver the
+/// account tracks, imports included.
 ///
-/// An unrecognized scope is a wallet-internal inconsistency rather than a caller
-/// error, so it is reported as such rather than silently dropped. Every address
-/// carrying one is reported, not merely the first: they are the evidence for
-/// whatever produced them, and which of them comes first says nothing about the
-/// inconsistency, only about the order the two enumerations happened to be read
-/// in. Phrasing them for a human is the caller's job, not this function's.
+/// `tracked` is therefore consulted only for what it alone can supply: an address with
+/// no derivation of its own. `listed` is taken first, and an address in both is
+/// reported once.
+///
+/// Every unrecognized scope is returned, and only from `listed`. Ordering the buckets
+/// and phrasing the error are the caller's job; the tests below carry the reasoning
+/// behind each of these choices.
 fn bucket_transparent(
     listed: Vec<TransparentReceiver>,
     tracked: Vec<TransparentReceiver>,
 ) -> Result<TransparentBuckets, NonEmpty<(String, TransparentKeyScope)>> {
-    // TODO: `tracked` is not consulted yet, which is why a standalone imported
-    // address is missing from the output. See the failing tests below.
-    let _ = tracked;
-
+    let mut seen = HashSet::new();
     let mut buckets = TransparentBuckets::default();
     let mut unrecognized = vec![];
-    for receiver in listed {
+    let tracked = tracked
+        .into_iter()
+        .filter(|receiver| receiver.scope.is_none());
+    for receiver in listed.into_iter().chain(tracked) {
+        if !seen.insert(receiver.address.clone()) {
+            continue;
+        }
         match receiver.scope {
-            // 'None' scope keys are imported, which must be treated as external
-            Some(TransparentKeyScope::EXTERNAL) | None => buckets.external.push(receiver.address),
+            Some(TransparentKeyScope::EXTERNAL) => buckets.external.push(receiver.address),
+            None => buckets.imported.push(receiver.address),
             Some(TransparentKeyScope::INTERNAL) => buckets.change.push(receiver.address),
             Some(TransparentKeyScope::EPHEMERAL) => buckets.ephemeral.push(receiver.address),
             Some(other) => unrecognized.push((receiver.address, other)),
@@ -493,25 +499,53 @@ mod tests {
         );
     }
 
-    /// The two enumerations overlap almost entirely, so an address in both must not
-    /// be reported twice.
+    /// The enumerations overlap once an import has been exposed — receiving funds is
+    /// enough — after which it is in both, and must not be reported twice.
     #[test]
     fn reports_an_address_in_both_enumerations_once() {
-        let buckets = bucket_transparent(
-            vec![derived("shared", TransparentKeyScope::EXTERNAL)],
-            vec![derived("shared", TransparentKeyScope::EXTERNAL)],
-        )
-        .unwrap();
+        let buckets =
+            bucket_transparent(vec![imported("shared")], vec![imported("shared")]).unwrap();
 
         assert_eq!(
             buckets,
             TransparentBuckets {
-                external: vec!["shared".into()],
+                external: vec![],
                 change: vec![],
                 ephemeral: vec![],
-                imported: vec![],
+                imported: vec!["shared".into()],
             },
         );
+    }
+
+    /// `tracked` holds derived receivers that `listed` does not: the transparent
+    /// receiver cached on each Unified Address, and the addresses generated ahead of
+    /// use to fill the gap limit, which are reported only once exposed. Neither is
+    /// what consulting `tracked` is for, and reporting them would put addresses the
+    /// wallet has never handed out into `derived_transparent`.
+    #[test]
+    fn ignores_a_derived_address_known_only_as_a_tracked_receiver() {
+        let buckets = bucket_transparent(
+            vec![],
+            vec![
+                derived("external", TransparentKeyScope::EXTERNAL),
+                derived("change", TransparentKeyScope::INTERNAL),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(buckets, TransparentBuckets::default());
+    }
+
+    /// An unrecognized scope fails the whole call, so which addresses are examined for
+    /// one decides which wallets `listaddresses` will refuse to answer for. Consulting
+    /// `tracked` must not widen that: an address dropped for having a derivation is
+    /// dropped before its scope is anyone's business.
+    #[test]
+    fn ignores_an_unrecognized_scope_from_the_tracked_receivers() {
+        let buckets =
+            bucket_transparent(vec![], vec![custom("custom", FIRST_CUSTOM_SCOPE)]).unwrap();
+
+        assert_eq!(buckets, TransparentBuckets::default());
     }
 
     /// A scope with no bucket is a wallet-internal inconsistency, and every address
