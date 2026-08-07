@@ -73,8 +73,7 @@ Some `zcashd` wallet contents cannot be represented in a Zallet wallet, and are
 reported (with counts) rather than migrated: Sprout spending keys (move any
 Sprout funds using `zcashd` before migrating), address book entries, watch-only
 entries recorded without their public keys or redeem scripts, and entries with
-uncompressed public keys. Migration of regtest wallets is not currently
-supported.
+uncompressed public keys.
 
 [ZeWIF]: https://github.com/zcash/zewif
 

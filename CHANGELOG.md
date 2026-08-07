@@ -39,6 +39,10 @@ be considered breaking changes.
   (default 100).
 - `getwalletstatus` now reports a `locked` field indicating whether the wallet
   is currently usable.
+- `migrate-zcashd-wallet` now supports migrating regtest wallets. A regtest
+  chain's activation schedule lives in node configuration rather than in
+  `wallet.dat`, so the migration derives it from the wallet database's own
+  configured network parameters; the two therefore always agree.
 
 ### Fixed
 

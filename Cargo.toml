@@ -167,6 +167,9 @@ bip32 = "0.2"
 # Zcashd wallet migration
 zewif = { version = "1.0.0-rc.3" }
 zewif-zcashd = { version = "0.1.0-rc.3" }
+# The `zcash_protocol` version that `zewif-zcashd` is built against, for
+# interoperating with its API surface where the version above differs.
+zcash_protocol_0_9 = { package = "zcash_protocol", version = "0.9" }
 which = "8.0"
 anyhow = "1.0"
 

@@ -381,8 +381,6 @@ err-migrate-wallet-key-data=
 err-migrate-wallet-network-mismatch =
     The {-zcashd} wallet being imported is for the '{$wallet_network}' network,
     but this {-zallet} instance is configured for '{$zallet_network}'
-err-migrate-wallet-regtest =
-    Migration of regtest wallets is not yet supported.
 err-migrate-wallet-storage =
     An database error occurred in wallet migration. This is indicative of a
     programming error; please report the following error to (TBD): '{$err}'

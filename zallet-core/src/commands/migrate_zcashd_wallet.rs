@@ -190,11 +190,10 @@ impl MigrateZcashdWalletCmd {
         match (zewif_network, network_type) {
             (zewif::Network::Mainnet, NetworkType::Main) => Ok(()),
             (zewif::Network::Testnet, NetworkType::Test) => Ok(()),
-            // The ZeWIF importer cannot verify the equivalence of regtest activation
-            // schedules, so regtest migrations are not currently supported.
-            (zewif::Network::Regtest(_), NetworkType::Regtest) => {
-                Err(MigrateError::NetworkNotSupported)
-            }
+            // The ZeWIF export derives the document's regtest activation schedule
+            // from the wallet database's configured parameters (see
+            // `derive_regtest_activations`), so the two agree by construction.
+            (zewif::Network::Regtest(_), NetworkType::Regtest) => Ok(()),
             (wallet_network, db_network) => Err(MigrateError::NetworkMismatch {
                 wallet_network: wallet_network.clone(),
                 db_network,
@@ -248,12 +247,16 @@ impl MigrateZcashdWalletCmd {
         // Export the parsed wallet to a ZeWIF document. Everything below operates on
         // the document alone.
         info!("Exporting the zcashd wallet to a ZeWIF document");
-        // Regtest wallets were rejected by `check_network` above, so no regtest
-        // activation schedule is required.
+        // Mainnet and testnet activation schedules are fixed by the protocol, so
+        // only a regtest export needs one supplied.
+        let regtest_activations = match network_params.network_type() {
+            NetworkType::Regtest => Some(derive_regtest_activations(&network_params)),
+            NetworkType::Main | NetworkType::Test => None,
+        };
         let document = zewif_zcashd::migrate_to_zewif(
             &wallet,
             zewif::BlockHeight::from_u32(u32::from(export_height)),
-            None,
+            regtest_activations,
         )
         .map_err(MigrateError::Export)?;
         drop(wallet);
@@ -551,6 +554,41 @@ impl MigrateZcashdWalletCmd {
 
         Ok(())
     }
+}
+
+/// Derives the ZeWIF document's regtest activation schedule from the configured
+/// network parameters.
+///
+/// A regtest chain's activation schedule lives in node configuration
+/// (`regtest_nuparams`) rather than in the wallet, so it cannot be read out of
+/// `wallet.dat`. Deriving it from the wallet database's own configured parameters
+/// makes the document's schedule and the database's schedule agree by
+/// construction, which the importer's `verify_regtest_activations` cross-check
+/// then confirms. The `LocalNetwork` populated here belongs to the
+/// `zcash_protocol` version that `zewif-zcashd` is built against, which differs
+/// from this crate's — hence the versioned `zcash_protocol_0_9` dependency.
+///
+/// Upgrades beyond those `LocalNetwork` records (NU6.3 onwards) are omitted from
+/// the document. This is fine: the importer only cross-checks the activations the
+/// document records, and the wallet database keeps its full configured schedule
+/// regardless.
+fn derive_regtest_activations(params: &impl Parameters) -> zewif_zcashd::RegtestActivations {
+    let height = |nu: NetworkUpgrade| {
+        params
+            .activation_height(nu)
+            .map(|h| zcash_protocol_0_9::consensus::BlockHeight::from_u32(u32::from(h)))
+    };
+    zewif_zcashd::RegtestActivations::Local(zcash_protocol_0_9::local_consensus::LocalNetwork {
+        overwinter: height(NetworkUpgrade::Overwinter),
+        sapling: height(NetworkUpgrade::Sapling),
+        blossom: height(NetworkUpgrade::Blossom),
+        heartwood: height(NetworkUpgrade::Heartwood),
+        canopy: height(NetworkUpgrade::Canopy),
+        nu5: height(NetworkUpgrade::Nu5),
+        nu6: height(NetworkUpgrade::Nu6),
+        nu6_1: height(NetworkUpgrade::Nu6_1),
+        nu6_2: height(NetworkUpgrade::Nu6_2),
+    })
 }
 
 /// Registers watch-only transparent pubkeys (from zcashd's `importpubkey`) with the
@@ -986,7 +1024,6 @@ pub(crate) enum MigrateError {
         wallet_network: zewif::Network,
         db_network: NetworkType,
     },
-    NetworkNotSupported,
     Database(SqliteClientError),
     MultiImportDisabled,
     DuplicateImport(SeedFingerprint),
@@ -1041,9 +1078,6 @@ impl From<MigrateError> for Error {
                     NetworkType::Regtest => "regtest",
                 }
             ))),
-            MigrateError::NetworkNotSupported => {
-                Error::from(ErrorKind::Generic.context(fl!("err-migrate-wallet-regtest")))
-            }
             MigrateError::Database(sqlite_client_error) => {
                 Error::from(ErrorKind::Generic.context(fl!(
                     "err-migrate-wallet-storage",
@@ -1095,7 +1129,8 @@ mod tests {
 
     use super::{
         MigrateError, MigrateZcashdWalletCmd, ZCASHD_LEGACY_ACCOUNT_INDEX, ZCASHD_LEGACY_SOURCE,
-        enriched_document, has_seedless_legacy_account, mint_legacy_mnemonic, to_zewif_frontier,
+        derive_regtest_activations, enriched_document, has_seedless_legacy_account,
+        mint_legacy_mnemonic, to_zewif_frontier,
     };
 
     fn node(byte: u8) -> MerkleHashOrchard {
@@ -1114,10 +1149,17 @@ mod tests {
             MigrateZcashdWalletCmd::check_network(&zewif::Network::Testnet, NetworkType::Test)
                 .is_ok()
         );
+        assert!(
+            MigrateZcashdWalletCmd::check_network(
+                &zewif::Network::Regtest(zewif::RegtestParams::default()),
+                NetworkType::Regtest,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
-    fn check_network_rejects_mismatch_and_regtest() {
+    fn check_network_rejects_mismatch() {
         assert!(matches!(
             MigrateZcashdWalletCmd::check_network(&zewif::Network::Testnet, NetworkType::Main),
             Err(MigrateError::NetworkMismatch { .. })
@@ -1125,10 +1167,45 @@ mod tests {
         assert!(matches!(
             MigrateZcashdWalletCmd::check_network(
                 &zewif::Network::Regtest(zewif::RegtestParams::default()),
-                NetworkType::Regtest,
+                NetworkType::Main,
             ),
-            Err(MigrateError::NetworkNotSupported)
+            Err(MigrateError::NetworkMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn regtest_activations_mirror_configured_parameters() {
+        // Distinct heights per upgrade, with NU6.1 and NU6.2 left unactivated, so
+        // that each `LocalNetwork` field is checked against its own upgrade.
+        let params = zcash_protocol::local_consensus::LocalNetwork {
+            overwinter: Some(BlockHeight::from_u32(1)),
+            sapling: Some(BlockHeight::from_u32(2)),
+            blossom: Some(BlockHeight::from_u32(3)),
+            heartwood: Some(BlockHeight::from_u32(4)),
+            canopy: Some(BlockHeight::from_u32(5)),
+            nu5: Some(BlockHeight::from_u32(6)),
+            nu6: Some(BlockHeight::from_u32(7)),
+            nu6_1: None,
+            nu6_2: None,
+            nu6_3: None,
+        };
+
+        let h = |height: u32| Some(zcash_protocol_0_9::consensus::BlockHeight::from_u32(height));
+        let expected = zcash_protocol_0_9::local_consensus::LocalNetwork {
+            overwinter: h(1),
+            sapling: h(2),
+            blossom: h(3),
+            heartwood: h(4),
+            canopy: h(5),
+            nu5: h(6),
+            nu6: h(7),
+            nu6_1: None,
+            nu6_2: None,
+        };
+        match derive_regtest_activations(&params) {
+            zewif_zcashd::RegtestActivations::Local(local) => assert_eq!(local, expected),
+            _ => panic!("expected a local activation schedule"),
+        }
     }
 
     #[test]

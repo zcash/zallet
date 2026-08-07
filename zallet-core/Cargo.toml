@@ -139,6 +139,10 @@ anyhow.workspace = true
 which = { workspace = true, optional = true }
 zewif = { workspace = true, optional = true }
 zewif-zcashd = { workspace = true, optional = true }
+# `zewif-zcashd`'s `RegtestActivations::Local` takes the `LocalNetwork` of the
+# `zcash_protocol` version it is built against (0.9), which differs from this
+# crate's.
+zcash_protocol_0_9 = { workspace = true, features = ["local-consensus"], optional = true }
 
 # lightwalletd (temporary)
 tonic.workspace = true
@@ -201,6 +205,7 @@ zcashd-import = [
   "dep:bech32",
   "dep:zewif",
   "dep:zewif-zcashd",
+  "dep:zcash_protocol_0_9",
   "zcash_client_backend/zcashd-compat",
   "zcash_client_sqlite/zcashd-compat",
   "zcash_client_sqlite/zewif",
