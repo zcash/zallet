@@ -15,7 +15,9 @@ use zcash_client_sqlite::error::SqliteClientError;
 use zcash_client_sqlite::zewif::{DiscardSecrets, SecretSink, ZewifImportError, ZewifImportReport};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
-use zewif_zcashd::{BDBDump, EncryptedKeyPolicy, ZcashdDump, ZcashdParser, ZcashdWallet};
+use zewif_zcashd::{
+    BDBDump, EncryptedKeyPolicy, ParseOptions, ZcashdDump, ZcashdParser, ZcashdWallet,
+};
 use zip32::fingerprint::SeedFingerprint;
 
 use crate::{
@@ -68,7 +70,7 @@ impl MigrateZcashdWalletCmd {
         let keystore = KeyStore::new(&config, db.clone())?;
 
         info!("Dumping zcashd wallet");
-        let wallet = self.dump_wallet()?;
+        let wallet = self.dump_wallet(config.consensus.network)?;
         info!("Wallet dumped");
 
         Self::migrate_zcashd_wallet(
@@ -93,7 +95,7 @@ impl AsyncRunnable for MigrateZcashdWalletCmd {
 }
 
 impl MigrateZcashdWalletCmd {
-    fn dump_wallet(&self) -> Result<ZcashdWallet, MigrateError> {
+    fn dump_wallet(&self, network_type: NetworkType) -> Result<ZcashdWallet, MigrateError> {
         let wallet_path = if self.path.is_relative() {
             if let Some(datadir) = self.zcashd_datadir.as_ref() {
                 datadir.join(&self.path)
@@ -150,30 +152,42 @@ impl MigrateZcashdWalletCmd {
                 }
             })?;
 
-        let parse_result = match ZcashdParser::parse_dump(&zcashd_dump, !self.allow_warnings) {
-            // The wallet's key material is encrypted; interactively request the wallet
-            // passphrase and retry.
-            Err(zewif_zcashd::Error::EncryptedWalletRequiresPassphrase) => {
-                let mut attempts = 0;
-                loop {
-                    let passphrase =
-                        rpassword::prompt_password(fl!("cmd-migrate-wallet-passphrase-prompt"))
-                            .map_err(|e| ErrorKind::Generic.context(e))?;
-                    attempts += 1;
-                    match ZcashdParser::parse_dump_with_policy(
-                        &zcashd_dump,
-                        !self.allow_warnings,
-                        EncryptedKeyPolicy::Decrypt(SecretVec::new(passphrase.into_bytes())),
-                    ) {
-                        Err(zewif_zcashd::Error::WrongWalletPassphrase) if attempts < 3 => {
-                            eprintln!("{}", fl!("cmd-migrate-wallet-passphrase-wrong"));
+        // A wallet that predates zcashd 5.0.0 has no `networkinfo` record, so the
+        // parser cannot identify its chain. Supply the wallet database's configured
+        // network as the fallback; the wallet's own `networkinfo` record remains
+        // authoritative when present.
+        let parse_options = || {
+            ParseOptions::new()
+                .strict(!self.allow_warnings)
+                .fallback_network(Self::zewif_fallback_network(network_type))
+        };
+
+        let parse_result =
+            match ZcashdParser::parse_dump_with_options(&zcashd_dump, parse_options()) {
+                // The wallet's key material is encrypted; interactively request the wallet
+                // passphrase and retry.
+                Err(zewif_zcashd::Error::EncryptedWalletRequiresPassphrase) => {
+                    let mut attempts = 0;
+                    loop {
+                        let passphrase =
+                            rpassword::prompt_password(fl!("cmd-migrate-wallet-passphrase-prompt"))
+                                .map_err(|e| ErrorKind::Generic.context(e))?;
+                        attempts += 1;
+                        match ZcashdParser::parse_dump_with_options(
+                            &zcashd_dump,
+                            parse_options().encrypted_key_policy(EncryptedKeyPolicy::Decrypt(
+                                SecretVec::new(passphrase.into_bytes()),
+                            )),
+                        ) {
+                            Err(zewif_zcashd::Error::WrongWalletPassphrase) if attempts < 3 => {
+                                eprintln!("{}", fl!("cmd-migrate-wallet-passphrase-wrong"));
+                            }
+                            result => break result,
                         }
-                        result => break result,
                     }
                 }
-            }
-            result => result,
-        };
+                result => result,
+            };
         let (zcashd_wallet, _unparsed_keys) = parse_result.map_err(|e| MigrateError::Zewif {
             error_type: ZewifError::ZcashdDump,
             wallet_path,
@@ -181,6 +195,16 @@ impl MigrateZcashdWalletCmd {
         })?;
 
         Ok(zcashd_wallet)
+    }
+
+    /// Maps the wallet database's configured network to the `zewif` network to
+    /// assume for a wallet dump that does not record its own network.
+    fn zewif_fallback_network(network_type: NetworkType) -> zewif::Network {
+        match network_type {
+            NetworkType::Main => zewif::Network::Mainnet,
+            NetworkType::Test => zewif::Network::Testnet,
+            NetworkType::Regtest => zewif::Network::Regtest(zewif::RegtestParams::default()),
+        }
     }
 
     fn check_network(
@@ -1171,6 +1195,33 @@ mod tests {
             ),
             Err(MigrateError::NetworkMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn fallback_network_matches_configured_network() {
+        assert!(matches!(
+            MigrateZcashdWalletCmd::zewif_fallback_network(NetworkType::Main),
+            zewif::Network::Mainnet
+        ));
+        assert!(matches!(
+            MigrateZcashdWalletCmd::zewif_fallback_network(NetworkType::Test),
+            zewif::Network::Testnet
+        ));
+        assert!(matches!(
+            MigrateZcashdWalletCmd::zewif_fallback_network(NetworkType::Regtest),
+            zewif::Network::Regtest(_)
+        ));
+
+        // A wallet parsed under the fallback must pass the subsequent network check.
+        for network_type in [NetworkType::Main, NetworkType::Test, NetworkType::Regtest] {
+            assert!(
+                MigrateZcashdWalletCmd::check_network(
+                    &MigrateZcashdWalletCmd::zewif_fallback_network(network_type),
+                    network_type,
+                )
+                .is_ok()
+            );
+        }
     }
 
     #[test]
