@@ -13,6 +13,7 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_client_sqlite::zewif::{DiscardSecrets, SecretSink, ZewifImportError, ZewifImportReport};
+use zcash_keys::encoding::AddressCodec;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
 use zewif_zcashd::{
@@ -572,7 +573,10 @@ impl MigrateZcashdWalletCmd {
         // The import has committed: print the backup reminder (which the minted-seed
         // notice above refers to) before propagating any error from the remaining
         // registration step.
-        let post_import = register_watch_pubkeys(&mut db_data, &document, &report, exposure_height);
+        let post_import = register_watch_pubkeys(&mut db_data, &document, &report, exposure_height)
+            .and_then(|()| {
+                expose_spending_key_addresses(&mut db_data, &document, &report, exposure_height)
+            });
         print_backup_reminder();
         post_import?;
 
@@ -681,6 +685,82 @@ fn register_watch_pubkeys(
         );
     }
     Ok(())
+}
+
+/// Computes the P2PKH addresses of the standalone transparent spending keys that
+/// the ZeWIF importer registered with an account.
+///
+/// The importer registers each spending key in the document's secret store whose
+/// derived address belongs to an imported account, and reports the keys it
+/// skipped (uncompressed public keys, and keys whose address no imported account
+/// carries). Only the registered keys' addresses have wallet rows, and
+/// `mark_transparent_addresses_exposed` rejects addresses without one, so the
+/// skipped keys must be excluded here.
+fn registered_spending_key_addresses<P: Parameters>(
+    store: &zewif::SecretStore,
+    report: &ZewifImportReport,
+    params: &P,
+) -> Vec<TransparentAddress> {
+    let skipped: HashSet<&str> = report
+        .skipped_transparent_keys
+        .iter()
+        .filter_map(|k| k.address.as_deref())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut addresses = Vec::new();
+    for entry in store.transparent_keys() {
+        // The importer skips uncompressed public keys (reporting them without an
+        // address); mirror that check rather than deriving an address zcashd
+        // never used.
+        if !entry.pubkey().is_compressed() {
+            continue;
+        }
+        // A malformed pubkey would have failed the import outright; skip rather
+        // than expose anything questionable if one is nevertheless encountered.
+        let Ok(pubkey) = PublicKey::from_slice(entry.pubkey().as_slice()) else {
+            continue;
+        };
+        let address = TransparentAddress::from_pubkey(&pubkey);
+        let encoded = address.encode(params);
+        if !skipped.contains(encoded.as_str()) && seen.insert(encoded) {
+            addresses.push(address);
+        }
+    }
+    addresses
+}
+
+/// Marks the P2PKH addresses of the imported standalone transparent spending keys
+/// (from zcashd's `importprivkey`) as exposed as of `exposure_height`.
+///
+/// The ZeWIF importer registers these keys but only marks an address as exposed
+/// if the document records an exposure for it, so an imported-but-never-used
+/// key's address would remain unexposed and thus invisible to `listaddresses`,
+/// which only surfaces exposed addresses. zcashd always listed such addresses.
+fn expose_spending_key_addresses(
+    db_data: &mut DbHandle,
+    document: &zewif::Zewif,
+    report: &ZewifImportReport,
+    exposure_height: BlockHeight,
+) -> Result<(), MigrateError> {
+    let Some(zewif::Secrets::Plain(store)) = document.secrets() else {
+        return Ok(());
+    };
+    let params = *db_data.params();
+    let to_expose: Vec<(TransparentAddress, BlockHeight)> =
+        registered_spending_key_addresses(store, report, &params)
+            .into_iter()
+            .map(|address| (address, exposure_height))
+            .collect();
+    if to_expose.is_empty() {
+        return Ok(());
+    }
+    info!(
+        "Marking {} imported transparent spending-key addresses as exposed",
+        to_expose.len(),
+    );
+    db_data
+        .mark_transparent_addresses_exposed(&to_expose)
+        .map_err(MigrateError::Database)
 }
 
 /// Best-effort removal of a provisionally stored mnemonic from the keystore, after
@@ -995,8 +1075,11 @@ fn log_import_report(report: &ZewifImportReport) {
             report.redeem_scripts_not_representable,
         );
     }
+    // Only exposures the document itself records are counted here; the importer
+    // and the migration also mark addresses as exposed on other evidence (stored
+    // transactions, imported spending keys), which they log separately.
     info!(
-        "Marked {} transparent addresses as exposed",
+        "Marked {} transparent addresses with document-recorded exposures as exposed",
         report.addresses_marked_exposed,
     );
     if report.transactions_stored > 0 || report.transactions_without_wallet_relevance > 0 {
@@ -1195,6 +1278,56 @@ mod tests {
             ),
             Err(MigrateError::NetworkMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn spending_key_addresses_follow_importer_registration() {
+        use transparent::address::TransparentAddress;
+        use zcash_client_sqlite::zewif::{
+            SkippedTransparentKey, TransparentKeySkipReason, ZewifImportReport,
+        };
+        use zcash_keys::encoding::AddressCodec;
+        use zcash_protocol::consensus::MAIN_NETWORK;
+
+        let secp = secp256k1::Secp256k1::new();
+        let pubkey = |byte: u8| {
+            secp256k1::SecretKey::from_slice(&[byte; 32])
+                .expect("valid secret key")
+                .public_key(&secp)
+        };
+        let entry = |pubkey_bytes: Vec<u8>| {
+            zewif::TransparentKeyEntry::new(
+                zewif::transparent::TransparentPubKey::from_bytes(pubkey_bytes)
+                    .expect("valid pubkey bytes"),
+                zewif::transparent::TransparentSpendingKey::new("unused"),
+            )
+        };
+
+        let registered = pubkey(0x01);
+        let unowned = pubkey(0x02);
+        let uncompressed = pubkey(0x03);
+
+        let mut store = zewif::SecretStore::new();
+        store.add_transparent_key(entry(registered.serialize().to_vec()));
+        // Registered keys may repeat in the store; the address must not.
+        store.add_transparent_key(entry(registered.serialize().to_vec()));
+        store.add_transparent_key(entry(unowned.serialize().to_vec()));
+        store.add_transparent_key(entry(uncompressed.serialize_uncompressed().to_vec()));
+
+        let mut report = ZewifImportReport::default();
+        report.skipped_transparent_keys.push(SkippedTransparentKey {
+            address: Some(TransparentAddress::from_pubkey(&unowned).encode(&MAIN_NETWORK)),
+            reason: TransparentKeySkipReason::NoOwningAccount,
+        });
+        report.skipped_transparent_keys.push(SkippedTransparentKey {
+            address: None,
+            reason: TransparentKeySkipReason::UncompressedPubKey,
+        });
+
+        assert_eq!(
+            super::registered_spending_key_addresses(&store, &report, &MAIN_NETWORK),
+            vec![TransparentAddress::from_pubkey(&registered)],
+        );
     }
 
     #[test]
