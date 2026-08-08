@@ -86,6 +86,9 @@ audit-as-crates-io = false
 
 [policy.zebra-state]
 
+[policy.zewif-zcashd]
+audit-as-crates-io = false
+
 [policy.zip321]
 
 [[exemptions.abscissa_core]]

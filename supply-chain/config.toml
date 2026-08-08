@@ -51,6 +51,9 @@ url = "https://raw.githubusercontent.com/ZcashFoundation/zebra/main/supply-chain
 
 [policy.zcash_transparent]
 
+[policy.zewif-zcashd]
+audit-as-crates-io = false
+
 [policy.zip321]
 
 [[exemptions.abscissa_core]]

@@ -178,3 +178,8 @@ tonic = "0.14"
 
 [profile.release]
 debug = "line-tables-only"
+
+[patch.crates-io]
+# TEMPORARY: pin zewif-zcashd to its pre-Sapling wallet support until that
+# lands in a release.
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "7ba39bf32ab5caa1f0d7bed6f02a915fc1560677" }

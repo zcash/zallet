@@ -90,3 +90,7 @@ librocksdb-sys = { git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev
 zaino-common = { git = "https://github.com/zodl-inc/zaino.git", rev = "d2d06bdd" }
 zaino-fetch = { git = "https://github.com/zodl-inc/zaino.git", rev = "d2d06bdd" }
 zaino-state = { git = "https://github.com/zodl-inc/zaino.git", rev = "d2d06bdd" }
+
+# TEMPORARY: pin zewif-zcashd to its pre-Sapling wallet support until that
+# lands in a release.
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "7ba39bf32ab5caa1f0d7bed6f02a915fc1560677" }

@@ -78,6 +78,11 @@ tokio-console = ["zallet-core/tokio-console"]
 # Use libc++ when requested by the StageX musl builder. This upstream fix landed
 # after rocksdb 0.24.0 and can return to crates.io with the next release.
 librocksdb-sys = { git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev = "0442de85de82234643b5ba0a8f66a13ecf31b17d" }
+
+# TEMPORARY: pin zewif-zcashd to its pre-Sapling wallet support until that
+# lands in a release.
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "7ba39bf32ab5caa1f0d7bed6f02a915fc1560677" }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(tokio_unstable)',
