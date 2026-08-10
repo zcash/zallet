@@ -3,8 +3,8 @@
 # wallet-critical dependencies resolve in lockstep across all of them.
 #
 # Each chain backend lives in its own workspace with its own lockfile
-# (zcash/zallet#540), but every binary (the `zallet` launcher and
-# `zallet-zebra`) opens the SAME wallet database. The
+# (zcash/zallet#540), but every binary (the `zallet` launcher, `zallet-zebra`,
+# and the source-built `zallet-zinder`) opens the SAME wallet database. The
 # librustzcash stack (zcash_client_sqlite and the crates whose types it
 # persists) must therefore resolve to one identical version in every workspace,
 # or the binaries could apply different schema migrations to the shared database.
@@ -20,7 +20,8 @@
 #
 # Run this after bumping any shared dependency. When you bump a librustzcash
 # crate you MUST apply the identical version requirement to every manifest
-# (root Cargo.toml plus backends/zebra/Cargo.toml) by hand first; the lockstep check fails if they drift. Then run this to
+# (root Cargo.toml plus backends/zebra/Cargo.toml and backends/zinder/Cargo.toml)
+# by hand first; the lockstep check fails if they drift. Then run this to
 # regenerate the lockfiles.
 #
 # On an already-in-lockstep tree this is a no-op (CI runs it and asserts an empty
@@ -30,7 +31,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Workspace dirs whose lockfiles are reconciled together.
-DIRS=(. backends/zebra)
+DIRS=(. backends/zebra backends/zinder)
 
 # Reconcile each lockfile with its manifest. `cargo metadata` re-resolves only
 # what changed and rewrites Cargo.lock without churning unrelated dependencies.
