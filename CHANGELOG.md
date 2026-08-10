@@ -34,6 +34,10 @@ be considered breaking changes.
   and CLI work is never starved by the connections the sync engine retains.
   Setting it at or below that number starves wallet operations, so it is
   intended mainly for regression testing, not production use.
+- A `[zinder]` configuration section. Its `wallet_query_endpoint` option names
+  the Zinder wallet-query origin that the `zallet-zinder` backend connects to.
+  It must be an `http` or `https` origin: a value with credentials, a path, a
+  query, or a fragment is rejected when the configuration loads.
 
 ### Changed
 
