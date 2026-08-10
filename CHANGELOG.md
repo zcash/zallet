@@ -64,6 +64,8 @@ be considered breaking changes.
 - Source builds can select `backend = "zinder"` and configure
   `[zinder].wallet_query_endpoint` to run the native `zallet-zinder` sibling.
   Release packaging remains unchanged.
+- The Zinder backend now submits wallet transactions through its configured
+  native wallet-query endpoint.
 
 ### Changed
 
