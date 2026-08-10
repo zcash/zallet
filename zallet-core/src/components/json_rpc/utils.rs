@@ -20,11 +20,7 @@ use super::server::LegacyCode;
 
 #[cfg(zallet_build = "wallet")]
 use {
-    crate::components::{
-        chain::{Chain, ChainView},
-        database::DbConnection,
-        keystore::KeyStore,
-    },
+    crate::components::{chain::ChainView, database::DbConnection, keystore::KeyStore},
     std::collections::HashSet,
     zcash_client_backend::data_api::{Account, AccountBirthday, WalletRead, chain::ChainState},
     zcash_primitives::block::BlockHash,
@@ -153,10 +149,14 @@ pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
 /// For height 0 (genesis), returns a birthday with an empty chain state since the
 /// commitment trees are empty. For non-zero heights, fetches the real treestate from
 /// the chain indexer so the sync engine can validate note commitment tree continuity.
+///
+/// `recover_until`, when provided, tells the sync engine to scan forward from the
+/// birthday until (and including) that height before switching to steady-state mode.
 #[cfg(zallet_build = "wallet")]
-pub(super) async fn fetch_account_birthday<C: Chain>(
-    chain: &C,
+pub(super) async fn fetch_account_birthday<V: ChainView>(
+    chain_view: &V,
     height: BlockHeight,
+    recover_until: Option<BlockHeight>,
 ) -> RpcResult<AccountBirthday> {
     if height == BlockHeight::from_u32(0) {
         // The chain state is the state of the note commitment trees *as of the block
@@ -166,20 +166,13 @@ pub(super) async fn fetch_account_birthday<C: Chain>(
         // would be wrong: that is the hash of block 0 itself, not of the block before it.)
         return Ok(AccountBirthday::from_parts(
             ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
-            None,
+            recover_until,
         ));
     }
 
     // The chain state anchoring the birthday is the note commitment tree state as of the
     // block *preceding* the birthday height.
     let treestate_height = height.saturating_sub(1);
-    let chain_view = chain.snapshot().await.map_err(|e| {
-        ErrorObjectOwned::owned(
-            RpcErrorCode::InternalError.code(),
-            format!("Failed to obtain a chain snapshot: {e}"),
-            None::<()>,
-        )
-    })?;
     let chain_state = chain_view
         .tree_state_as_of(treestate_height)
         .await
@@ -200,7 +193,7 @@ pub(super) async fn fetch_account_birthday<C: Chain>(
             )
         })?;
 
-    Ok(AccountBirthday::from_parts(chain_state, None))
+    Ok(AccountBirthday::from_parts(chain_state, recover_until))
 }
 
 pub(crate) fn parse_txid(txid_str: &str) -> RpcResult<TxId> {

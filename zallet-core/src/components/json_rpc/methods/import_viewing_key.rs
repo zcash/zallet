@@ -143,7 +143,10 @@ pub(crate) async fn call<C: Chain>(
                 }
             };
 
-            let birthday = fetch_account_birthday(&chain, effective_height).await?;
+            let chain_view = chain.snapshot().await.map_err(|e| {
+                LegacyCode::Database.with_message(format!("Failed to obtain a chain snapshot: {e}"))
+            })?;
+            let birthday = fetch_account_birthday(&chain_view, effective_height, None).await?;
 
             wallet
                 .import_account_ufvk(

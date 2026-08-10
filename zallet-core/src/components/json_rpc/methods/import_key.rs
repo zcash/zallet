@@ -161,7 +161,10 @@ pub(crate) async fn call<C: Chain>(
             _ => unreachable!(),
         };
 
-        Some(fetch_account_birthday(&chain, effective_height).await?)
+        let chain_view = chain.snapshot().await.map_err(|e| {
+            LegacyCode::Database.with_message(format!("Failed to obtain a chain snapshot: {e}"))
+        })?;
+        Some(fetch_account_birthday(&chain_view, effective_height, None).await?)
     } else {
         None
     };
