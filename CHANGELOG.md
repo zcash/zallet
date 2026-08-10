@@ -61,6 +61,9 @@ be considered breaking changes.
   to complete even when some accounts or transparent spending keys in the
   `zcashd` wallet could not be imported. The skipped items are reported as
   warnings; they remain accessible only via the original `wallet.dat` file.
+- Source builds can select `backend = "zinder"` and configure
+  `[zinder].wallet_query_endpoint` to run the native `zallet-zinder` sibling.
+  Release packaging remains unchanged.
 
 ### Changed
 

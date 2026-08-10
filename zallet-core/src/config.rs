@@ -107,8 +107,8 @@ pub struct ZalletConfig {
     /// launcher (or on the PATH). Each backend binary refuses to run against a config
     /// that names a backend other than the one it provides, since all backends
     /// operate on the same wallet database. The backends shipped with Zallet are
-    /// `"zebra"` (the launcher's default when this key is unset) and
-    /// `"zaino"`.
+    /// `"zebra"` (the launcher's default when this key is unset), `"zaino"`, and
+    /// `"zinder"`.
     ///
     /// When this key is unset, a directly-invoked backend binary accepts the config:
     /// choosing the binary is already an explicit choice of backend.
@@ -148,6 +148,12 @@ pub struct ZalletConfig {
     /// Defaulted so that configs written before this section existed continue to parse.
     #[serde(default)]
     pub sync: SyncSection,
+
+    /// Settings for Zinder's native wallet query endpoint.
+    ///
+    /// Defaulted so that configurations written before Zinder support existed continue to parse.
+    #[serde(default)]
+    pub zinder: ZinderSection,
 }
 
 impl ZalletConfig {
@@ -874,6 +880,106 @@ impl SyncSection {
     }
 }
 
+/// A validated native Zinder wallet query endpoint.
+///
+/// The endpoint is an origin rather than a general URL because the wallet native client owns
+/// the RPC path. Credentials, paths, queries, and fragments would either be ignored or create
+/// an ambiguous transport target, so configuration rejects them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct WalletQueryEndpoint(String);
+
+impl WalletQueryEndpoint {
+    /// Returns the configured native endpoint origin.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for WalletQueryEndpoint {
+    type Err = String;
+
+    fn from_str(endpoint: &str) -> Result<Self, Self::Err> {
+        if endpoint.contains('#') {
+            return Err("zinder.wallet_query_endpoint must not include a fragment".to_owned());
+        }
+
+        let uri: hyper::Uri = endpoint.parse().map_err(|error| {
+            format!("zinder.wallet_query_endpoint must be a valid URL origin: {error}")
+        })?;
+
+        match uri.scheme_str() {
+            Some("http" | "https") => {}
+            Some(_) => {
+                return Err(
+                    "zinder.wallet_query_endpoint must use the http or https scheme".to_owned(),
+                );
+            }
+            None => {
+                return Err(
+                    "zinder.wallet_query_endpoint must include the http or https scheme".to_owned(),
+                );
+            }
+        }
+
+        let authority = uri
+            .authority()
+            .ok_or_else(|| "zinder.wallet_query_endpoint must include an authority".to_owned())?;
+        if uri.host().is_none_or(str::is_empty) {
+            return Err("zinder.wallet_query_endpoint must include an authority host".to_owned());
+        }
+        if authority.as_str().contains('@') {
+            return Err("zinder.wallet_query_endpoint must not include credentials".to_owned());
+        }
+        let authority = authority.as_str();
+        let configured_port = if authority.starts_with('[') {
+            authority
+                .split_once("]:")
+                .map(|(_, configured_port)| configured_port)
+        } else {
+            authority
+                .rsplit_once(':')
+                .map(|(_, configured_port)| configured_port)
+        };
+        if configured_port.is_some_and(|configured_port| {
+            configured_port
+                .parse::<u16>()
+                .map_or(true, |port| port == 0)
+        }) {
+            return Err(
+                "zinder.wallet_query_endpoint must use a port between 1 and 65535".to_owned(),
+            );
+        }
+        if !matches!(uri.path(), "" | "/") {
+            return Err("zinder.wallet_query_endpoint must not include a path".to_owned());
+        }
+        if uri.query().is_some() {
+            return Err("zinder.wallet_query_endpoint must not include a query".to_owned());
+        }
+
+        Ok(Self(endpoint.to_owned()))
+    }
+}
+
+impl<'de> Deserialize<'de> for WalletQueryEndpoint {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let endpoint = String::deserialize(deserializer)?;
+        endpoint.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Settings for Zinder's native wallet query endpoint.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Documented, DocumentedFields)]
+#[serde(deny_unknown_fields)]
+pub struct ZinderSection {
+    /// Native Zinder wallet-query origin.
+    ///
+    /// This must be an http:// or https:// origin with an authority. It cannot include
+    /// credentials, a non-root path, a query, or a fragment. The Zinder backend requires this
+    /// setting before it can construct the chain client.
+    pub wallet_query_endpoint: Option<WalletQueryEndpoint>,
+}
+
 impl ZalletConfig {
     /// Generates an example config file, with all default values included as comments.
     pub fn generate_example() -> String {
@@ -934,6 +1040,7 @@ impl ZalletConfig {
             rpc("timeout", conf.rpc.timeout().as_secs()),
             sync("recover_batch_size", conf.sync.recover_batch_size()),
             sync("lock_threshold", conf.sync.lock_threshold()),
+            zinder("wallet_query_endpoint", &conf.zinder.wallet_query_endpoint),
         ]
         .into_iter()
         .collect::<HashMap<_, _>>();
@@ -958,6 +1065,7 @@ impl ZalletConfig {
         const RPC: &str = "rpc";
         const RPC_AUTH: &str = "rpc.auth";
         const SYNC: &str = "sync";
+        const ZINDER: &str = "zinder";
         fn top_level<T: Serialize>(
             f: &'static str,
             d: T,
@@ -1037,6 +1145,12 @@ impl ZalletConfig {
             d: T,
         ) -> ((&'static str, &'static str), Option<toml::Value>) {
             field(SYNC, f, d)
+        }
+        fn zinder<T: Serialize>(
+            f: &'static str,
+            d: T,
+        ) -> ((&'static str, &'static str), Option<toml::Value>) {
+            field(ZINDER, f, d)
         }
         fn field<T: Serialize>(
             s: &'static str,
@@ -1254,6 +1368,7 @@ impl ZalletConfig {
                 }
                 RPC => write_section::<RpcSection>(&mut config, field_name, &sec_def),
                 SYNC => write_section::<SyncSection>(&mut config, field_name, &sec_def),
+                ZINDER => write_section::<ZinderSection>(&mut config, field_name, &sec_def),
                 // Top-level fields correspond to CLI settings, and cannot be configured
                 // via a file.
                 _ => (),
@@ -1266,7 +1381,7 @@ impl ZalletConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::BackendName;
+    use super::{BackendName, ZalletConfig, ZinderSection};
 
     #[test]
     fn backend_key_parses() {
@@ -1362,5 +1477,59 @@ zebra_state_path = "/home/user/.cache/zebra"
         // fully scanned exactly to the tip), so it must be accepted.
         let section: super::SyncSection = toml::from_str("lock_threshold = 0").unwrap();
         assert_eq!(section.lock_threshold(), 0);
+    }
+
+    #[test]
+    fn wallet_query_endpoint_accepts_http_and_https_origins() {
+        for endpoint in ["http://127.0.0.1:49102", "https://wallet.example.test"] {
+            let section: ZinderSection =
+                toml::from_str(&format!("wallet_query_endpoint = {endpoint:?}"))
+                    .expect("valid wallet query endpoint parses");
+
+            assert_eq!(
+                section
+                    .wallet_query_endpoint
+                    .as_ref()
+                    .expect("configured endpoint is retained")
+                    .as_str(),
+                endpoint
+            );
+        }
+    }
+
+    #[test]
+    fn wallet_query_endpoint_rejects_non_origin_urls_during_config_load() {
+        for endpoint in [
+            "wallet.example.test",
+            "ftp://wallet.example.test",
+            "http:///wallet.example.test",
+            "http://:49102",
+            "http://wallet.example.test:0",
+            "http://wallet.example.test:65536",
+            "https://user:password@wallet.example.test",
+            "https://wallet.example.test/native",
+            "https://wallet.example.test?network=regtest",
+            "https://wallet.example.test#fragment",
+        ] {
+            assert!(
+                toml::from_str::<ZinderSection>(&format!("wallet_query_endpoint = {endpoint:?}"))
+                    .is_err(),
+                "expected {endpoint:?} to be rejected during configuration parsing"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_wallet_query_endpoint_rejects_the_wallet_configuration() {
+        let config = ZalletConfig::generate_example().replacen(
+            "#wallet_query_endpoint = UNSET",
+            "wallet_query_endpoint = \"https://wallet.example.test/non-root\"",
+            1,
+        );
+
+        assert!(
+            toml::from_str::<ZalletConfig>(&config).is_err(),
+            "invalid endpoint must reject the complete wallet configuration"
+        );
     }
 }
