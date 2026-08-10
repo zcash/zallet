@@ -81,7 +81,7 @@ pub(crate) mod status;
 pub(crate) use status::{SyncStatus, SyncStatusReader, SyncStatusWriter};
 
 mod locator;
-mod steps;
+pub(super) mod steps;
 
 #[derive(Debug)]
 pub(crate) struct WalletSync {}
@@ -1424,7 +1424,7 @@ async fn data_requests<C: Chain>(
 /// Processes the queue of transactions that need to be scanned with the wallet's viewing
 /// keys.
 #[tracing::instrument(skip_all)]
-async fn batch_decryptor(
+pub(super) async fn batch_decryptor(
     params: Network,
     db_data: &mut DbConnection,
     decryptor: decryptor::Engine<AccountUuid, (AccountUuid, Scope)>,
