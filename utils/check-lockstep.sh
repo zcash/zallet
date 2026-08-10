@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verify wallet-critical dependency lockstep across the resolution graphs
-# (root, backends/zebra).
+# (root, backends/zebra, backends/zinder).
 #
 # The split-workspace design (issue #540) deliberately lets each backend
 # lockfile diverge on its own chain-source dependency tree (zebra-*) — that is
@@ -16,8 +16,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-LOCKFILES=(Cargo.lock backends/zebra/Cargo.lock)
-MANIFESTS=(Cargo.toml backends/zebra/Cargo.toml)
+LOCKFILES=(Cargo.lock backends/zebra/Cargo.lock backends/zinder/Cargo.lock)
+MANIFESTS=(Cargo.toml backends/zebra/Cargo.toml backends/zinder/Cargo.toml)
 
 # Packages whose versions must move in release lockstep.
 PACKAGES=(

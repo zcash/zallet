@@ -1,0 +1,50 @@
+[package]
+name = "zallet-zinder"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Zallet backend for the Zinder wallet runtime"
+repository = "https://github.com/zcash/zallet"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# This package is deliberately an independent workspace, matching Zallet's
+# backend dependency boundary. The sibling binary is available for source-built
+# certification; release packaging remains deferred.
+[workspace]
+
+[dependencies]
+zallet-core = { path = "../../zallet-core" }
+
+futures = "0.3"
+hex = "0.4"
+i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
+incrementalmerkletree = { version = "0.9", features = ["legacy-api"] }
+orchard = "0.16"
+sapling = { package = "sapling-crypto", version = "0.9" }
+serde_json = "1"
+tempfile = { version = "3", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing = "0.1"
+transparent = { package = "zcash_transparent", version = "0.11" }
+zcash_client_backend = "0.25"
+zcash_primitives = "0.31"
+zcash_protocol = "0.11"
+zcash_script = "0.6"
+zinder-client = "=0.10.0"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["time"] }
+toml = "0.8"
+zinder-core = { version = "=0.10.0", default-features = false }
+
+[features]
+default = []
+bounded-scan-certification = ["dep:tempfile", "zallet-core/bounded-scan-certification"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(tokio_unstable)',
+    'cfg(zallet_build, values("merchant_terminal", "wallet"))',
+    'cfg(zcash_unstable, values("nu7"))',
+] }

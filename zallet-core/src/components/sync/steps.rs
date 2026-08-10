@@ -26,10 +26,23 @@ use crate::{
 
 use super::{SyncError, WalletDecryptorHandle};
 
-pub(super) async fn update_subtree_roots<C: Chain>(
+#[cfg_attr(
+    not(feature = "bounded-scan-certification"),
+    allow(
+        dead_code,
+        reason = "subtree counts are observed only by the feature-gated certification seam"
+    )
+)]
+pub(in crate::components) struct SubtreeRootCounts {
+    pub(in crate::components) sapling: u64,
+    pub(in crate::components) orchard: u64,
+    pub(in crate::components) ironwood: u64,
+}
+
+pub(in crate::components) async fn update_subtree_roots<C: Chain>(
     chain: &C,
     db_data: &mut DbConnection,
-) -> Result<(), SyncError> {
+) -> Result<SubtreeRootCounts, SyncError> {
     // TODO: Query and insert only the subtree roots added since our last query (via the
     // `start_index` parameter of `get_*_subtree_roots`), instead of re-fetching and
     // re-inserting all historical roots on every call. Not urgent: the cost is small and
@@ -61,7 +74,11 @@ pub(super) async fn update_subtree_roots<C: Chain>(
     info!("Ironwood tree has {} subtrees", ironwood_roots.len());
     db_data.put_ironwood_subtree_roots(0, &ironwood_roots)?;
 
-    Ok(())
+    Ok(SubtreeRootCounts {
+        sapling: sapling_roots.len() as u64,
+        orchard: orchard_roots.len() as u64,
+        ironwood: ironwood_roots.len() as u64,
+    })
 }
 
 /// Maps the error type produced by [`full::scan_block`] into a [`SyncError`].
@@ -130,7 +147,7 @@ async fn collect_block_range<V: ChainView>(
 }
 
 /// Scans a contiguous sequence of blocks in the main chain.
-pub(super) async fn scan_blocks<V: ChainView>(
+pub(in crate::components) async fn scan_blocks<V: ChainView>(
     chain_view: V,
     db_data: &mut DbConnection,
     params: &Network,
