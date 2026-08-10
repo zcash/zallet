@@ -106,6 +106,9 @@ be considered breaking changes.
   pre-Sapling wallet that has no HD seed. The minted seed never existed in
   zcashd, so backups of `wallet.dat` do not cover it; the migration prints a
   warning to that effect.
+- Source builds can select `backend = "zinder"` and configure
+  `[zinder].wallet_query_endpoint` to run the native `zallet-zinder` sibling.
+  Release packaging remains unchanged.
 
 ### Changed
 
