@@ -39,5 +39,7 @@ user = "foobar"
 
 [sync]
 
+[zinder]
+
 """
 stderr = "..."
