@@ -12,7 +12,7 @@ use crate::components::{
         utils::{ensure_wallet_is_unlocked, parse_seedfp_parameter},
     },
     keystore::KeyStore,
-    sync::WalletDecryptorHandle,
+    sync::{WalletDecryptorHandle, WalletSyncWakeup},
 };
 
 /// Response to a `z_getnewaccount` RPC request.
@@ -39,6 +39,7 @@ pub(crate) async fn call<C: Chain>(
     keystore: &KeyStore,
     chain: C,
     decryptor: &WalletDecryptorHandle,
+    sync_wakeup: &WalletSyncWakeup,
     account_name: &str,
     seedfp: Option<&str>,
 ) -> Response {
@@ -108,6 +109,7 @@ pub(crate) async fn call<C: Chain>(
     if decryptor.reload_keys().await.is_none() {
         tracing::warn!("sync engine has shut down; new account won't be scanned until restart");
     }
+    sync_wakeup.wake();
 
     Ok(Account {
         account_uuid: account_id.expose_uuid().to_string(),

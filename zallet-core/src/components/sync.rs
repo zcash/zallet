@@ -92,7 +92,8 @@ pub(crate) type WalletDecryptorHandle = decryptor::Handle<AccountUuid, (AccountU
 /// Engine half of the batch decryptor, driven by the sync tasks spawned by [`WalletSync::spawn`].
 pub(crate) type WalletDecryptorEngine = decryptor::Engine<AccountUuid, (AccountUuid, Scope)>;
 
-/// Wakeup handle for sync work that is added after the sync tasks start.
+/// Wakeup handle for sync work that is added after the sync tasks start, such as account or key
+/// imports that create new scan ranges.
 #[derive(Clone)]
 pub(crate) struct WalletSyncWakeup {
     signal: Arc<Notify>,
@@ -509,6 +510,26 @@ fn select_recovery_scan_range(
                     .next()
             })
         })
+}
+
+/// Selects recovery work while preserving an explicit rescan request until all queued work up to
+/// the wallet tip has been consumed.
+fn next_recovery_scan_range(
+    suggested_ranges: &[ScanRange],
+    upper_boundary: BlockHeight,
+    wallet_tip: Option<BlockHeight>,
+    rescan_requested: &mut bool,
+) -> Option<ScanRange> {
+    let scan_range = select_recovery_scan_range(
+        suggested_ranges,
+        upper_boundary,
+        wallet_tip,
+        *rescan_requested,
+    );
+    if scan_range.is_none() {
+        *rescan_requested = false;
+    }
+    scan_range
 }
 
 /// How far back to step each time the wallet's recorded history is found to be off the
@@ -1170,15 +1191,12 @@ async fn recover_history<C: Chain>(
         } else {
             None
         };
-        let scan_range = select_recovery_scan_range(
+        let scan_range = next_recovery_scan_range(
             &suggested_ranges,
             upper_boundary,
             wallet_tip,
-            rescan_requested,
+            &mut rescan_requested,
         );
-        if scan_range.is_some() {
-            rescan_requested = false;
-        }
 
         let scan_range = match scan_range {
             Some(r) => r,
@@ -1512,9 +1530,9 @@ mod tests {
 
     use super::{
         ChainError, PendingWalletSyncTasks, SyncError, TREE_RECOVERY_LADDER, TreeRecovery,
-        WalletSync, is_retryable, is_tree_divergence, recover_history, resume_point, rewind_step,
-        select_initial_scan_range, select_recovery_scan_range, status, steady_state,
-        tree_recovery_target,
+        WalletSync, is_retryable, is_tree_divergence, next_recovery_scan_range, recover_history,
+        resume_point, rewind_step, select_initial_scan_range, select_recovery_scan_range, status,
+        steady_state, tree_recovery_target,
     };
     use crate::{
         components::{
@@ -1795,6 +1813,44 @@ mod tests {
             .end,
             node_tip + 1,
         );
+    }
+
+    #[test]
+    fn import_wakeup_remains_active_across_the_history_boundary() {
+        let wallet_tip = h(1_107);
+        let history_boundary = h(1_006);
+        let mut rescan_requested = true;
+
+        let history = next_recovery_scan_range(
+            &[range(1, 1_108, ScanPriority::Historic)],
+            history_boundary,
+            Some(wallet_tip),
+            &mut rescan_requested,
+        )
+        .expect("selects work below the history boundary first");
+        assert_eq!(history.block_range(), &(h(1)..h(1_006)));
+        assert!(rescan_requested);
+
+        let tip_region = next_recovery_scan_range(
+            &[range(1_006, 1_108, ScanPriority::Historic)],
+            history_boundary,
+            Some(wallet_tip),
+            &mut rescan_requested,
+        )
+        .expect("keeps selecting through the wallet tip");
+        assert_eq!(tip_region.block_range(), &(h(1_006)..h(1_108)));
+        assert!(rescan_requested);
+
+        assert!(
+            next_recovery_scan_range(
+                &[],
+                history_boundary,
+                Some(wallet_tip),
+                &mut rescan_requested,
+            )
+            .is_none()
+        );
+        assert!(!rescan_requested);
     }
 
     #[tokio::test(flavor = "multi_thread")]

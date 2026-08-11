@@ -1236,6 +1236,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             &self.keystore,
             self.chain().await?,
             &self.decryptor,
+            &self.sync_wakeup,
             account_name,
             seedfp,
         )
@@ -1251,6 +1252,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             &self.keystore,
             self.chain().await?,
             &self.decryptor,
+            &self.sync_wakeup,
             accounts,
         )
         .await

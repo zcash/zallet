@@ -86,8 +86,9 @@ be considered breaking changes.
 
 ### Fixed
 
-- `z_importviewingkey` now reloads the wallet's viewing keys and wakes historical synchronization
-  after a successful import, so a requested rescan starts without requiring a wallet restart.
+- `z_getnewaccount`, `z_recoveraccounts`, and `z_importviewingkey` now wake
+  synchronization after adding account keys, so newly created or recovered
+  accounts are scanned without requiring a wallet restart.
 
 - A note commitment tree conflict during sync no longer shuts the wallet down
   permanently. Zallet now rolls the wallet back to a progressively older point
