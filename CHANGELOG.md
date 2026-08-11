@@ -48,9 +48,9 @@ be considered breaking changes.
 - Fixed a race that could leave wallet data requests unprocessed. The sync task
   now signals data-request processing after new blocks are stored. It also
   signals after each mempool transaction is stored.
-- `z_importviewingkey` now reloads the wallet's viewing keys and wakes
-  historical synchronization after a successful import, so a requested rescan
-  starts without requiring a wallet restart.
+- `z_getnewaccount`, `z_recoveraccounts`, and `z_importviewingkey` now wake
+  synchronization after adding account keys, so newly created or recovered
+  accounts are scanned without requiring a wallet restart.
 
 ## [0.1.0-beta.3] - 2026-08-24
 
