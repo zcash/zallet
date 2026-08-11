@@ -837,7 +837,13 @@ pub(crate) use tests::MockChain;
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
+    use std::{
+        ops::Range,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use futures::{
         StreamExt as _,
@@ -1273,6 +1279,8 @@ mod tests {
         params: super::Network,
         upgrades: Vec<ReportedUpgrade>,
         tip: BlockHeight,
+        remaining_unavailable_snapshots: Arc<AtomicUsize>,
+        snapshot_attempts: Arc<AtomicUsize>,
     }
 
     impl MockChain {
@@ -1281,7 +1289,19 @@ mod tests {
                 params: super::Network::Consensus(Network::MainNetwork),
                 upgrades,
                 tip: BlockHeight::from_u32(tip),
+                remaining_unavailable_snapshots: Arc::new(AtomicUsize::new(0)),
+                snapshot_attempts: Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        pub(crate) fn with_unavailable_snapshots(self, attempts: usize) -> Self {
+            self.remaining_unavailable_snapshots
+                .store(attempts, Ordering::SeqCst);
+            self
+        }
+
+        pub(crate) fn snapshot_attempts(&self) -> usize {
+            self.snapshot_attempts.load(Ordering::SeqCst)
         }
     }
 
@@ -1327,6 +1347,19 @@ mod tests {
         }
 
         async fn snapshot(&self) -> Result<Self::View, ChainError> {
+            self.snapshot_attempts.fetch_add(1, Ordering::SeqCst);
+            if self
+                .remaining_unavailable_snapshots
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(ChainError::unavailable(
+                    "injected chain snapshot unavailability",
+                ));
+            }
+
             Ok(MockChainView {
                 tip: ChainBlock {
                     height: self.tip,

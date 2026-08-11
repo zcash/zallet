@@ -163,6 +163,9 @@ be considered breaking changes.
   `zallet` spinning at full CPU after a sibling task failure. A backend whose
   every view operation awaits real I/O is unaffected.
 
+- Steady-state sync retries temporarily unavailable fixed-view acquisition during
+  chain-tip transitions.
+
 - Wallet sync now loads a complete block range from one fixed-history view
   before queueing decryption or database work. If the view expires partway
   through the range, the partial batch is discarded and the entire range is
