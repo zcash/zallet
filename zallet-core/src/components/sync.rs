@@ -442,16 +442,20 @@ async fn initialize<C: Chain>(
     Ok((current_tip, starting_boundary))
 }
 
-/// How long to wait before re-pinning the chain view after a stale-view error, so a
-/// backend that is briefly unable to serve reads (still syncing its non-finalized state,
-/// or a reorg in progress) is not polled in a tight loop.
+/// How long to wait before re-pinning the chain view after a retryable chain error, so a
+/// backend that is briefly unable to serve reads or has expired a non-finalized view is not
+/// polled in a tight loop.
 const REORG_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
-/// Whether a sync error reflects a chain view that went stale mid-read — the captured
-/// snapshot referenced a non-finalized block that was reorged away — and so should be
-/// retried by re-pinning to the current tip, rather than propagated as fatal.
+/// Whether a sync error should be retried after re-pinning to the current tip, rather than
+/// propagated as fatal. `ViewExpired` is the precise fixed-view invalidation signal; the
+/// legacy `Unavailable` category remains retryable for backends that cannot classify the
+/// transient condition more precisely.
 fn is_retryable(error: &SyncError) -> bool {
-    matches!(error, SyncError::Chain(ChainError::Unavailable(_)))
+    matches!(
+        error,
+        SyncError::Chain(ChainError::Unavailable(_) | ChainError::ViewExpired(_))
+    )
 }
 
 /// How far back to step each time the wallet's recorded history is found to be off the
@@ -1159,6 +1163,13 @@ async fn recover_history<C: Chain>(
                 .await
                 {
                     Ok(outcome) => break outcome,
+                    Err(error) if is_retryable(&error) => {
+                        warn!(
+                            "History recovery chain view became unavailable; re-pinning before \
+                             retrying {scan_range}: {error}"
+                        );
+                        time::sleep(REORG_RETRY_BACKOFF).await;
+                    }
                     Err(error)
                         if is_tree_divergence(&error) && attempt < TREE_DIVERGENCE_RETRIES =>
                     {
@@ -1924,6 +1935,13 @@ mod tests {
     #[test]
     fn stale_view_errors_are_retryable() {
         assert!(is_retryable(&SyncError::Chain(ChainError::unavailable(
+            "pinned block reorged away",
+        ))));
+    }
+
+    #[test]
+    fn expired_view_errors_are_retryable() {
+        assert!(is_retryable(&SyncError::Chain(ChainError::view_expired(
             "pinned block reorged away",
         ))));
     }

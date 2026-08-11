@@ -358,6 +358,11 @@ be considered breaking changes.
   process’s, which cannot run concurrently with it in any case. The regtest
   account command is fixed the same way.
 
+- Wallet sync now loads a complete block range from one fixed-history view
+  before queueing decryption or database work. If the view expires partway
+  through the range, the partial batch is discarded and the entire range is
+  retried against a fresh view, including during history recovery.
+
 ## [0.1.0-beta.2] - 2026-07-28
 
 ### Added

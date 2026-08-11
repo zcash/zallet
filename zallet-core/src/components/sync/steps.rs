@@ -7,7 +7,8 @@ use jsonrpsee::tracing::info;
 use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
 use zcash_client_backend::{
     data_api::{
-        BlockMetadata, WalletCommitmentTrees, WalletRead, WalletWrite, scanning::ScanRange,
+        BlockMetadata, WalletCommitmentTrees, WalletRead, WalletWrite, chain::ChainState,
+        scanning::ScanRange,
     },
     scanning::{
         Nullifiers,
@@ -120,6 +121,33 @@ fn clamp_to_boundary(
     }
 }
 
+/// Loads a predecessor tree state and a complete contiguous block range from one chain
+/// view.
+///
+/// The returned batch is all-or-nothing. If the view expires while its block stream is
+/// in flight, the partial vector is dropped with the error before any block is queued for
+/// decryption or written to the wallet database.
+async fn collect_block_range<V: ChainView>(
+    chain_view: &V,
+    range: &Range<BlockHeight>,
+) -> Result<Option<(ChainState, Vec<Block>)>, SyncError> {
+    let Some(from_state) = chain_view
+        .tree_state_as_of(range.start - 1)
+        .await
+        .map_err(SyncError::Chain)?
+    else {
+        return Ok(None);
+    };
+
+    let blocks = chain_view
+        .stream_blocks(range)
+        .try_collect()
+        .await
+        .map_err(SyncError::Chain)?;
+
+    Ok(Some((from_state, blocks)))
+}
+
 /// Scans a contiguous sequence of blocks in the main chain.
 pub(super) async fn scan_blocks<V: ChainView>(
     chain_view: V,
@@ -145,20 +173,16 @@ pub(super) async fn scan_blocks<V: ChainView>(
         scan_range
     };
 
-    // Ignore scan ranges beyond the end of the current chain tip (which indicates a race
-    // with a chain reorg).
-    if let Some(from_state) = chain_view
-        .tree_state_as_of(scan_range.block_range().start - 1)
-        .await
-        .map_err(SyncError::Chain)?
+    // Load the whole fixed-view batch before beginning decryption or database work. An
+    // expired view therefore discards every block collected from that view.
+    if let Some((from_state, blocks_to_apply)) =
+        collect_block_range(&chain_view, scan_range.block_range()).await?
     {
         info!("Scanning blocks {}", scan_range);
-        let blocks_to_apply = chain_view.stream_blocks(scan_range.block_range());
-        tokio::pin!(blocks_to_apply);
 
         // Queue the blocks for batch decryption.
         let mut batch = Vec::with_capacity(scan_range.len());
-        while let Some(block) = blocks_to_apply.try_next().await.map_err(SyncError::Chain)? {
+        for block in blocks_to_apply {
             let height = block.claimed_height();
             let result = decryptor
                 .queue_block(block)

@@ -57,9 +57,12 @@ should be considered breaking changes.
   `WalletWrite::import_standalone_transparent_address`
   (zcash/librustzcash#2941); a backend workspace must carry the same patch
   so the cohort resolves to a single source.
+- Chain backends can now report `ChainError::ViewExpired` when a fixed-history
+  view has been invalidated. Wallet sync reacquires a view only for this
+  precise condition instead of conflating it with general source
+  unavailability.
 
 ### Removed
-
 - `config::KeyStoreSection::require_backup`, the accessor that resolved the
   option's default. The default now depends on `consensus.network` (it is off on
   regtest), which a section cannot see, so resolving it moved to a crate-internal
