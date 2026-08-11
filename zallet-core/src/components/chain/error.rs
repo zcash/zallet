@@ -18,6 +18,10 @@ pub enum ChainError {
     /// Zaino backend currently classifies all opaque failures as [`ChainError::Backend`].
     #[allow(dead_code)]
     Unavailable(BoxError),
+    /// The fixed chain view was invalidated while serving a read, usually because a
+    /// non-finalized block was reorged away. The caller must capture a fresh view before
+    /// retrying the operation.
+    ViewExpired(BoxError),
     /// The chain source returned data that could not be decoded, or that violated an
     /// invariant the wallet relies on (a non-canonical encoding, an unexpected response
     /// shape). Not retryable; indicates a bug, corruption, or a version mismatch.
@@ -39,6 +43,11 @@ impl ChainError {
         ChainError::Unavailable(source.into())
     }
 
+    /// Wraps an arbitrary error as a [`ChainError::ViewExpired`].
+    pub fn view_expired(source: impl Into<BoxError>) -> Self {
+        ChainError::ViewExpired(source.into())
+    }
+
     /// Wraps an arbitrary error as a [`ChainError::InvalidData`].
     #[allow(dead_code)] // unused by whichever backend is not compiled
     pub fn invalid_data(source: impl Into<BoxError>) -> Self {
@@ -50,6 +59,7 @@ impl fmt::Display for ChainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ChainError::Unavailable(e) => write!(f, "chain source unavailable: {e}"),
+            ChainError::ViewExpired(e) => write!(f, "chain view expired: {e}"),
             ChainError::InvalidData(e) => write!(f, "chain source returned invalid data: {e}"),
             ChainError::Backend(e) => write!(f, "chain backend error: {e}"),
         }
@@ -59,9 +69,10 @@ impl fmt::Display for ChainError {
 impl std::error::Error for ChainError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            ChainError::Unavailable(e) | ChainError::InvalidData(e) | ChainError::Backend(e) => {
-                Some(e.as_ref())
-            }
+            ChainError::Unavailable(e)
+            | ChainError::ViewExpired(e)
+            | ChainError::InvalidData(e)
+            | ChainError::Backend(e) => Some(e.as_ref()),
         }
     }
 }

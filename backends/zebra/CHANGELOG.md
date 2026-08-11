@@ -47,6 +47,9 @@ should be considered breaking changes.
   wallet. Reads below a pool's activation height, where an absent tree genuinely
   means the empty tree, are unaffected.
 
+- Wallet scans now discard and reacquire a fixed chain view when a pinned block,
+  Sapling tree, Orchard tree, or Ironwood tree has reorged away.
+
 ## [0.1.0-beta.2] - 2026-07-28
 
 ### Changed
