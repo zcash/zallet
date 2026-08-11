@@ -635,9 +635,14 @@ pub trait ChainView: Clone + Send + Sync + 'static {
     /// Streams the current mempool. The stream ends when this view's tip changes.
     ///
     /// Returns `None` if the tip has already changed since the view was captured.
+    /// Errors encountered while acquiring the stream are returned by the outer result;
+    /// errors encountered while consuming it are yielded as stream items. A cleanly
+    /// completed stream is the signal that the view's tip changed.
     fn get_mempool_stream(
         &self,
-    ) -> impl Future<Output = Result<Option<BoxStream<'_, Transaction>>, ChainError>> + Send;
+    ) -> impl Future<
+        Output = Result<Option<BoxStream<'_, Result<Transaction, ChainError>>>, ChainError>,
+    > + Send;
 
     /// Returns the transaction with the given txid, if known.
     fn get_transaction(
@@ -926,7 +931,7 @@ mod tests {
 
         async fn get_mempool_stream(
             &self,
-        ) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+        ) -> Result<Option<BoxStream<'_, Result<Transaction, ChainError>>>, ChainError> {
             Ok(None)
         }
 

@@ -38,7 +38,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use futures::{StreamExt as _, TryStreamExt as _};
+use futures::TryStreamExt as _;
 use jsonrpsee::tracing::{self, debug, info, warn};
 #[cfg(not(feature = "spend-index"))]
 use std::collections::HashSet;
@@ -1048,7 +1048,7 @@ async fn steady_state_iteration<C: Chain>(
         Some(mempool_stream) => {
             info!("Reached chain tip, streaming mempool");
             tokio::pin!(mempool_stream);
-            while let Some(tx) = mempool_stream.next().await {
+            while let Some(tx) = mempool_stream.try_next().await.map_err(SyncError::Chain)? {
                 info!("Scanning mempool tx {}", tx.txid());
                 // TODO: Route individual-transaction scanning through the batch
                 // decryptor (`Handle::queue_tx`) once a single-tx store path exists.
@@ -2097,7 +2097,7 @@ mod fork_fallback_tests {
 
         async fn get_mempool_stream(
             &self,
-        ) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+        ) -> Result<Option<BoxStream<'_, Result<Transaction, ChainError>>>, ChainError> {
             Ok(None)
         }
 
