@@ -928,6 +928,8 @@ mod tests {
         tip: ChainBlock,
         /// See [`MockChain::before_tree_state`].
         before_tree_state: Option<TreeStateHook>,
+        #[cfg(not(feature = "spend-index"))]
+        missing_address_history_transaction: Option<TxId>,
     }
 
     /// A test hook [`MockChainView::tree_state_as_of`] awaits before answering.
@@ -1026,7 +1028,10 @@ mod tests {
             _address: &TransparentAddress,
             _range: Range<BlockHeight>,
         ) -> Result<Vec<TxId>, ChainError> {
-            Ok(Vec::new())
+            Ok(self
+                .missing_address_history_transaction
+                .into_iter()
+                .collect())
         }
 
         #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
@@ -1044,6 +1049,8 @@ mod tests {
         let view = MockChainView {
             tip,
             before_tree_state: None,
+            #[cfg(not(feature = "spend-index"))]
+            missing_address_history_transaction: None,
         };
         assert_eq!(view.tip().await.unwrap(), tip);
         // The fork point resolves when the locator includes the view's own tip, and
@@ -1451,6 +1458,8 @@ mod tests {
         /// snapshots see while an earlier snapshot keeps the tip it was taken at.
         tip: Arc<AtomicU32>,
         before_tree_state: Option<TreeStateHook>,
+        #[cfg(not(feature = "spend-index"))]
+        missing_address_history_transaction: Option<TxId>,
     }
 
     impl MockChain {
@@ -1460,6 +1469,8 @@ mod tests {
                 upgrades,
                 tip: Arc::new(AtomicU32::new(tip)),
                 before_tree_state: None,
+                #[cfg(not(feature = "spend-index"))]
+                missing_address_history_transaction: None,
             }
         }
 
@@ -1472,6 +1483,15 @@ mod tests {
         /// Moves the tip that later snapshots see; existing snapshots are unaffected.
         pub(crate) fn set_tip(&self, tip: u32) {
             self.tip.store(tip, Ordering::SeqCst);
+        }
+
+        #[cfg(not(feature = "spend-index"))]
+        pub(crate) fn with_missing_address_history_transaction(
+            mut self,
+            transaction_id: TxId,
+        ) -> Self {
+            self.missing_address_history_transaction = Some(transaction_id);
+            self
         }
     }
 
@@ -1523,6 +1543,8 @@ mod tests {
                     hash: BlockHash([0u8; 32]),
                 },
                 before_tree_state: self.before_tree_state.clone(),
+                #[cfg(not(feature = "spend-index"))]
+                missing_address_history_transaction: self.missing_address_history_transaction,
             })
         }
     }
