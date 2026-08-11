@@ -446,15 +446,10 @@ async fn initialize<C: Chain>(
 /// polled in a tight loop.
 const REORG_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
-/// Whether a sync error should be retried after re-pinning to the current tip, rather than
-/// propagated as fatal. `ViewExpired` is the precise fixed-view invalidation signal; the
-/// legacy `Unavailable` category remains retryable for backends that cannot classify the
-/// transient condition more precisely.
+/// Whether a sync error proves that the current fixed-history view expired and should be
+/// retried after re-pinning to the current tip, rather than propagated as fatal.
 fn is_retryable(error: &SyncError) -> bool {
-    matches!(
-        error,
-        SyncError::Chain(ChainError::Unavailable(_) | ChainError::ViewExpired(_))
-    )
+    matches!(error, SyncError::Chain(ChainError::ViewExpired(_)))
 }
 
 /// How far back to step each time the wallet's recorded history is found to be off the
@@ -931,7 +926,16 @@ async fn steady_state_iteration<C: Chain>(
     shutdown_height: Option<BlockHeight>,
     status: &SyncStatusWriter,
 ) -> Result<ControlFlow<BlockHeight>, SyncError> {
-    let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
+    let chain_view = loop {
+        match chain.snapshot().await {
+            Ok(chain_view) => break chain_view,
+            Err(error @ ChainError::Unavailable(_)) => {
+                warn!("Chain source unavailable while capturing a fixed view; retrying: {error}");
+                time::sleep(REORG_RETRY_BACKOFF).await;
+            }
+            Err(error) => return Err(SyncError::Chain(error)),
+        }
+    };
     let current_tip = chain_view.tip().await.map_err(SyncError::Chain)?;
     let tip_changed = current_tip != *prev_tip;
 
@@ -1433,7 +1437,10 @@ async fn batch_decryptor(
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Duration};
+    use std::{
+        sync::{Arc, atomic::AtomicU32, mpsc},
+        time::Duration,
+    };
 
     use super::{
         ChainError, PendingWalletSyncTasks, SyncError, TREE_RECOVERY_LADDER, TreeRecovery,
@@ -1774,8 +1781,8 @@ mod tests {
         // loop never updates `prev_tip`, leaving `tip_changed` true on every
         // subsequent iteration as well.
         let prev_tip = ChainBlock::new(BlockHeight::from_u32(0), BlockHash([0xff; 32]));
-        let lower_boundary = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let tip_change_signal = std::sync::Arc::new(Notify::new());
+        let lower_boundary = Arc::new(AtomicU32::new(0));
+        let tip_change_signal = Arc::new(Notify::new());
 
         let steady_state_task = tokio::spawn(async move {
             steady_state(
@@ -1925,9 +1932,9 @@ mod tests {
     }
 
     #[test]
-    fn stale_view_errors_are_retryable() {
-        assert!(is_retryable(&SyncError::Chain(ChainError::unavailable(
-            "pinned block reorged away",
+    fn unavailable_errors_are_fatal_after_snapshot_capture() {
+        assert!(!is_retryable(&SyncError::Chain(ChainError::unavailable(
+            "backend stopped serving the captured view",
         ))));
     }
 
@@ -1936,6 +1943,46 @@ mod tests {
         assert!(is_retryable(&SyncError::Chain(ChainError::view_expired(
             "pinned block reorged away",
         ))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn steady_state_retries_unavailable_snapshot_capture() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let mut wallet = database.handle().await.expect("opens wallet database");
+        let tip = h(0);
+        let chain = MockChain::reporting(Vec::new(), u32::from(tip)).with_unavailable_snapshots(1);
+        let (decryptor, decryptor_engine) = WalletSync::build_decryptor();
+        drop(decryptor_engine);
+        let params = config.consensus.network();
+        let (status, _status_reader) = status::channel(config.sync.lock_threshold());
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            steady_state(
+                chain.clone(),
+                &params,
+                wallet.as_mut(),
+                ChainBlock::new(tip, BlockHash([0; 32])),
+                Arc::new(AtomicU32::new(0)),
+                Arc::new(Notify::new()),
+                decryptor,
+                Some(tip),
+                status,
+            ),
+        )
+        .await
+        .expect("snapshot retry remains bounded")
+        .expect("steady state retries a temporarily unavailable snapshot");
+
+        assert_eq!(chain.snapshot_attempts(), 2);
     }
 
     #[test]
