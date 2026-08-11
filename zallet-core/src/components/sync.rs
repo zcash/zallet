@@ -92,6 +92,28 @@ pub(crate) type WalletDecryptorHandle = decryptor::Handle<AccountUuid, (AccountU
 /// Engine half of the batch decryptor, driven by the sync tasks spawned by [`WalletSync::spawn`].
 pub(crate) type WalletDecryptorEngine = decryptor::Engine<AccountUuid, (AccountUuid, Scope)>;
 
+/// Wakeup handle for sync work that is added after the sync tasks start.
+#[derive(Clone)]
+pub(crate) struct WalletSyncWakeup {
+    signal: Arc<Notify>,
+}
+
+impl WalletSyncWakeup {
+    pub(crate) fn new() -> Self {
+        Self {
+            signal: Arc::new(Notify::new()),
+        }
+    }
+
+    pub(crate) fn wake(&self) {
+        self.signal.notify_one();
+    }
+
+    pub(crate) async fn notified(&self) {
+        self.signal.notified().await;
+    }
+}
+
 /// Owns cancellation for wallet-sync tasks until the complete task set is returned.
 struct PendingWalletSyncTasks {
     abort_handles: Vec<AbortHandle>,
@@ -130,10 +152,16 @@ impl WalletSync {
         decryptor::new().build()
     }
 
+    /// Builds the wakeup handle shared by the RPC layer and history-recovery task.
+    pub(crate) fn build_wakeup() -> WalletSyncWakeup {
+        WalletSyncWakeup::new()
+    }
+
     /// Initializes wallet sync and returns its complete task set.
     ///
     /// On success, the caller owns cancellation for every returned task and must register
     /// that ownership before its next cancellable await.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn spawn<C: Chain>(
         config: &ZalletConfig,
         db: Database,
@@ -141,6 +169,7 @@ impl WalletSync {
         shutdown_height: Option<BlockHeight>,
         decryptor: WalletDecryptorHandle,
         decryptor_engine: WalletDecryptorEngine,
+        sync_wakeup: WalletSyncWakeup,
         status: SyncStatusWriter,
     ) -> Result<(TaskHandle, TaskHandle, TaskHandle, TaskHandle), Error> {
         let params = config.consensus.network();
@@ -216,6 +245,7 @@ impl WalletSync {
                     decryptor,
                     recover_batch_size,
                     shutdown_height,
+                    sync_wakeup,
                     status,
                 )
                 .await?;
@@ -456,6 +486,30 @@ fn is_retryable(error: &SyncError) -> bool {
         error,
         SyncError::Chain(ChainError::Unavailable(_) | ChainError::ViewExpired(_))
     )
+}
+
+/// Selects the next history range, extending the normal boundary only for an explicit rescan
+/// wake. A newly imported account can queue work above the history boundary when the chain tip
+/// is still inside the steady-state window.
+fn select_recovery_scan_range(
+    suggested_ranges: &[ScanRange],
+    upper_boundary: BlockHeight,
+    wallet_tip: Option<BlockHeight>,
+    rescan_requested: bool,
+) -> Option<ScanRange> {
+    suggested_ranges
+        .iter()
+        .filter_map(|r| r.truncate_end(upper_boundary))
+        .next()
+        .or_else(|| {
+            rescan_requested.then_some(())?;
+            wallet_tip.and_then(|wallet_tip| {
+                suggested_ranges
+                    .iter()
+                    .filter_map(|r| r.truncate_end(wallet_tip + 1))
+                    .next()
+            })
+        })
 }
 
 /// How far back to step each time the wallet's recorded history is found to be off the
@@ -1100,6 +1154,7 @@ async fn recover_history<C: Chain>(
     decryptor: WalletDecryptorHandle,
     batch_size: u32,
     shutdown_height: Option<BlockHeight>,
+    sync_wakeup: WalletSyncWakeup,
     status: SyncStatusWriter,
 ) -> Result<(), SyncError> {
     info!("History recovery sync task started");
@@ -1109,22 +1164,39 @@ async fn recover_history<C: Chain>(
     // The first tick completes immediately. We want to use it for a conditional delay, so
     // get that out of the way.
     interval.tick().await;
+    let mut rescan_requested = false;
 
     loop {
         // Get the next suggested scan range. We drop the rest because we re-fetch the
         // entire list regularly.
         let upper_boundary = BlockHeight::from_u32(upper_boundary.load(Ordering::Acquire));
-        let scan_range = match db_data
-            .suggest_scan_ranges()?
-            .into_iter()
-            .filter_map(|r| r.truncate_end(upper_boundary))
-            .next()
-        {
+        let suggested_ranges = db_data.suggest_scan_ranges()?;
+        let wallet_tip = if rescan_requested {
+            db_data.chain_height()?
+        } else {
+            None
+        };
+        let scan_range = select_recovery_scan_range(
+            &suggested_ranges,
+            upper_boundary,
+            wallet_tip,
+            rescan_requested,
+        );
+        if scan_range.is_some() {
+            rescan_requested = false;
+        }
+
+        let scan_range = match scan_range {
             Some(r) => r,
             None => {
                 // Wait for scan ranges to become available.
-                debug!("No scan ranges, sleeping");
-                interval.tick().await;
+                debug!("No scan ranges, waiting for sync work");
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = sync_wakeup.notified() => {
+                        rescan_requested = true;
+                    }
+                }
                 continue;
             }
         };
@@ -1441,12 +1513,16 @@ pub(super) async fn batch_decryptor(
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Duration};
+    use std::{
+        sync::{Arc, Mutex, mpsc},
+        time::Duration,
+    };
 
     use super::{
         ChainError, PendingWalletSyncTasks, SyncError, TREE_RECOVERY_LADDER, TreeRecovery,
-        WalletSync, is_retryable, is_tree_divergence, resume_point, rewind_step,
-        select_initial_scan_range, status, steady_state, tree_recovery_target,
+        WalletSync, is_retryable, is_tree_divergence, recover_history, resume_point, rewind_step,
+        select_initial_scan_range, select_recovery_scan_range, status, steady_state,
+        tree_recovery_target,
     };
     use crate::{
         components::{
@@ -1454,14 +1530,22 @@ mod tests {
             chain::{ChainBlock, MockChain},
             database::Database,
         },
-        config::ZalletConfig,
+        config::{ConsensusSection, ZalletConfig},
         error::{Error, ErrorKind},
     };
     use shardtree::error::{QueryError, ShardTreeError};
     use tokio::sync::Notify;
-    use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
+    use zcash_client_backend::data_api::{
+        AccountBirthday, AccountPurpose, WalletRead, WalletWrite,
+        chain::ChainState,
+        scanning::{ScanPriority, ScanRange},
+    };
+    use zcash_keys::keys::UnifiedFullViewingKey;
     use zcash_primitives::block::BlockHash;
-    use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
+    use zcash_protocol::{
+        ShieldedPool,
+        consensus::{BlockHeight, NetworkType},
+    };
 
     struct TaskCancellationProbe(mpsc::Sender<()>);
 
@@ -1639,6 +1723,211 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn import_wakeup_scans_range_above_history_boundary_from_wallet_tip() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            consensus: ConsensusSection {
+                network: NetworkType::Regtest,
+                regtest_nuparams: vec![
+                    "e9ff75a6:1"
+                        .to_string()
+                        .try_into()
+                        .expect("valid NU6.3 parameter"),
+                    "37a5165b:2"
+                        .to_string()
+                        .try_into()
+                        .expect("valid NU5 parameter"),
+                ],
+            },
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates a wallet database");
+        let mut db_data = database.handle().await.expect("opens the wallet database");
+        let node_tip = h(27);
+
+        // This is the state initialize() publishes before it has any account-specific
+        // block metadata: chain_height() is available, while wallet_tip metadata is not.
+        db_data
+            .update_chain_tip(node_tip)
+            .expect("records the initialized chain tip");
+        assert_eq!(
+            db_data.chain_height().expect("reads chain height"),
+            Some(node_tip)
+        );
+        assert!(
+            db_data
+                .block_metadata(node_tip)
+                .expect("reads tip metadata")
+                .is_none()
+        );
+
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        #[allow(deprecated)]
+        let extfvk = extsk.to_extended_full_viewing_key();
+        let ufvk = UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
+            .expect("builds a unified full viewing key");
+        let birthday =
+            AccountBirthday::from_parts(ChainState::empty(h(0), BlockHash([0; 32])), None);
+        db_data
+            .import_account_ufvk(
+                "imported test account",
+                &ufvk,
+                &birthday,
+                AccountPurpose::ViewOnly,
+                None,
+            )
+            .expect("queues the imported account rescan");
+
+        let suggested_ranges = db_data
+            .suggest_scan_ranges()
+            .expect("reads the imported account scan queue");
+        assert!(
+            suggested_ranges
+                .iter()
+                .any(|range| range.block_range().end > h(0))
+        );
+        assert_eq!(
+            select_recovery_scan_range(
+                &suggested_ranges,
+                h(0),
+                db_data.chain_height().expect("reads initialized chain tip"),
+                true,
+            )
+            .expect("import wake selects the queued range")
+            .block_range()
+            .end,
+            node_tip + 1,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_wakeup_drives_recover_history_scan_above_boundary() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            consensus: ConsensusSection {
+                network: NetworkType::Regtest,
+                regtest_nuparams: vec![
+                    "e9ff75a6:1"
+                        .to_string()
+                        .try_into()
+                        .expect("valid NU6.3 parameter"),
+                    "37a5165b:2"
+                        .to_string()
+                        .try_into()
+                        .expect("valid NU5 parameter"),
+                ],
+            },
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates a wallet database");
+        let mut db_data = database.handle().await.expect("opens the wallet database");
+        let node_tip = h(27);
+        db_data
+            .update_chain_tip(node_tip)
+            .expect("records the initialized chain tip");
+        assert_eq!(
+            db_data.chain_height().expect("reads chain height"),
+            Some(node_tip)
+        );
+        assert!(
+            db_data
+                .block_metadata(node_tip)
+                .expect("reads tip metadata")
+                .is_none()
+        );
+
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        #[allow(deprecated)]
+        let extfvk = extsk.to_extended_full_viewing_key();
+        let ufvk = UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
+            .expect("builds a unified full viewing key");
+        let birthday =
+            AccountBirthday::from_parts(ChainState::empty(h(0), BlockHash([0; 32])), None);
+        db_data
+            .import_account_ufvk(
+                "imported test account",
+                &ufvk,
+                &birthday,
+                AccountPurpose::ViewOnly,
+                None,
+            )
+            .expect("queues the imported account rescan");
+
+        let scan_ranges = Arc::new(Mutex::new(Vec::new()));
+        let chain = MockChain::reporting_with_scan_observer(
+            Vec::new(),
+            node_tip.into(),
+            scan_ranges.clone(),
+        );
+        let (decryptor, decryptor_engine) = WalletSync::build_decryptor();
+        drop(decryptor_engine);
+        let sync_wakeup = WalletSync::build_wakeup();
+        let recovery_wakeup = sync_wakeup.clone();
+        let upper_boundary = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let data_request_signal = Arc::new(Notify::new());
+        let params = config.consensus.network();
+        let batch_size = config.sync.recover_batch_size();
+        let (status, _status_reader) = status::channel(config.sync.lock_threshold());
+        let recovery_task = tokio::spawn(async move {
+            recover_history(
+                chain,
+                &params,
+                db_data.as_mut(),
+                upper_boundary,
+                data_request_signal,
+                decryptor,
+                batch_size,
+                None,
+                recovery_wakeup,
+                status,
+            )
+            .await
+        });
+
+        // The recovery task has no ordinary range below boundary 0. The import wake must set
+        // the rescan path, which reads chain_height() and consumes the queued range through the
+        // actual recover_history loop rather than merely notifying a receiver.
+        tokio::task::yield_now().await;
+        sync_wakeup.wake();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !scan_ranges
+                    .lock()
+                    .expect("scan range observations are not poisoned")
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("import wake drives recover_history to consume the queued range");
+
+        recovery_task.abort();
+        recovery_task
+            .await
+            .expect_err("test stops recover_history after observing its scan");
+        assert_eq!(
+            scan_ranges
+                .lock()
+                .expect("scan range observations are not poisoned")
+                .first(),
+            Some(&(h(1)..h(28)))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn late_wallet_sync_error_cancels_all_earlier_tasks() {
         let (batch_cancelled, batch_cancelled_receiver) = mpsc::channel();
         let batch_task = observed_pending_task(batch_cancelled).await;
@@ -1709,6 +1998,7 @@ mod tests {
             .await
             .expect("creates a wallet database");
         let (decryptor, decryptor_engine) = WalletSync::build_decryptor();
+        let sync_wakeup = WalletSync::build_wakeup();
         let decryptor_observer = decryptor.clone();
         let (status, _status_reader) = status::channel(config.sync.lock_threshold());
 
@@ -1719,6 +2009,7 @@ mod tests {
             None,
             decryptor,
             decryptor_engine,
+            sync_wakeup,
             status,
         )
         .await;
@@ -1782,8 +2073,8 @@ mod tests {
         // loop never updates `prev_tip`, leaving `tip_changed` true on every
         // subsequent iteration as well.
         let prev_tip = ChainBlock::new(BlockHeight::from_u32(0), BlockHash([0xff; 32]));
-        let lower_boundary = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let data_request_signal = std::sync::Arc::new(Notify::new());
+        let lower_boundary = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let data_request_signal = Arc::new(Notify::new());
 
         let steady_state_task = tokio::spawn(async move {
             steady_state(

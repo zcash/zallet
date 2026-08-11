@@ -23,6 +23,7 @@ use {
     super::asyncop::{OperationId, OperationQueue},
     crate::components::{
         json_rpc::payments::AmountParameter, keystore::KeyStore, sync::WalletDecryptorHandle,
+        sync::WalletSyncWakeup,
     },
 };
 
@@ -1042,6 +1043,7 @@ pub(crate) struct WalletRpcImpl<C: Chain> {
     general: RpcImpl<C>,
     keystore: KeyStore,
     decryptor: WalletDecryptorHandle,
+    sync_wakeup: WalletSyncWakeup,
     async_ops: OperationQueue,
 }
 
@@ -1053,6 +1055,7 @@ impl<C: Chain> WalletRpcImpl<C> {
         keystore: KeyStore,
         chain_view: C,
         decryptor: WalletDecryptorHandle,
+        sync_wakeup: WalletSyncWakeup,
         sync_status: SyncStatusReader,
         async_operation_limit: usize,
     ) -> Self {
@@ -1060,6 +1063,7 @@ impl<C: Chain> WalletRpcImpl<C> {
             general: RpcImpl::new(wallet, keystore.clone(), chain_view, sync_status),
             keystore,
             decryptor,
+            sync_wakeup,
             async_ops: OperationQueue::new(async_operation_limit),
         }
     }
@@ -1327,6 +1331,8 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         import_viewing_key::call(
             self.wallet().await?.as_mut(),
             self.chain().await?,
+            &self.decryptor,
+            &self.sync_wakeup,
             vkey,
             rescan,
             start_height,
