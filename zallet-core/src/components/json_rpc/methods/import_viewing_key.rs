@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use schemars::JsonSchema;
@@ -11,8 +13,9 @@ use zcash_protocol::consensus::{BlockHeight, NetworkConstants};
 
 use crate::components::{
     chain::Chain,
-    database::DbConnection,
+    database::DbHandle,
     json_rpc::{server::LegacyCode, utils::fetch_account_birthday},
+    sync::WalletSyncReconfiguration,
 };
 
 /// Response to a `z_importviewingkey` RPC request.
@@ -78,12 +81,19 @@ fn decode_vkey_and_address(
 }
 
 pub(crate) async fn call<C: Chain>(
-    wallet: &mut DbConnection,
+    mut wallet: DbHandle,
     chain: C,
+    reconfiguration: &WalletSyncReconfiguration,
     vkey: &str,
     rescan: Option<&str>,
     start_height: Option<u64>,
 ) -> Response {
+    enum ViewingKeyImportEffect {
+        KeyImported,
+        RescanScheduled,
+        Unchanged,
+    }
+
     let rescan = RescanPolicy::parse(rescan)?;
 
     // Parse start_height if provided, keeping it as Option so we can
@@ -119,18 +129,25 @@ pub(crate) async fn call<C: Chain>(
     let existing_account = wallet
         .get_account_for_ufvk(&ufvk)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
-    match existing_account {
+    let birthday = match existing_account {
         Some(account) => {
             if matches!(account.purpose(), AccountPurpose::Spending { .. }) {
                 return Err(LegacyCode::Wallet.with_message(format!(
                     "The wallet already contains the private key for this viewing key (address: {address})",
                 )));
             }
-            // ViewOnly — key already exists, return result.
-            //
-            // TODO: When rescan is "yes" and the key already exists, zcashd would force a
-            // rescan from start_height. We could use `WalletWrite::rewind_to_chain_state`
-            // for this (see `z_import_address` for an example).
+            match rescan {
+                RescanPolicy::Yes => {
+                    fetch_account_birthday(&chain, start_height.unwrap_or(BlockHeight::from_u32(0)))
+                        .await?
+                }
+                RescanPolicy::No | RescanPolicy::WhenKeyIsNew => {
+                    return Ok(ResultType {
+                        address_type: "sapling".to_string(),
+                        address,
+                    });
+                }
+            }
         }
         None => {
             // new key
@@ -143,8 +160,34 @@ pub(crate) async fn call<C: Chain>(
                 }
             };
 
-            let birthday = fetch_account_birthday(&chain, effective_height).await?;
+            fetch_account_birthday(&chain, effective_height).await?
+        }
+    };
 
+    let admitted = reconfiguration.admit_reconfiguration().await;
+    let existing_account = wallet
+        .get_account_for_ufvk(&ufvk)
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+    let effect = match existing_account {
+        Some(account) => {
+            if matches!(account.purpose(), AccountPurpose::Spending { .. }) {
+                return Err(LegacyCode::Wallet.with_message(format!(
+                    "The wallet already contains the private key for this viewing key (address: {address})",
+                )));
+            }
+            if rescan == RescanPolicy::Yes {
+                wallet
+                    .rewind_to_chain_state(
+                        birthday.prior_chain_state().clone(),
+                        HashSet::from([account.id()]),
+                    )
+                    .map_err(|e| LegacyCode::Misc.with_message(format!("Rescan failed: {e}")))?;
+                ViewingKeyImportEffect::RescanScheduled
+            } else {
+                ViewingKeyImportEffect::Unchanged
+            }
+        }
+        None => {
             wallet
                 .import_account_ufvk(
                     &format!("Imported Sapling viewing key {address}"),
@@ -154,7 +197,21 @@ pub(crate) async fn call<C: Chain>(
                     None,
                 )
                 .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+            ViewingKeyImportEffect::KeyImported
         }
+    };
+    drop(wallet);
+
+    match effect {
+        ViewingKeyImportEffect::RescanScheduled => admitted.wake_wallet_recovery(),
+        ViewingKeyImportEffect::KeyImported => {
+            if !admitted.reload_keys_and_wake_wallet_recovery().await {
+                tracing::warn!(
+                    "sync engine has shut down; imported viewing key won't be scanned until restart"
+                );
+            }
+        }
+        ViewingKeyImportEffect::Unchanged => {}
     }
 
     Ok(ResultType {
@@ -165,13 +222,379 @@ pub(crate) async fn call<C: Chain>(
 
 #[cfg(test)]
 mod tests {
+    use std::{ops::Range, sync::Arc, time::Duration};
+
     use super::*;
+    use crate::{
+        components::{
+            chain::{
+                BlockLocator, Chain, ChainBlock, ChainError, ChainTx, ChainView, MockChain,
+                ReportedUpgrade,
+            },
+            database::Database,
+            sync::{WalletSync, WalletSyncReconfiguration, status},
+        },
+        config::ZalletConfig,
+        error::Error,
+        network::Network,
+    };
+    use futures::{
+        StreamExt as _,
+        stream::{self, BoxStream},
+    };
+    #[cfg(not(feature = "spend-index"))]
+    use transparent::address::TransparentAddress;
+    #[cfg(feature = "spend-index")]
+    use transparent::bundle::OutPoint;
+    use transparent::{
+        builder::Coinbase,
+        bundle::{Bundle, TxIn},
+    };
+    use zcash_client_backend::data_api::{
+        AccountBirthday, ScannedBlock, TransactionStatus, WalletRead, WalletWrite,
+        chain::{ChainState, CommitmentTreeRoot},
+        scanning::{ScanPriority, ScanRange},
+    };
+    use zcash_client_backend::{
+        proto::compact_formats::{ChainMetadata, CompactBlock},
+        scanning::{Nullifiers, ScanningKeys, scan_block},
+    };
+    use zcash_client_sqlite::AccountUuid;
+    use zcash_encoding::CompactSize;
     use zcash_keys::encoding::encode_extended_full_viewing_key;
-    use zcash_protocol::constants;
+    use zcash_primitives::{
+        block::{Block, BlockHash, BlockHeader, BlockHeaderData},
+        transaction::{Authorized, Transaction, TransactionData, TxVersion},
+    };
+    use zcash_protocol::{
+        TxId,
+        consensus::{BranchId, Network as ConsensusNetwork},
+        constants,
+    };
+
+    const FIXED_TIP: u32 = 3;
+
+    #[derive(Clone)]
+    struct FixedTipChain {
+        network: Network,
+        mempool_follow_started: Arc<tokio::sync::Notify>,
+    }
+
+    impl FixedTipChain {
+        fn new(network: Network) -> Self {
+            Self {
+                network,
+                mempool_follow_started: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct FixedTipView {
+        mempool_follow_started: Arc<tokio::sync::Notify>,
+    }
+
+    impl Chain for FixedTipChain {
+        type View = FixedTipView;
+
+        fn params(&self) -> &Network {
+            &self.network
+        }
+
+        async fn reported_upgrades(&self) -> Result<Vec<ReportedUpgrade>, Error> {
+            Ok(Vec::new())
+        }
+
+        async fn broadcast_transaction(&self, _tx: &Transaction) -> Result<(), ChainError> {
+            Err(ChainError::backend(
+                "fixed-tip test chain does not broadcast transactions",
+            ))
+        }
+
+        async fn get_sapling_subtree_roots(
+            &self,
+        ) -> Result<Vec<CommitmentTreeRoot<sapling::Node>>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_orchard_subtree_roots(
+            &self,
+        ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_ironwood_subtree_roots(
+            &self,
+        ) -> Result<Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        async fn snapshot(&self) -> Result<Self::View, ChainError> {
+            Ok(FixedTipView {
+                mempool_follow_started: self.mempool_follow_started.clone(),
+            })
+        }
+    }
+
+    impl ChainView for FixedTipView {
+        async fn tip(&self) -> Result<ChainBlock, ChainError> {
+            Ok(chain_block(height(FIXED_TIP)))
+        }
+
+        async fn find_fork_point(
+            &self,
+            locator: &BlockLocator,
+        ) -> Result<Option<ChainBlock>, ChainError> {
+            Ok((0..=FIXED_TIP).rev().find_map(|value| {
+                let block = chain_block(height(value));
+                locator.hashes().contains(&block.hash()).then_some(block)
+            }))
+        }
+
+        async fn tree_state_as_of(
+            &self,
+            height: BlockHeight,
+        ) -> Result<Option<ChainState>, ChainError> {
+            Ok((height <= BlockHeight::from_u32(FIXED_TIP))
+                .then(|| ChainState::empty(height, fixed_header(height).hash())))
+        }
+
+        async fn get_block_header(
+            &self,
+            height: BlockHeight,
+        ) -> Result<Option<BlockHeader>, ChainError> {
+            Ok((height <= BlockHeight::from_u32(FIXED_TIP)).then(|| fixed_header(height)))
+        }
+
+        async fn get_block(&self, height: BlockHeight) -> Result<Option<Block>, ChainError> {
+            Ok((height <= BlockHeight::from_u32(FIXED_TIP)).then(|| fixed_block(height)))
+        }
+
+        fn stream_blocks_to_tip(
+            &self,
+            start: BlockHeight,
+        ) -> BoxStream<'_, Result<Block, ChainError>> {
+            stream::iter(
+                (u32::from(start)..=FIXED_TIP)
+                    .map(|value| Ok(fixed_block(height(value))))
+                    .collect::<Vec<_>>(),
+            )
+            .boxed()
+        }
+
+        fn stream_blocks(
+            &self,
+            range: &Range<BlockHeight>,
+        ) -> BoxStream<'_, Result<Block, ChainError>> {
+            stream::iter(
+                (u32::from(range.start)..u32::from(range.end))
+                    .map(|value| Ok(fixed_block(height(value))))
+                    .collect::<Vec<_>>(),
+            )
+            .boxed()
+        }
+
+        async fn get_mempool_stream(
+            &self,
+        ) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+            self.mempool_follow_started.notify_one();
+            Ok(Some(stream::pending().boxed()))
+        }
+
+        async fn get_transaction(&self, _txid: TxId) -> Result<Option<ChainTx>, ChainError> {
+            Ok(None)
+        }
+
+        async fn get_transaction_status(
+            &self,
+            _txid: TxId,
+        ) -> Result<TransactionStatus, ChainError> {
+            Ok(TransactionStatus::TxidNotRecognized)
+        }
+
+        #[cfg(feature = "spend-index")]
+        async fn outpoint_spend_status(
+            &self,
+            _outpoint: &OutPoint,
+        ) -> Result<crate::components::chain::SpendStatus, ChainError> {
+            Ok(crate::components::chain::SpendStatus::Unspent)
+        }
+
+        #[cfg(not(feature = "spend-index"))]
+        async fn get_address_unspent_outpoints(
+            &self,
+            _address: &TransparentAddress,
+        ) -> Result<Vec<(TxId, u32)>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        #[cfg(not(feature = "spend-index"))]
+        async fn get_address_tx_ids(
+            &self,
+            _address: &TransparentAddress,
+            _range: Range<BlockHeight>,
+        ) -> Result<Vec<TxId>, ChainError> {
+            Ok(Vec::new())
+        }
+
+        #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+        async fn block_height(&self, _hash: &BlockHash) -> Result<Option<BlockHeight>, ChainError> {
+            Ok(None)
+        }
+    }
+
+    fn chain_block(height: BlockHeight) -> ChainBlock {
+        ChainBlock::new(height, fixed_header(height).hash())
+    }
+
+    fn fixed_header(height: BlockHeight) -> BlockHeader {
+        let value = u32::from(height);
+        BlockHeaderData {
+            version: 4,
+            prev_block: if value == 0 {
+                BlockHash([0; 32])
+            } else {
+                fixed_header(BlockHeight::from_u32(value - 1)).hash()
+            },
+            merkle_root: [0; 32],
+            final_sapling_root: [0; 32],
+            time: 0,
+            bits: 0,
+            nonce: [u8::try_from(value).expect("test height fits in one byte"); 32],
+            solution: vec![],
+        }
+        .freeze()
+        .expect("test block header is structurally valid")
+    }
+
+    fn fixed_block(height: BlockHeight) -> Block {
+        let header = fixed_header(height);
+        let coinbase_authorization = Coinbase;
+        let transparent_bundle = Bundle {
+            vin: vec![
+                TxIn::<Coinbase>::coinbase(height, None)
+                    .expect("test coinbase height is structurally valid"),
+            ],
+            vout: Vec::new(),
+            authorization: coinbase_authorization.clone(),
+        }
+        .map_authorization(coinbase_authorization);
+        let transaction = TransactionData::<Authorized>::from_parts(
+            TxVersion::suggested_for_branch(BranchId::Sprout),
+            BranchId::Sprout,
+            0,
+            height,
+            Some(transparent_bundle),
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .expect("test transaction is structurally valid");
+
+        let mut bytes = Vec::new();
+        header
+            .write(&mut bytes)
+            .expect("serializes test block header");
+        CompactSize::write(&mut bytes, 1).expect("serializes test transaction count");
+        transaction
+            .write(&mut bytes)
+            .expect("serializes test coinbase transaction");
+
+        Block::read(bytes.as_slice(), &ConsensusNetwork::MainNetwork)
+            .expect("test block is structurally valid")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hot_viewing_key_import_scans_to_an_unchanged_near_tip() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let chain = FixedTipChain::new(config.consensus.network());
+        let (decryptor, decryptor_engine) = WalletSync::build_decryptor();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
+        let (sync_status, _sync_status_reader) = status::channel(config.sync.lock_threshold());
+        let (steady_state, recover_history, batch_decryptor, data_requests) = WalletSync::spawn(
+            &config,
+            database.clone(),
+            chain.clone(),
+            None,
+            reconfiguration.clone(),
+            decryptor_engine,
+            sync_status,
+        )
+        .await
+        .expect("starts wallet sync against the fixed-tip chain");
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            chain.mempool_follow_started.notified(),
+        )
+        .await
+        .expect("steady-state sync reaches stable mempool follow");
+
+        call(
+            database
+                .handle()
+                .await
+                .expect("opens wallet for hot viewing-key import"),
+            chain,
+            &reconfiguration,
+            &encoded_mainnet_extfvk(),
+            Some("yes"),
+            Some(0),
+        )
+        .await
+        .expect("imports viewing key while wallet sync is running");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let wallet = database
+                    .handle()
+                    .await
+                    .expect("opens wallet while waiting for near-tip recovery");
+                let pending_ranges = wallet
+                    .suggest_scan_ranges()
+                    .expect("reads suggested scan ranges");
+                if pending_ranges.is_empty() {
+                    assert_eq!(
+                        wallet.chain_height().expect("reads wallet chain height"),
+                        Some(height(FIXED_TIP)),
+                    );
+                    break;
+                }
+                drop(wallet);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hot viewing-key import is scanned through the unchanged tip");
+
+        for task in [
+            steady_state,
+            recover_history,
+            batch_decryptor,
+            data_requests,
+        ] {
+            task.abort();
+            let error = task.await.expect_err("aborted wallet-sync test task stops");
+            assert!(error.is_cancelled());
+        }
+    }
 
     /// Derives a test extended full viewing key from seed [0; 32] and encodes it.
     fn encoded_mainnet_extfvk() -> String {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        encoded_mainnet_extfvk_for_seed([0; 32])
+    }
+
+    fn encoded_mainnet_extfvk_for_seed(seed: [u8; 32]) -> String {
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&seed);
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         encode_extended_full_viewing_key(
@@ -189,6 +612,430 @@ mod tests {
             constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
             &extfvk,
         )
+    }
+
+    fn height(value: u32) -> BlockHeight {
+        BlockHeight::from_u32(value)
+    }
+
+    fn empty_birthday(value: u32) -> AccountBirthday {
+        AccountBirthday::from_parts(
+            ChainState::empty(height(value - 1), BlockHash([0; 32])),
+            None,
+        )
+    }
+
+    fn seed_retained_scanned_blocks(wallet: &mut DbHandle) -> Vec<BlockHeight> {
+        let scanning_keys = ScanningKeys::<AccountUuid, ()>::empty();
+        let nullifiers = Nullifiers::<AccountUuid>::empty();
+        let mut retained_blocks: Vec<ScannedBlock<AccountUuid>> = Vec::new();
+        for value in 500_048_u32..=500_100 {
+            let hash_byte =
+                u8::try_from(value - 500_047).expect("retained block offset fits in hash byte");
+            let predecessor_hash_byte = u8::try_from(value - 500_048)
+                .expect("retained predecessor offset fits in hash byte");
+            let scanned = scan_block(
+                wallet.params(),
+                CompactBlock {
+                    height: u64::from(value),
+                    hash: vec![hash_byte; 32],
+                    prev_hash: vec![predecessor_hash_byte; 32],
+                    chain_metadata: Some(ChainMetadata {
+                        sapling_commitment_tree_size: 0,
+                        orchard_commitment_tree_size: 0,
+                        ironwood_commitment_tree_size: 0,
+                    }),
+                    ..Default::default()
+                },
+                &scanning_keys,
+                &nullifiers,
+                retained_blocks
+                    .last()
+                    .map(|block| block.to_block_metadata())
+                    .as_ref(),
+            )
+            .expect("scans an empty retained block");
+            retained_blocks.push(scanned);
+        }
+        wallet
+            .put_blocks(
+                &ChainState::empty(height(500_047), BlockHash([0; 32])),
+                retained_blocks,
+            )
+            .expect("seeds retained scanned blocks");
+        (500_048..=500_100).map(height).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn existing_viewing_key_rescan_rewinds_wallet_wide_scan_queue() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let mut wallet = database.handle().await.expect("reserves wallet database");
+        let encoded = encoded_mainnet_extfvk();
+        let (extfvk, _) = decode_vkey_and_address(
+            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            &encoded,
+        )
+        .expect("decodes viewing key");
+        let ufvk = UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
+            .expect("constructs unified viewing key");
+        wallet
+            .import_account_ufvk(
+                "existing viewing-only account",
+                &ufvk,
+                &empty_birthday(500_050),
+                AccountPurpose::ViewOnly,
+                None,
+            )
+            .expect("imports viewing-only account");
+        wallet
+            .update_chain_tip(height(500_100))
+            .expect("records chain tip");
+        let (decryptor, engine) = WalletSync::build_decryptor();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
+
+        call(
+            wallet,
+            MockChain::reporting(Vec::new(), 500_100),
+            &reconfiguration,
+            &encoded,
+            Some("yes"),
+            Some(0),
+        )
+        .await
+        .expect("existing viewing key rescan succeeds");
+
+        let wallet = database.handle().await.expect("reopens wallet database");
+        let account = wallet
+            .get_account_for_ufvk(&ufvk)
+            .expect("reads viewing-only account")
+            .expect("viewing-only account remains present");
+        assert_eq!(
+            wallet
+                .get_account_birthday(account.id())
+                .expect("reads rescan birthday"),
+            height(1)
+        );
+        assert_eq!(
+            wallet.suggest_scan_ranges().expect("reads scan queue"),
+            vec![ScanRange::from_parts(
+                height(1)..height(500_101),
+                ScanPriority::Historic,
+            )],
+        );
+        drop(engine);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn existing_viewing_key_rescan_preserves_unrelated_account_birthdays() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let mut wallet = database.handle().await.expect("reserves wallet database");
+        let selected_encoded = encoded_mainnet_extfvk();
+        let unrelated_encoded = encoded_mainnet_extfvk_for_seed([1; 32]);
+        let mut account_ids = Vec::new();
+        for (name, encoded, birthday) in [
+            ("selected viewing-only account", &selected_encoded, 500_050),
+            (
+                "unrelated viewing-only account",
+                &unrelated_encoded,
+                500_070,
+            ),
+        ] {
+            let (extfvk, _) = decode_vkey_and_address(
+                constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+                constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+                encoded,
+            )
+            .expect("decodes viewing key");
+            let ufvk = UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
+                .expect("constructs unified viewing key");
+            account_ids.push(
+                wallet
+                    .import_account_ufvk(
+                        name,
+                        &ufvk,
+                        &empty_birthday(birthday),
+                        AccountPurpose::ViewOnly,
+                        None,
+                    )
+                    .expect("imports viewing-only account")
+                    .id(),
+            );
+        }
+        wallet
+            .update_chain_tip(height(500_100))
+            .expect("records chain tip");
+        let (decryptor, engine) = WalletSync::build_decryptor();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
+
+        call(
+            wallet,
+            MockChain::reporting(Vec::new(), 500_100),
+            &reconfiguration,
+            &selected_encoded,
+            Some("yes"),
+            Some(0),
+        )
+        .await
+        .expect("existing viewing key rescan succeeds");
+
+        let wallet = database.handle().await.expect("reopens wallet database");
+        assert_eq!(
+            wallet
+                .get_account_birthday(account_ids[0])
+                .expect("reads selected birthday"),
+            height(1)
+        );
+        assert_eq!(
+            wallet
+                .get_account_birthday(account_ids[1])
+                .expect("reads unrelated birthday"),
+            height(500_070)
+        );
+        drop(engine);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn existing_viewing_key_predecessor_failure_leaves_wallet_unchanged() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let mut wallet = database.handle().await.expect("reserves wallet database");
+        let encoded = encoded_mainnet_extfvk();
+        let (extfvk, _) = decode_vkey_and_address(
+            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            &encoded,
+        )
+        .expect("decodes viewing key");
+        let ufvk = UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
+            .expect("constructs unified viewing key");
+        let account_id = wallet
+            .import_account_ufvk(
+                "existing viewing-only account",
+                &ufvk,
+                &empty_birthday(500_050),
+                AccountPurpose::ViewOnly,
+                None,
+            )
+            .expect("imports viewing-only account")
+            .id();
+        wallet
+            .update_chain_tip(height(500_100))
+            .expect("records chain tip");
+        let retained_heights = seed_retained_scanned_blocks(&mut wallet);
+        let birthday_before = wallet
+            .get_account_birthday(account_id)
+            .expect("reads birthday before failed predecessor fetch");
+        let ranges_before = wallet
+            .suggest_scan_ranges()
+            .expect("reads scan ranges before failed predecessor fetch");
+        let hashes_before = retained_heights
+            .iter()
+            .map(|height| {
+                wallet
+                    .get_block_hash(*height)
+                    .expect("snapshots retained block hash")
+            })
+            .collect::<Vec<_>>();
+        let (decryptor, engine) = WalletSync::build_decryptor();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
+
+        let error = call(
+            wallet,
+            MockChain::reporting(Vec::new(), 500_100),
+            &reconfiguration,
+            &encoded,
+            Some("yes"),
+            Some(10),
+        )
+        .await
+        .expect_err("missing predecessor state rejects the rescan");
+        assert_eq!(
+            error.code(),
+            jsonrpsee::types::ErrorCode::InternalError.code()
+        );
+        assert_eq!(error.message(), "No treestate available at height 9");
+
+        let wallet = database.handle().await.expect("reopens wallet database");
+        assert_eq!(
+            wallet
+                .get_account_birthday(account_id)
+                .expect("reads unchanged birthday"),
+            birthday_before
+        );
+        assert_eq!(
+            wallet
+                .suggest_scan_ranges()
+                .expect("reads unchanged scan ranges"),
+            ranges_before
+        );
+        assert_eq!(
+            retained_heights
+                .iter()
+                .map(|height| {
+                    wallet
+                        .get_block_hash(*height)
+                        .expect("reads unchanged retained block hash")
+                })
+                .collect::<Vec<_>>(),
+            hashes_before
+        );
+        drop(engine);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn existing_viewing_key_rescan_failure_rolls_back_birthdays_scan_ranges_and_blocks() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let mut wallet = database.handle().await.expect("reserves wallet database");
+        let encoded = encoded_mainnet_extfvk();
+        let unrelated_encoded = encoded_mainnet_extfvk_for_seed([1; 32]);
+        let mut account_ids = Vec::new();
+        for (name, encoded, birthday) in [
+            ("selected viewing-only account", &encoded, 500_050),
+            (
+                "unrelated viewing-only account",
+                &unrelated_encoded,
+                500_070,
+            ),
+        ] {
+            let (extfvk, _) = decode_vkey_and_address(
+                constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+                constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+                encoded,
+            )
+            .expect("decodes viewing key");
+            let ufvk = UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
+                .expect("constructs unified viewing key");
+            account_ids.push(
+                wallet
+                    .import_account_ufvk(
+                        name,
+                        &ufvk,
+                        &empty_birthday(birthday),
+                        AccountPurpose::ViewOnly,
+                        None,
+                    )
+                    .expect("imports viewing-only account")
+                    .id(),
+            );
+        }
+        let retained_heights = seed_retained_scanned_blocks(&mut wallet);
+        wallet
+            .update_chain_tip(height(500_100))
+            .expect("records chain tip");
+        let birthdays_before = account_ids
+            .iter()
+            .map(|account_id| {
+                wallet
+                    .get_account_birthday(*account_id)
+                    .expect("snapshots account birthday")
+            })
+            .collect::<Vec<_>>();
+        let ranges_before = wallet
+            .suggest_scan_ranges()
+            .expect("snapshots suggested scan ranges");
+        let hashes_before = retained_heights
+            .iter()
+            .map(|height| {
+                wallet
+                    .get_block_hash(*height)
+                    .expect("snapshots retained block hash")
+            })
+            .collect::<Vec<_>>();
+        wallet
+            .with_raw(|connection, _| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_viewing_key_birthday_rewind
+                     AFTER UPDATE OF birthday_height ON accounts
+                     BEGIN
+                         SELECT RAISE(ABORT, 'injected birthday update failure');
+                     END;",
+                )
+            })
+            .expect("installs persistent birthday failure trigger");
+        let (decryptor, engine) = WalletSync::build_decryptor();
+        let reconfiguration = WalletSyncReconfiguration::new(decryptor);
+
+        let error = call(
+            wallet,
+            MockChain::reporting(Vec::new(), 500_100),
+            &reconfiguration,
+            &encoded,
+            Some("yes"),
+            Some(0),
+        )
+        .await
+        .expect_err("injected rewind failure reaches the RPC");
+        assert_eq!(error.code(), LegacyCode::Misc as i32);
+        assert!(error.message().contains("Rescan failed"));
+        assert!(error.message().contains("injected birthday update failure"));
+
+        let wallet = database.handle().await.expect("reopens wallet database");
+        wallet
+            .with_raw(|connection, _| {
+                connection.execute_batch("DROP TRIGGER fail_viewing_key_birthday_rewind;")
+            })
+            .expect("removes persistent birthday failure trigger");
+        assert_eq!(
+            account_ids
+                .iter()
+                .map(|account_id| {
+                    wallet
+                        .get_account_birthday(*account_id)
+                        .expect("reads rolled-back account birthday")
+                })
+                .collect::<Vec<_>>(),
+            birthdays_before
+        );
+        assert_eq!(
+            wallet
+                .suggest_scan_ranges()
+                .expect("reads rolled-back scan ranges"),
+            ranges_before
+        );
+        assert_eq!(
+            retained_heights
+                .iter()
+                .map(|height| {
+                    wallet
+                        .get_block_hash(*height)
+                        .expect("reads rolled-back retained block hash")
+                })
+                .collect::<Vec<_>>(),
+            hashes_before
+        );
+        drop(engine);
     }
 
     // -- RescanPolicy::parse tests --

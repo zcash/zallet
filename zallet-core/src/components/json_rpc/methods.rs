@@ -14,7 +14,7 @@ use crate::components::{
 use {
     super::asyncop::{OperationId, OperationQueue},
     crate::components::{
-        json_rpc::payments::AmountParameter, keystore::KeyStore, sync::WalletDecryptorHandle,
+        json_rpc::payments::AmountParameter, keystore::KeyStore, sync::WalletSyncReconfiguration,
     },
 };
 
@@ -1011,7 +1011,7 @@ impl<C: Chain> RpcImpl<C> {
 pub(crate) struct WalletRpcImpl<C: Chain> {
     general: RpcImpl<C>,
     keystore: KeyStore,
-    decryptor: WalletDecryptorHandle,
+    reconfiguration: WalletSyncReconfiguration,
     async_ops: OperationQueue,
 }
 
@@ -1022,14 +1022,14 @@ impl<C: Chain> WalletRpcImpl<C> {
         wallet: Database,
         keystore: KeyStore,
         chain_view: C,
-        decryptor: WalletDecryptorHandle,
+        reconfiguration: WalletSyncReconfiguration,
         sync_status: SyncStatusReader,
         async_operation_limit: usize,
     ) -> Self {
         Self {
             general: RpcImpl::new(wallet, keystore.clone(), chain_view, sync_status),
             keystore,
-            decryptor,
+            reconfiguration,
             async_ops: OperationQueue::new(async_operation_limit),
         }
     }
@@ -1228,10 +1228,10 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         seedfp: Option<&str>,
     ) -> get_new_account::Response {
         get_new_account::call(
-            self.wallet().await?.as_mut(),
+            self.wallet().await?,
             &self.keystore,
             self.chain().await?,
-            &self.decryptor,
+            &self.reconfiguration,
             account_name,
             seedfp,
         )
@@ -1243,10 +1243,10 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         accounts: Vec<recover_accounts::AccountParameter<'_>>,
     ) -> recover_accounts::Response {
         recover_accounts::call(
-            self.wallet().await?.as_mut(),
+            self.wallet().await?,
             &self.keystore,
             self.chain().await?,
-            &self.decryptor,
+            &self.reconfiguration,
             accounts,
         )
         .await
@@ -1295,8 +1295,9 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         start_height: Option<u64>,
     ) -> import_viewing_key::Response {
         import_viewing_key::call(
-            self.wallet().await?.as_mut(),
+            self.wallet().await?,
             self.chain().await?,
+            &self.reconfiguration,
             vkey,
             rescan,
             start_height,
@@ -1352,10 +1353,10 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         start_height: Option<u64>,
     ) -> import_key::Response {
         import_key::call(
-            self.wallet().await?.as_mut(),
+            self.wallet().await?,
             &self.keystore,
             self.chain().await?,
-            &self.decryptor,
+            &self.reconfiguration,
             key,
             rescan,
             start_height,
