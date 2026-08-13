@@ -34,6 +34,9 @@ should be considered breaking changes.
   This backend was not implicated in the reports that prompted the fix, which
   were all on `zallet-zebra`; the same unguarded fallback existed here.
 
+- Wallet scans now discard and reacquire a fixed chain view when Zebra reports
+  that a selected block height is no longer in the best chain.
+
 ## [0.1.0-beta.2] - 2026-07-28
 
 ### Changed
