@@ -4,15 +4,15 @@ use documented::Documented;
 use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use zcash_client_backend::data_api::{Account as _, AccountBirthday, WalletRead, WalletWrite};
+use zcash_client_backend::data_api::{Account as _, WalletRead, WalletWrite};
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::components::{
-    chain::{Chain, ChainView},
+    chain::Chain,
     database::DbConnection,
     json_rpc::{
         server::LegacyCode,
-        utils::{ensure_wallet_is_unlocked, parse_seedfp_parameter},
+        utils::{ensure_wallet_is_unlocked, fetch_account_birthday, parse_seedfp_parameter},
     },
     keystore::KeyStore,
     sync::WalletDecryptorHandle,
@@ -84,23 +84,9 @@ pub(crate) async fn call<C: Chain>(
             })?;
 
         let birthday_height = BlockHeight::from_u32(account.birthday_height);
-        let treestate_height = birthday_height.saturating_sub(1);
 
-        let chain_state = chain_view
-            .tree_state_as_of(treestate_height)
-            .await
-            .map_err(|e| {
-                LegacyCode::InvalidParameter.with_message(format!(
-                    "Failed to get treestate at height {treestate_height}: {e}"
-                ))
-            })?
-            .ok_or_else(|| {
-                LegacyCode::InvalidParameter.with_message(format!(
-                    "Account birthday height {birthday_height} does not exist in the chain"
-                ))
-            })?;
-
-        let birthday = AccountBirthday::from_parts(chain_state, Some(recover_until));
+        let birthday =
+            fetch_account_birthday(&chain_view, birthday_height, Some(recover_until)).await?;
 
         account_args.push((account.name, seed_fp, account_index, birthday));
     }
