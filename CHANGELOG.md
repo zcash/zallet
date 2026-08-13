@@ -61,6 +61,11 @@ be considered breaking changes.
   to complete even when some accounts or transparent spending keys in the
   `zcashd` wallet could not be imported. The skipped items are reported as
   warnings; they remain accessible only via the original `wallet.dat` file.
+- Source builds can select `backend = "zinder"` and configure
+  `[zinder].wallet_query_endpoint` to run the native `zallet-zinder` sibling.
+  Release packaging remains unchanged.
+- The Zinder backend now submits wallet transactions through its configured
+  native wallet-query endpoint.
 
 ### Changed
 
@@ -80,6 +85,10 @@ be considered breaking changes.
   configuration, so a migrated wallet previously lost the behaviour silently.
 
 ### Fixed
+
+- `z_getnewaccount`, `z_recoveraccounts`, and `z_importviewingkey` now wake
+  synchronization after adding account keys, so newly created or recovered
+  accounts are scanned without requiring a wallet restart.
 
 - A note commitment tree conflict during sync no longer shuts the wallet down
   permanently. Zallet now rolls the wallet back to a progressively older point

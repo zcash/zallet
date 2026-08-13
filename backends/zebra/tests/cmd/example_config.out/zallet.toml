@@ -19,8 +19,8 @@
 # launcher (or on the PATH). Each backend binary refuses to run against a config
 # that names a backend other than the one it provides, since all backends
 # operate on the same wallet database. The backends shipped with Zallet are
-# `"zebra"` (the launcher's default when this key is unset) and
-# `"zaino"`.
+# `"zebra"` (the launcher's default when this key is unset), `"zaino"`, and
+# `"zinder"`.
 #
 # When this key is unset, a directly-invoked backend binary accepts the config:
 # choosing the binary is already an explicit choice of backend.
@@ -413,4 +413,17 @@ as_of_version = "0.1.0-beta.2"
 # spend JSON-RPC methods return an error rather than operating on an incomplete view
 # of the chain. The default matches the reorg/finality boundary the sync engine uses.
 #lock_threshold = 100
+
+
+#
+# Settings for Zinder's native wallet query endpoint.
+#
+[zinder]
+
+# Native Zinder wallet-query origin.
+#
+# This must be an http:// or https:// origin with an authority. It cannot include
+# credentials, a non-root path, a query, or a fragment. The Zinder backend requires this
+# setting before it can construct the chain client.
+#wallet_query_endpoint = UNSET
 

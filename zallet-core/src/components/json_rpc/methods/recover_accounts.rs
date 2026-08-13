@@ -15,7 +15,7 @@ use crate::components::{
         utils::{ensure_wallet_is_unlocked, parse_seedfp_parameter},
     },
     keystore::KeyStore,
-    sync::WalletDecryptorHandle,
+    sync::{WalletDecryptorHandle, WalletSyncWakeup},
 };
 
 /// Response to a `z_recoveraccounts` RPC request.
@@ -56,6 +56,7 @@ pub(crate) async fn call<C: Chain>(
     keystore: &KeyStore,
     chain: C,
     decryptor: &WalletDecryptorHandle,
+    sync_wakeup: &WalletSyncWakeup,
     accounts: Vec<AccountParameter<'_>>,
 ) -> Response {
     ensure_wallet_is_unlocked(keystore).await?;
@@ -142,6 +143,7 @@ pub(crate) async fn call<C: Chain>(
             "sync engine has shut down; recovered accounts won't be scanned until restart"
         );
     }
+    sync_wakeup.wake();
 
     Ok(Accounts { accounts })
 }

@@ -842,7 +842,10 @@ pub(crate) use tests::MockChain;
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
+    use std::{
+        ops::Range,
+        sync::{Arc, Mutex},
+    };
 
     use futures::{
         StreamExt as _,
@@ -878,6 +881,7 @@ mod tests {
     #[derive(Clone)]
     pub(crate) struct MockChainView {
         tip: ChainBlock,
+        scan_ranges: Option<Arc<Mutex<Vec<Range<BlockHeight>>>>>,
     }
 
     impl ChainView for MockChainView {
@@ -899,9 +903,12 @@ mod tests {
 
         async fn tree_state_as_of(
             &self,
-            _height: BlockHeight,
+            height: BlockHeight,
         ) -> Result<Option<ChainState>, ChainError> {
-            Ok(None)
+            Ok(self
+                .scan_ranges
+                .as_ref()
+                .map(|_| ChainState::empty(height, BlockHash([0; 32]))))
         }
 
         async fn get_block_header(
@@ -924,8 +931,14 @@ mod tests {
 
         fn stream_blocks(
             &self,
-            _range: &Range<BlockHeight>,
+            range: &Range<BlockHeight>,
         ) -> BoxStream<'_, Result<Block, ChainError>> {
+            if let Some(scan_ranges) = &self.scan_ranges {
+                scan_ranges
+                    .lock()
+                    .expect("mock scan range observer is not poisoned")
+                    .push(range.clone());
+            }
             stream::empty().boxed()
         }
 
@@ -983,7 +996,10 @@ mod tests {
             height: BlockHeight::from_u32(42),
             hash: BlockHash([7u8; 32]),
         };
-        let view = MockChainView { tip };
+        let view = MockChainView {
+            tip,
+            scan_ranges: None,
+        };
         assert_eq!(view.tip().await.unwrap(), tip);
         // The fork point resolves when the locator includes the view's own tip, and
         // not for a locator that excludes it.
@@ -1278,14 +1294,32 @@ mod tests {
         params: super::Network,
         upgrades: Vec<ReportedUpgrade>,
         tip: BlockHeight,
+        scan_ranges: Option<Arc<Mutex<Vec<Range<BlockHeight>>>>>,
     }
 
     impl MockChain {
         pub(crate) fn reporting(upgrades: Vec<ReportedUpgrade>, tip: u32) -> Self {
+            Self::reporting_with_optional_scan_observer(upgrades, tip, None)
+        }
+
+        pub(crate) fn reporting_with_scan_observer(
+            upgrades: Vec<ReportedUpgrade>,
+            tip: u32,
+            scan_ranges: Arc<Mutex<Vec<Range<BlockHeight>>>>,
+        ) -> Self {
+            Self::reporting_with_optional_scan_observer(upgrades, tip, Some(scan_ranges))
+        }
+
+        fn reporting_with_optional_scan_observer(
+            upgrades: Vec<ReportedUpgrade>,
+            tip: u32,
+            scan_ranges: Option<Arc<Mutex<Vec<Range<BlockHeight>>>>>,
+        ) -> Self {
             Self {
                 params: super::Network::Consensus(Network::MainNetwork),
                 upgrades,
                 tip: BlockHeight::from_u32(tip),
+                scan_ranges,
             }
         }
     }
@@ -1337,6 +1371,7 @@ mod tests {
                     height: self.tip,
                     hash: BlockHash([0u8; 32]),
                 },
+                scan_ranges: self.scan_ranges.clone(),
             })
         }
     }

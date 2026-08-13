@@ -166,6 +166,11 @@ trycmd.workspace = true
 [features]
 default = []
 
+## Exposes the unshippable bounded-scan consumer-certification entry point.
+##
+## This feature is for backend integration tests. Production binaries must not enable it.
+bounded-scan-certification = []
+
 ## Enables per-outpoint transparent spend detection: the wallet emits
 ## `TransactionDataRequest::SpendsOfTransparentOutput` and the backend resolves spends via a
 ## per-outpoint spend index. Enabled by the `zebra-state` backend package (which reaches
