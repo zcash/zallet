@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
+use jsonrpsee::types::ErrorCode as RpcErrorCode;
 use orchard::note_encryption::{
     DomainVersion, IronwoodVersion, NoteEncryptionDomain, OrchardVersion,
 };
@@ -26,7 +27,7 @@ use zcash_protocol::{
 
 use crate::components::{
     chain::{Chain, ChainView},
-    database::DbConnection,
+    database::{Database, DbConnection},
     json_rpc::{
         server::LegacyCode,
         utils::{JsonZec, parse_txid, value_from_zatoshis},
@@ -36,6 +37,7 @@ use crate::components::{
 #[cfg(zallet_build = "wallet")]
 use {
     crate::components::{
+        database::DbHandle,
         json_rpc::utils::{JsonZecBalance, value_from_zat_balance},
         keystore::KeyStore,
     },
@@ -310,8 +312,52 @@ fn ovk_for_shielding_from_taddr(raw_seed: &[u8]) -> [u8; 32] {
     ovk
 }
 
+#[cfg(zallet_build = "wallet")]
+async fn collect_legacy_transparent_shielding_ovks(
+    wallet: DbHandle,
+    keystore: &KeyStore,
+) -> RpcResult<Vec<([u8; 32], zip32::Scope)>> {
+    // Keystore operations acquire their own database connections. Release the RPC's
+    // connection first so these lookups cannot deadlock when wallet sync retains the
+    // other connections in the pool.
+    drop(wallet);
+
+    let mut ovks = vec![];
+
+    // Mnemonic seeds use the BIP 39 seed bytes; legacy non-mnemonic seeds use their
+    // raw imported bytes. Either could have been the active `zcashd` HD seed, so try
+    // both. Decryption fails when the wallet is locked, so skip on error rather than
+    // failing the whole request.
+    for seed_fp in keystore
+        .list_seed_fingerprints()
+        .await
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+    {
+        if let Ok(seed) = keystore.decrypt_seed(&seed_fp).await {
+            ovks.push((
+                ovk_for_shielding_from_taddr(seed.expose_secret()),
+                zip32::Scope::External,
+            ));
+        }
+    }
+    for seed_fp in keystore
+        .list_legacy_seed_fingerprints()
+        .await
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+    {
+        if let Ok(seed) = keystore.decrypt_legacy_seed(&seed_fp).await {
+            ovks.push((
+                ovk_for_shielding_from_taddr(seed.expose_secret()),
+                zip32::Scope::External,
+            ));
+        }
+    }
+
+    Ok(ovks)
+}
+
 pub(crate) async fn call<C: Chain>(
-    wallet: &DbConnection,
+    database: &Database,
     #[cfg(zallet_build = "wallet")] keystore: &KeyStore,
     chain: C,
     txid_str: &str,
@@ -322,6 +368,11 @@ pub(crate) async fn call<C: Chain>(
         .snapshot()
         .await
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+
+    let wallet = database
+        .handle()
+        .await
+        .map_err(|_| RpcErrorCode::InternalError)?;
 
     let tx = wallet
         .get_transaction(txid)
@@ -386,36 +437,14 @@ pub(crate) async fn call<C: Chain>(
     // to external shielded" outputs. This requires the seed, so it is best-effort: if the
     // wallet is locked we simply skip it (the modern OVKs above still apply).
     #[cfg(zallet_build = "wallet")]
-    {
-        // Mnemonic seeds use the BIP 39 seed bytes; legacy non-mnemonic seeds use their
-        // raw imported bytes. Either could have been the active `zcashd` HD seed, so try
-        // both. Decryption fails when the wallet is locked, so skip on error rather than
-        // failing the whole request.
-        for seed_fp in keystore
-            .list_seed_fingerprints()
+    let wallet = {
+        ovks.extend(collect_legacy_transparent_shielding_ovks(wallet, keystore).await?);
+        database
+            .handle()
             .await
-            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-        {
-            if let Ok(seed) = keystore.decrypt_seed(&seed_fp).await {
-                ovks.push((
-                    ovk_for_shielding_from_taddr(seed.expose_secret()),
-                    zip32::Scope::External,
-                ));
-            }
-        }
-        for seed_fp in keystore
-            .list_legacy_seed_fingerprints()
-            .await
-            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-        {
-            if let Ok(seed) = keystore.decrypt_legacy_seed(&seed_fp).await {
-                ovks.push((
-                    ovk_for_shielding_from_taddr(seed.expose_secret()),
-                    zip32::Scope::External,
-                ));
-            }
-        }
-    }
+            .map_err(|_| RpcErrorCode::InternalError)?
+    };
+    let wallet = wallet.as_ref();
 
     // TODO: Add `WalletRead::get_note_with_nullifier`
     type OutputInfo = (TxId, u16, AccountUuid, Option<String>, Zatoshis);
@@ -1146,7 +1175,70 @@ fn is_expiring_soon_tx(
 
 #[cfg(all(test, zallet_build = "wallet"))]
 mod tests {
+    use std::time::Duration;
+
+    use age::secrecy::ExposeSecret as _;
+    use bip0039::{English, Mnemonic};
+
     use super::*;
+    use crate::config::ZalletConfig;
+
+    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const SYNC_CONNECTION_COUNT: usize = 4;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn legacy_shielding_ovk_lookup_releases_wallet_connection() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let identity = age::x25519::Identity::generate();
+        std::fs::write(
+            config.encryption_identity(),
+            identity.to_string().expose_secret(),
+        )
+        .expect("writes unencrypted identity");
+
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let keystore = KeyStore::new(&config, database.clone()).expect("creates keystore");
+        keystore
+            .initialize_recipients(vec![identity.to_public().to_string()])
+            .await
+            .expect("initializes unencrypted keystore");
+        let mnemonic =
+            Mnemonic::<English>::from_phrase(TEST_MNEMONIC).expect("parses test mnemonic");
+        let expected_seed = mnemonic.to_seed("");
+        keystore
+            .encrypt_and_store_mnemonic(mnemonic)
+            .await
+            .expect("stores test mnemonic");
+
+        let mut sync_wallets = Vec::with_capacity(SYNC_CONNECTION_COUNT);
+        for _ in 0..SYNC_CONNECTION_COUNT {
+            sync_wallets.push(database.handle().await.expect("reserves sync database"));
+        }
+        let wallet = database.handle().await.expect("reserves RPC database");
+
+        let ovks = tokio::time::timeout(
+            Duration::from_secs(1),
+            collect_legacy_transparent_shielding_ovks(wallet, &keystore),
+        )
+        .await
+        .expect("OVK lookup completes while sync retains database connections")
+        .expect("derives legacy shielding OVKs");
+
+        assert_eq!(
+            ovks,
+            vec![(
+                ovk_for_shielding_from_taddr(&expected_seed),
+                zip32::Scope::External,
+            )]
+        );
+    }
 
     #[test]
     fn ovk_for_shielding_from_taddr_matches_zcashd() {

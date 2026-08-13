@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use abscissa_core::Application;
 
 use jsonrpsee::core::{JsonValue, RpcResult};
+use jsonrpsee::types::ErrorCode as RpcErrorCode;
 use secrecy::ExposeSecret;
 use serde_json::json;
 use zcash_client_backend::data_api::wallet::SpendingKeys;
@@ -28,13 +29,14 @@ use zcash_proofs::prover::LocalTxProver;
 use crate::{
     components::{
         chain::Chain,
-        database::DbHandle,
+        database::{Database, DbHandle},
         json_rpc::{
             asyncop::{ContextInfo, OperationId},
             payments::{
                 AmountParameter, SendResult, build_request, confirmations_policy_for_minconf,
-                get_account_for_address, get_legacy_pool_account, parse_privacy_policy,
-                propose_and_check, spend_policy_for, verify_and_broadcast_transactions,
+                decrypt_spending_seed, get_account_for_address, get_legacy_pool_account,
+                parse_privacy_policy, propose_and_check, spend_policy_for,
+                verify_and_broadcast_transactions,
             },
             server::LegacyCode,
         },
@@ -45,7 +47,9 @@ use crate::{
 };
 
 #[cfg(feature = "zcashd-import")]
-use crate::components::json_rpc::utils::collect_standalone_transparent_keys;
+use crate::components::json_rpc::utils::{
+    decrypt_standalone_transparent_keys, standalone_transparent_input_addresses,
+};
 
 /// Response to a `z_sendmany` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -84,7 +88,7 @@ fn legacy_pool_spend_policy() -> SpendPolicy {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn call<C: Chain>(
-    mut wallet: DbHandle,
+    database: Database,
     keystore: KeyStore,
     chain: C,
     fromaddress: String,
@@ -104,6 +108,10 @@ pub(crate) async fn call<C: Chain>(
             .with_static("Zallet always calculates fees internally; the fee field must be null."));
     }
 
+    let mut wallet = database
+        .handle()
+        .await
+        .map_err(|_| RpcErrorCode::InternalError)?;
     let request = build_request(&amounts)?;
 
     let (account, spend_policy) = match fromaddress.as_str() {
@@ -159,33 +167,29 @@ pub(crate) async fn call<C: Chain>(
         &spend_policy,
     )?;
 
-    let derivation = account.source().key_derivation().ok_or_else(|| {
+    let account_id = account.id();
+    let derivation = account.source().key_derivation().cloned().ok_or_else(|| {
         LegacyCode::InvalidAddressOrKey.with_message(fl!("err-from-address-no-payment-source"))
     })?;
 
+    #[cfg(feature = "zcashd-import")]
+    let standalone_input_addresses =
+        standalone_transparent_input_addresses(wallet.as_ref(), account_id, &proposal)?;
+
     // Fetch spending key last, to avoid a keystore decryption if unnecessary.
-    let seed = keystore
-        .decrypt_seed(derivation.seed_fingerprint())
-        .await
-        .map_err(|e| match e.kind() {
-            // TODO: Improve internal error types.
-            //       https://github.com/zcash/zallet/issues/256
-            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
-                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
-            }
-            _ => LegacyCode::Database.with_message(e.to_string()),
-        })?;
-    let usk = UnifiedSpendingKey::from_seed(
-        wallet.params(),
-        seed.expose_secret(),
-        derivation.account_index(),
-    )
-    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
+    let seed = decrypt_spending_seed(wallet, &keystore, derivation.seed_fingerprint()).await?;
+    let usk =
+        UnifiedSpendingKey::from_seed(&params, seed.expose_secret(), derivation.account_index())
+            .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
 
     #[cfg(feature = "zcashd-import")]
     let standalone_keys =
-        collect_standalone_transparent_keys(wallet.as_ref(), &keystore, account.id(), &proposal)
-            .await?;
+        decrypt_standalone_transparent_keys(&keystore, standalone_input_addresses).await?;
+
+    let wallet = database
+        .handle()
+        .await
+        .map_err(|_| RpcErrorCode::InternalError)?;
 
     // TODO: verify that the proposal satisfies the requested privacy policy
 
@@ -201,7 +205,7 @@ pub(crate) async fn call<C: Chain>(
         run(
             wallet,
             chain,
-            account.id(),
+            account_id,
             usk.to_unified_full_viewing_key(),
             proposal,
             #[cfg(feature = "zcashd-import")]

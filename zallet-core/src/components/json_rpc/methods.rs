@@ -1131,7 +1131,7 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
 
     async fn view_transaction(&self, txid: &str) -> view_transaction::Response {
         view_transaction::call(
-            self.wallet().await?.as_ref(),
+            &self.wallet,
             #[cfg(zallet_build = "wallet")]
             &self.keystore,
             self.chain().await?,
@@ -1228,7 +1228,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         seedfp: Option<&str>,
     ) -> get_new_account::Response {
         get_new_account::call(
-            self.wallet().await?,
+            &self.general.wallet,
             &self.keystore,
             self.chain().await?,
             &self.reconfiguration,
@@ -1243,7 +1243,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         accounts: Vec<recover_accounts::AccountParameter<'_>>,
     ) -> recover_accounts::Response {
         recover_accounts::call(
-            self.wallet().await?,
+            &self.general.wallet,
             &self.keystore,
             self.chain().await?,
             &self.reconfiguration,
@@ -1377,7 +1377,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         // doing the expensive work of constructing a proposal.
         self.async_ops.check_capacity().await?;
         let (context, fut) = z_send_many::call(
-            self.wallet().await?,
+            self.general.wallet.clone(),
             self.keystore.clone(),
             self.chain().await?,
             fromaddress,
@@ -1425,7 +1425,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         // doing the expensive work of constructing a proposal.
         self.async_ops.check_capacity().await?;
         let (preflight, context, fut) = z_shieldcoinbase::call(
-            self.wallet().await?,
+            self.general.wallet.clone(),
             self.keystore.clone(),
             self.chain().await?,
             fromaddress,
@@ -1445,7 +1445,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         zaddr: &str,
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response {
-        z_export_viewing_key::call(self.wallet().await?.as_ref(), &self.keystore, zaddr, ivk).await
+        z_export_viewing_key::call(self.wallet().await?, &self.keystore, zaddr, ivk).await
     }
 
     async fn pczt_create(

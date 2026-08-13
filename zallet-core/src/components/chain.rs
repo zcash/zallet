@@ -873,6 +873,7 @@ mod tests {
     #[derive(Clone)]
     pub(crate) struct MockChainView {
         tip: ChainBlock,
+        serves_empty_tree_states: bool,
     }
 
     impl ChainView for MockChainView {
@@ -894,9 +895,11 @@ mod tests {
 
         async fn tree_state_as_of(
             &self,
-            _height: BlockHeight,
+            height: BlockHeight,
         ) -> Result<Option<ChainState>, ChainError> {
-            Ok(None)
+            Ok(self
+                .serves_empty_tree_states
+                .then(|| ChainState::empty(height, BlockHash([0u8; 32]))))
         }
 
         async fn get_block_header(
@@ -978,7 +981,10 @@ mod tests {
             height: BlockHeight::from_u32(42),
             hash: BlockHash([7u8; 32]),
         };
-        let view = MockChainView { tip };
+        let view = MockChainView {
+            tip,
+            serves_empty_tree_states: false,
+        };
         assert_eq!(view.tip().await.unwrap(), tip);
         // The fork point resolves when the locator includes the view's own tip, and
         // not for a locator that excludes it.
@@ -1273,6 +1279,7 @@ mod tests {
         params: super::Network,
         upgrades: Vec<ReportedUpgrade>,
         tip: BlockHeight,
+        serves_empty_tree_states: bool,
     }
 
     impl MockChain {
@@ -1281,7 +1288,13 @@ mod tests {
                 params: super::Network::Consensus(Network::MainNetwork),
                 upgrades,
                 tip: BlockHeight::from_u32(tip),
+                serves_empty_tree_states: false,
             }
+        }
+
+        pub(crate) fn with_empty_tree_states(mut self) -> Self {
+            self.serves_empty_tree_states = true;
+            self
         }
     }
 
@@ -1332,6 +1345,7 @@ mod tests {
                     height: self.tip,
                     hash: BlockHash([0u8; 32]),
                 },
+                serves_empty_tree_states: self.serves_empty_tree_states,
             })
         }
     }
