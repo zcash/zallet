@@ -104,9 +104,25 @@ zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51ac
 # required for Ironwood notes to be spendable; an empty frontier conflicts with
 # the wallet's advancing tree and sync fails with `CheckpointConflict`. This is
 # zingolabs/zaino#1428; repoint at upstream zaino once it (and the NU6.3 work)
-# lands in a release. The zebra crates are consumed from crates.io at the
-# librustzcash 0.30/0.10 versions (chain 11.3 / state 12.0.1 / rpc 15.0), so no
-# zebra [patch] is needed.
+# lands in a release.
 zaino-common = { git = "https://github.com/zodl-inc/zaino.git", rev = "d2d06bdd" }
 zaino-fetch = { git = "https://github.com/zodl-inc/zaino.git", rev = "d2d06bdd" }
 zaino-state = { git = "https://github.com/zodl-inc/zaino.git", rev = "d2d06bdd" }
+
+# TEMPORARY: pin the zebra crates to a branch that hardens
+# `zebra_rpc::sync::TrustedChainSync` against zebrad dropping the
+# `non_finalized_state_change` stream during large initial sends
+# (ZcashFoundation/zebra#11265); see backends/zebra/Cargo.toml for the full
+# rationale. The branch is based on the commit the crates.io versions this
+# workspace already uses (chain 11.3 / state 12.0.1 / rpc 15.0) were published
+# from, so only zebra-rpc's code actually changes. This guards the optional
+# `[indexer.read_state_service]` mode; the whole cohort is patched so the graph
+# resolves from a single source. Drop this patch once the fix ships in a
+# zebra-rpc release.
+zebra-chain = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-consensus = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-network = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-node-services = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-rpc = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-script = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-state = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }

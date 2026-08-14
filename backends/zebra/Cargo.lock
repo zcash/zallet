@@ -5606,8 +5606,7 @@ dependencies = [
 [[package]]
 name = "tower-batch-control"
 version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58bb785abb0207bee98b1d7d874467bb1043d4e434f9a8c8a4714603563c762b"
+source = "git+https://github.com/pacu/zebra.git?rev=487e6f9312b60bcd3007a7c17c942b1d481a93e6#487e6f9312b60bcd3007a7c17c942b1d481a93e6"
 dependencies = [
  "futures",
  "futures-core",
@@ -5623,8 +5622,7 @@ dependencies = [
 [[package]]
 name = "tower-fallback"
 version = "0.2.43"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c700b6ca0cca8b86ef35046dfc7bab9196b8271ab72e9d410f8f63d94857d14f"
+source = "git+https://github.com/pacu/zebra.git?rev=487e6f9312b60bcd3007a7c17c942b1d481a93e6#487e6f9312b60bcd3007a7c17c942b1d481a93e6"
 dependencies = [
  "futures-core",
  "pin-project",
@@ -7043,8 +7041,7 @@ dependencies = [
 [[package]]
 name = "zebra-chain"
 version = "11.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "825050a409c120d9dd0cffb36d99638a5e716e9cb092662009d087b4c227cc14"
+source = "git+https://github.com/pacu/zebra.git?rev=487e6f9312b60bcd3007a7c17c942b1d481a93e6#487e6f9312b60bcd3007a7c17c942b1d481a93e6"
 dependencies = [
  "bech32 0.11.1",
  "bitflags",
@@ -7107,8 +7104,7 @@ dependencies = [
 [[package]]
 name = "zebra-consensus"
 version = "14.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f2a2f87471e58f9cedee3698ac4eeb6502ec60d059b054d67796eccfb896439"
+source = "git+https://github.com/pacu/zebra.git?rev=487e6f9312b60bcd3007a7c17c942b1d481a93e6#487e6f9312b60bcd3007a7c17c942b1d481a93e6"
 dependencies = [
  "bellman",
  "blake2b_simd",
@@ -7150,8 +7146,7 @@ dependencies = [
 [[package]]
 name = "zebra-network"
 version = "11.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4592281fa43e961048c4a2a4c153be1eacff481d64f0340bc70e1f9b84c53eca"
+source = "git+https://github.com/pacu/zebra.git?rev=487e6f9312b60bcd3007a7c17c942b1d481a93e6#487e6f9312b60bcd3007a7c17c942b1d481a93e6"
 dependencies = [
  "bitflags",
  "byteorder",
@@ -7188,8 +7183,7 @@ dependencies = [
 [[package]]
 name = "zebra-node-services"
 version = "9.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aee11bf0e45b764d09722f1e8f4c5a8d86ef021d9698b576bdf81d325c75b9b8"
+source = "git+https://github.com/pacu/zebra.git?rev=487e6f9312b60bcd3007a7c17c942b1d481a93e6#487e6f9312b60bcd3007a7c17c942b1d481a93e6"
 dependencies = [
  "color-eyre",
  "jsonrpsee-types",
@@ -7204,8 +7198,7 @@ dependencies = [
 [[package]]
 name = "zebra-rpc"
 version = "15.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "761839b2ad7ff46c1836521f674d76458cd1c78f555e56d2259ead4cc9ddb170"
+source = "git+https://github.com/pacu/zebra.git?rev=487e6f9312b60bcd3007a7c17c942b1d481a93e6#487e6f9312b60bcd3007a7c17c942b1d481a93e6"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -7265,8 +7258,7 @@ dependencies = [
 [[package]]
 name = "zebra-script"
 version = "10.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad711c56bfe377e184a9dfbec4d2c21633d0254bbea5338d20640fd62574bb88"
+source = "git+https://github.com/pacu/zebra.git?rev=487e6f9312b60bcd3007a7c17c942b1d481a93e6#487e6f9312b60bcd3007a7c17c942b1d481a93e6"
 dependencies = [
  "libzcash_script",
  "rand 0.8.7",
@@ -7279,8 +7271,7 @@ dependencies = [
 [[package]]
 name = "zebra-state"
 version = "12.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b01b530a3fdd28a9d2988895272e970bc0053acf6dbf467785f146cabf21ac3f"
+source = "git+https://github.com/pacu/zebra.git?rev=487e6f9312b60bcd3007a7c17c942b1d481a93e6#487e6f9312b60bcd3007a7c17c942b1d481a93e6"
 dependencies = [
  "bincode",
  "chrono",

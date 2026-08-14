@@ -98,6 +98,26 @@ zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc
 zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
 zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
 zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+
+# TEMPORARY: pin the zebra crates to a branch that hardens
+# `zebra_rpc::sync::TrustedChainSync` against zebrad dropping the
+# `non_finalized_state_change` stream during large initial sends
+# (ZcashFoundation/zebra#11265): catch up over unary `get_block` calls before
+# every (re)subscription, back off between re-subscription attempts, and keep
+# the finalized-tip fallback alive until the first successful commit. The
+# branch is `zallet/zebra-rpc-15-sync-hardening`, based on the commit the
+# crates.io versions this workspace already uses were published from, so only
+# zebra-rpc's code actually changes; the whole cohort is patched so the graph
+# resolves from a single source (librocksdb-sys's `links = "rocksdb"` forbids
+# two zebra-state instances). Drop this patch once the fix ships in a
+# zebra-rpc release.
+zebra-chain = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-consensus = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-network = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-node-services = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-rpc = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-script = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
+zebra-state = { git = "https://github.com/pacu/zebra.git", rev = "487e6f9312b60bcd3007a7c17c942b1d481a93e6" }
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(tokio_unstable)',

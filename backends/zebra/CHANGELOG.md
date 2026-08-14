@@ -20,7 +20,30 @@ should be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- A watchdog now supervises the read-state syncer: if the wallet's chain tip
+  stops advancing while the validator's height keeps growing, it logs an
+  error identifying the stall (and the likely upstream cause) instead of the
+  wallet silently serving stale data, and chain "no tip yet" errors include
+  the diagnosis.
+
 ### Fixed
+
+- The backend no longer livelocks when `zebrad` (v6.2.1–v6.3.0) drops the
+  `non_finalized_state_change` stream during its initial send — the regression
+  reported as [ZcashFoundation/zebra#11265], which zebrad logs as
+  `slow consumer, dropping non_finalized_state_change stream after buffer filled`
+  and which left the wallet's chain tip frozen while both processes spun in a
+  full-speed resubscribe cycle. The read-state syncer (`zebra-rpc`, temporarily
+  consumed from a patched branch) now catches up to the validator's best tip
+  over unary `get_block` calls before every subscription, so the stream's
+  initial send stays far below the server-side buffer that triggers the drop;
+  it backs off between failed subscription attempts; and it keeps publishing
+  the finalized tip until the first non-finalized block actually commits, so a
+  failing stream can no longer freeze the reported tip.
+
+[ZcashFoundation/zebra#11265]: https://github.com/ZcashFoundation/zebra/issues/11265
 
 - The chain view no longer substitutes an empty note commitment tree when
   `zebrad` reports no treestate for a finalized block at or after the pool's

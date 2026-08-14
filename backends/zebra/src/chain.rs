@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use futures::{StreamExt as _, stream::BoxStream};
 use incrementalmerkletree::frontier::CommitmentTree;
-use jsonrpsee::tracing::warn;
+use jsonrpsee::tracing::{self, warn};
 use zcash_client_backend::data_api::{
     TransactionStatus,
     chain::{ChainState, CommitmentTreeRoot},
@@ -54,12 +54,29 @@ use crate::read_state::{AbortOnDrop, init_read_state_service, network_to_zebra};
 /// this below the captured tip are treated as finalized and served by height.
 const MAX_REORG_DEPTH: u32 = 1000;
 
+/// How often the syncer watchdog compares the read-state tip against the validator's height.
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How many blocks the read-state tip may lag the validator before a watchdog check counts as
+/// stalled. Small lags are normal while the syncer commits a burst of blocks.
+const WATCHDOG_LAG_THRESHOLD: u32 = 4;
+
+/// How many consecutive stalled checks before the watchdog reports the syncer as stalled.
+/// Together with [`WATCHDOG_INTERVAL`] this tolerates a few minutes of catch-up (e.g. right
+/// after startup) without a false alarm.
+const WATCHDOG_STALLED_CHECKS: u32 = 3;
+
+/// The syncer watchdog's latest diagnosis, shared with [`ZebraChain`] so chain errors can say
+/// *why* the state is unavailable. `None` means healthy (or not yet diagnosed).
+type SyncerHealth = Arc<Mutex<Option<String>>>;
+
 /// A handle to chain data read from a local zebrad's `zebra-state`.
 #[derive(Clone)]
 pub struct ZebraChain {
     read_state_service: ReadStateService,
     validator_rpc: ValidatorRpcClient,
     params: Network,
+    syncer_health: SyncerHealth,
     _syncer: Arc<AbortOnDrop>,
 }
 
@@ -112,23 +129,115 @@ impl ZebraChain {
             .map_err(|e| ErrorKind::Init.context(e))?
         };
 
+        let syncer_health: SyncerHealth = Arc::new(Mutex::new(None));
+
         let chain = Self {
             read_state_service,
             validator_rpc,
             params,
+            syncer_health: syncer_health.clone(),
             _syncer: Arc::new(AbortOnDrop::new(sync_task)),
         };
 
-        // Lifecycle task. The syncer is owned by `_syncer` (aborted when the last
-        // `ZebraChain` clone drops). This task exists to match the backend lifecycle
-        // shape; it runs until aborted on shutdown.
-        // TODO: signal syncer failure through this task once the syncer exposes it.
-        let task = zallet_core::spawn!("Zebra read-state syncer", async move {
-            std::future::pending::<()>().await;
-            Ok::<(), Error>(())
-        });
+        // Lifecycle task: a watchdog over the read-state syncer, which is owned by `_syncer`
+        // (aborted when the last `ZebraChain` clone drops). The syncer task itself never
+        // returns and swallows stream failures internally, so the watchdog infers its health
+        // from the outside: a read-state tip that stops following the validator's height means
+        // the non-finalized syncer has stalled (e.g. the zebrad-side stream drop in
+        // <https://github.com/ZcashFoundation/zebra/issues/11265>), and without this check the
+        // wallet would silently serve a frozen tip. The zaino backend's `State` mode uses the
+        // same syncer and has no watchdog yet; if this logic proves out, port it there.
+        let task = {
+            let reader = chain.reader();
+            let validator_rpc = chain.validator_rpc.clone();
+            zallet_core::spawn!("Zebra read-state syncer", async move {
+                syncer_watchdog(reader, validator_rpc, syncer_health).await;
+                Ok::<(), Error>(())
+            })
+        };
 
         Ok((chain, task))
+    }
+}
+
+/// Periodically compares the read-state tip against the validator's reported height and
+/// records a diagnosis in `health` (also logging on transitions) when the tip stops advancing
+/// while the validator's does. Never returns; it is aborted on shutdown.
+async fn syncer_watchdog(
+    reader: ReadStateChainReader,
+    validator_rpc: ValidatorRpcClient,
+    health: SyncerHealth,
+) {
+    let mut interval = tokio::time::interval(WATCHDOG_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The read-state tip height at the previous check, if it succeeded.
+    let mut prev_state_height: Option<u32> = None;
+    let mut stalled_checks: u32 = 0;
+    let mut reported = false;
+
+    loop {
+        interval.tick().await;
+
+        // If the validator is unreachable we can't judge the syncer, so skip this check
+        // without touching the counters; the validator's own outage surfaces elsewhere.
+        let validator_height = match validator_rpc.get_blockchain_info().await {
+            Ok(info) => info.blocks,
+            Err(error) => {
+                tracing::debug!(?error, "syncer watchdog could not query the validator");
+                continue;
+            }
+        };
+
+        let state_height = match reader.tip().await {
+            Ok(tip) => tip.map(|block| u32::from(block.height())),
+            Err(error) => {
+                tracing::debug!(?error, "syncer watchdog could not read the state tip");
+                continue;
+            }
+        };
+
+        let lagging =
+            validator_height.saturating_sub(state_height.unwrap_or(0)) > WATCHDOG_LAG_THRESHOLD;
+        let advanced = match (state_height, prev_state_height) {
+            (Some(now), Some(prev)) => now > prev,
+            // First successful check, or the tip just appeared: treat as progress.
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        prev_state_height = state_height.or(prev_state_height);
+
+        if lagging && !advanced {
+            stalled_checks = stalled_checks.saturating_add(1);
+        } else {
+            stalled_checks = 0;
+            if reported {
+                reported = false;
+                *health.lock().unwrap() = None;
+                tracing::info!(
+                    ?state_height,
+                    validator_height,
+                    "the zebra read-state syncer has recovered and is following the chain tip again"
+                );
+            }
+        }
+
+        if stalled_checks >= WATCHDOG_STALLED_CHECKS && !reported {
+            reported = true;
+            let diagnosis = format!(
+                "the zebra read-state syncer appears stalled: the wallet's chain tip is at \
+                 {state_height:?} while the validator reports height {validator_height}, and the \
+                 tip has not advanced for at least {} checks {}s apart",
+                WATCHDOG_STALLED_CHECKS,
+                WATCHDOG_INTERVAL.as_secs(),
+            );
+            *health.lock().unwrap() = Some(diagnosis.clone());
+            tracing::error!(
+                "{diagnosis}; wallet data will lag the chain until it recovers. If zebrad logs \
+                 show repeated 'slow consumer, dropping non_finalized_state_change stream' \
+                 warnings, this is likely \
+                 https://github.com/ZcashFoundation/zebra/issues/11265"
+            );
+        }
     }
 }
 
@@ -205,10 +314,16 @@ impl Chain for ZebraChain {
 
     async fn snapshot(&self) -> Result<Self::View, ChainError> {
         let reader = self.reader();
-        let tip = reader
-            .tip()
-            .await?
-            .ok_or_else(|| ChainError::unavailable("the chain state has no tip yet"))?;
+        let tip = reader.tip().await?.ok_or_else(|| {
+            // Include the watchdog's diagnosis so "no tip" failures explain themselves when
+            // the cause is a stalled read-state syncer rather than normal startup.
+            match self.syncer_health.lock().unwrap().as_deref() {
+                Some(diagnosis) => ChainError::unavailable(format!(
+                    "the chain state has no tip yet ({diagnosis})"
+                )),
+                None => ChainError::unavailable("the chain state has no tip yet"),
+            }
+        })?;
         let finalized_floor =
             BlockHeight::from_u32(u32::from(tip.height()).saturating_sub(MAX_REORG_DEPTH));
         let mut cache = BTreeMap::new();

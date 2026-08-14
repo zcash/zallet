@@ -22,6 +22,16 @@ should be considered breaking changes.
 
 ### Fixed
 
+- The optional `[indexer.read_state_service]` mode no longer livelocks when
+  `zebrad` (v6.2.1–v6.3.0) drops the `non_finalized_state_change` stream
+  during its initial send
+  ([ZcashFoundation/zebra#11265](https://github.com/ZcashFoundation/zebra/issues/11265)):
+  the zebra crates are temporarily consumed from a patched branch whose
+  read-state syncer catches up to the validator's tip over unary `get_block`
+  calls before subscribing, backs off between failed subscription attempts,
+  and keeps publishing the finalized tip until the first non-finalized block
+  commits. The default JSON-RPC mode is unaffected.
+
 - The chain view no longer substitutes an empty note commitment tree when the
   validator reports no treestate for a pool at or after that pool's activation
   height. Previously any such read — for Sapling, Orchard, or Ironwood — was

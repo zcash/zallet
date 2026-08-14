@@ -20,6 +20,9 @@ use zallet_core::error::{Error, ErrorKind};
 #[derive(Deserialize)]
 pub(crate) struct BlockchainInfo {
     pub(crate) upgrades: HashMap<String, NetworkUpgradeInfo>,
+    /// The validator's best block height, used by the syncer watchdog to detect a
+    /// read-state tip that has stopped following the validator.
+    pub(crate) blocks: u32,
 }
 
 /// A single entry of the `getblockchaininfo` `upgrades` table.
