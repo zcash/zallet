@@ -9,7 +9,7 @@ use transparent::{address::TransparentAddress, keys::AccountPubKey};
 use zcash_address::{ZcashAddress, unified};
 use zcash_client_backend::{
     data_api::{
-        Account as _, WalletRead,
+        Account as _, AccountBalance, WalletRead,
         wallet::{
             ConfirmationsPolicy,
             input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy},
@@ -28,8 +28,9 @@ use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, wallet::Account};
 use zcash_keys::{address::Address, keys::UnifiedFullViewingKey};
 use zcash_protocol::{
     PoolType, ShieldedPool, TxId,
+    consensus::{BlockHeight, NetworkUpgrade, Parameters as _},
     memo::MemoBytes,
-    value::{MAX_MONEY, Zatoshis},
+    value::Zatoshis,
 };
 use zip32::{AccountId, fingerprint::SeedFingerprint};
 
@@ -80,9 +81,15 @@ impl AmountParameter {
 
 /// Parses an array of output amounts into a ZIP 321 transaction request.
 ///
-/// Rejects an empty array, duplicate recipient addresses, malformed addresses, and total
-/// output value overflow.
-pub(super) fn build_request(amounts: &[AmountParameter]) -> RpcResult<TransactionRequest> {
+/// Rejects an empty array, duplicate recipient addresses, malformed addresses, addresses
+/// that cannot be interpreted on this network, and total output value overflow.
+///
+/// Everything downstream may therefore treat a request's recipients as decodable; several
+/// callers rely on that rather than re-reporting a decoding failure of their own.
+pub(super) fn build_request(
+    params: &Network,
+    amounts: &[AmountParameter],
+) -> RpcResult<TransactionRequest> {
     if amounts.is_empty() {
         return Err(
             LegacyCode::InvalidParameter.with_static("Invalid parameter, amounts array is empty.")
@@ -107,6 +114,16 @@ pub(super) fn build_request(amounts: &[AmountParameter]) -> RpcResult<Transactio
                 amount.address(),
             )));
         }
+
+        // A syntactically valid address may still belong to another network, or name a
+        // receiver this build cannot resolve. Rejecting it here keeps address validation in
+        // one place, and reports it before the wallet is consulted at all.
+        Address::try_from_zcash_address(params, addr.clone()).map_err(|e| {
+            LegacyCode::InvalidParameter.with_message(format!(
+                "Invalid parameter, address not valid on this network: {} ({e})",
+                amount.address(),
+            ))
+        })?;
 
         let memo = amount.memo().as_deref().map(parse_memo).transpose()?;
         let value = zatoshis_from_value(amount.amount())?;
@@ -193,6 +210,145 @@ pub(super) fn transparent_change_policy_for(spend_policy: &SpendPolicy) -> Trans
     }
 }
 
+/// The shielded pool in which a payment to an Orchard receiver is constructed at
+/// `target_height`.
+///
+/// From NU6.3 (Ironwood, ZIP 2005) the Orchard turnstile is one-way: value may leave the
+/// Orchard pool but never enter it, so such a payment is delivered through the Ironwood
+/// bundle and its value lands in the Ironwood pool. Only the funds already in that pool can
+/// pay the recipient without crossing; Orchard funds spent to an external receiver cross the
+/// turnstile, and the crossing amount shows in the transaction's public value balances.
+///
+/// The recipient's address is the same either way. ZIP 316 has no Ironwood typecode, so an
+/// Ironwood note is received at an Orchard receiver; it is the pool behind the receiver that
+/// moves at activation, not the encoding.
+///
+/// This mirrors `zcash_client_backend`'s `ironwood_active_at`, which its input selector
+/// applies to the same target height when it assigns a payment its output pool. Both that
+/// predicate and the classification built on it (`resolve_shielded_destination`) are private
+/// upstream, so the rule is restated here rather than shared.
+fn orchard_receiver_pool(params: &Network, target_height: BlockHeight) -> ShieldedPool {
+    if params.is_nu_active(NetworkUpgrade::Nu6_3, target_height) {
+        ShieldedPool::Ironwood
+    } else {
+        ShieldedPool::Orchard
+    }
+}
+
+/// The value an account can spend right now in `pool`.
+///
+/// Written as a match so that adding a [`ShieldedPool`] variant fails compilation here,
+/// forcing the new pool to be given a balance rather than silently reading as empty.
+fn spendable_in(balance: &AccountBalance, pool: ShieldedPool) -> Zatoshis {
+    match pool {
+        ShieldedPool::Sapling => balance.sapling_balance(),
+        ShieldedPool::Orchard => balance.orchard_balance(),
+        ShieldedPool::Ironwood => balance.ironwood_balance(),
+    }
+    .spendable_value()
+}
+
+/// Rejects a request whose recipients cannot be paid within `privacy_policy`, given the
+/// funds in `balance` and the pools a transaction targeting `target_height` would use.
+///
+/// This runs before input selection and proving, both of which are expensive, and reports
+/// the privacy conflict directly rather than leaving the caller to infer it from a failed
+/// proposal. It is a pre-flight check, not the authority: [`enforce_privacy_policy`] is what
+/// holds the guarantee, because it inspects the proposal that will actually be built. The
+/// two must agree on which pools are distinct, or a send rejected here would have been
+/// accepted there (or the reverse); [`orchard_receiver_pool`] is what keeps them aligned.
+///
+/// The check ignores fees, so the balances over-estimate what a payment can really draw on.
+/// That is the safe direction: a pool that cannot cover a payment even before fees certainly
+/// cannot cover it after them, so this never rejects a send that would have succeeded.
+fn check_recipients_against_privacy_policy(
+    params: &Network,
+    target_height: BlockHeight,
+    request: &TransactionRequest,
+    privacy_policy: PrivacyPolicy,
+    balance: &AccountBalance,
+) -> Result<(), IncompatiblePrivacyPolicy> {
+    let mut max_sapling_available = spendable_in(balance, ShieldedPool::Sapling);
+
+    // A payment to an Orchard receiver is constructed in whichever pool
+    // `orchard_receiver_pool` names, so only that pool's funds can pay one without crossing.
+    // The other pool of the Orchard family is deliberately not counted: spending it would
+    // cross the turnstile and reveal the amount, which is what this check exists to detect.
+    let mut max_orchard_receiver_available =
+        spendable_in(balance, orchard_receiver_pool(params, target_height));
+
+    for payment in request.payments().values() {
+        let value = payment
+            .amount()
+            .expect("Every payment built by `build_request` has an amount");
+
+        // `build_request` has already rejected any recipient that does not decode on this
+        // network, so this cannot fail for a request that reached us.
+        let recipient =
+            Address::try_from_zcash_address(params, payment.recipient_address().clone())
+                .expect("Every recipient of a request built by `build_request` decodes");
+
+        match recipient {
+            Address::Transparent(_) | Address::Tex(_) => {
+                if !privacy_policy.allow_revealed_recipients() {
+                    return Err(IncompatiblePrivacyPolicy::TransparentRecipient);
+                }
+            }
+            Address::Sapling(_) => {
+                match (
+                    privacy_policy.allow_revealed_amounts(),
+                    max_sapling_available - value,
+                ) {
+                    (false, None) => {
+                        return Err(IncompatiblePrivacyPolicy::RevealingShieldedAmount(
+                            ShieldedPool::Sapling,
+                        ));
+                    }
+                    (false, Some(rest)) => max_sapling_available = rest,
+                    (true, _) => (),
+                }
+            }
+            Address::Unified(ua) => {
+                match (
+                    privacy_policy.allow_revealed_amounts(),
+                    (
+                        ua.receiver_types().contains(&unified::Typecode::Orchard),
+                        max_orchard_receiver_available - value,
+                    ),
+                    (
+                        ua.receiver_types().contains(&unified::Typecode::Sapling),
+                        max_sapling_available - value,
+                    ),
+                ) {
+                    // The preferred receiver is Orchard, and we either allow revealed
+                    // amounts or have sufficient funds in the pool that receiver is paid
+                    // from to avoid it.
+                    (true, (true, _), _) => (),
+                    (false, (true, Some(rest)), _) => max_orchard_receiver_available = rest,
+
+                    // The preferred receiver is Sapling, and we either allow revealed
+                    // amounts or have sufficient Sapling funds available to avoid it.
+                    (true, _, (true, _)) => (),
+                    (false, _, (true, Some(rest))) => max_sapling_available = rest,
+
+                    // We need to reveal something in order to make progress.
+                    _ => {
+                        if privacy_policy.allow_revealed_recipients() {
+                            // Nothing to do here.
+                        } else if privacy_policy.allow_revealed_amounts() {
+                            return Err(IncompatiblePrivacyPolicy::TransparentReceiver);
+                        } else {
+                            return Err(IncompatiblePrivacyPolicy::RevealingReceiverAmounts);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Validates the recipients against the privacy policy, proposes a transfer, and
 /// enforces both the privacy policy and the configured Orchard action limit on the
 /// resulting proposal.
@@ -208,74 +364,45 @@ pub(super) fn propose_and_check(
     confirmations_policy: ConfirmationsPolicy,
     spend_policy: &SpendPolicy,
 ) -> RpcResult<Proposal<StandardFeeRule, ReceivedNoteId>> {
-    // TODO: Fetch the real maximums within the account so we can detect correctly.
-    //       https://github.com/zcash/zallet/issues/257
-    let mut max_sapling_available = Zatoshis::const_from_u64(MAX_MONEY);
-    let mut max_orchard_available = Zatoshis::const_from_u64(MAX_MONEY);
+    // The account's real per-pool balances, so the recipient check below can tell whether a
+    // payment can be funded without crossing pools. This uses the same `confirmations_policy`
+    // that input selection will use, so the check and the selector agree on which notes are
+    // spendable rather than the check working from a more optimistic view.
+    let summary = wallet
+        .get_wallet_summary(confirmations_policy)
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+        // A wallet with no scanned range has no balances to check against. Failing here is
+        // better than proceeding as though the account were empty, which would reject every
+        // shielded send under a strict policy, or as though it were unlimited, which would
+        // skip the check entirely.
+        .ok_or_else(|| LegacyCode::InWarmup.with_static("Wallet sync required"))?;
 
-    for payment in request.payments().values() {
-        let value = payment
-            .amount()
-            .expect("Every payment built by `build_request` has an amount");
+    // An account holding nothing may be absent from the summary. That is "no funds", not "no
+    // such account": `account_id` was resolved from the caller's `fromaddress` before we got
+    // here, so it exists.
+    let empty = AccountBalance::ZERO;
+    let account_balance = summary
+        .account_balances()
+        .get(&account_id)
+        .unwrap_or(&empty);
 
-        match Address::try_from_zcash_address(params, payment.recipient_address().clone()) {
-            Err(e) => return Err(LegacyCode::InvalidParameter.with_message(e.to_string())),
-            Ok(Address::Transparent(_) | Address::Tex(_)) => {
-                if !privacy_policy.allow_revealed_recipients() {
-                    return Err(IncompatiblePrivacyPolicy::TransparentRecipient.into());
-                }
-            }
-            Ok(Address::Sapling(_)) => {
-                match (
-                    privacy_policy.allow_revealed_amounts(),
-                    max_sapling_available - value,
-                ) {
-                    (false, None) => {
-                        return Err(IncompatiblePrivacyPolicy::RevealingShieldedAmount(
-                            ShieldedPool::Sapling,
-                        )
-                        .into());
-                    }
-                    (false, Some(rest)) => max_sapling_available = rest,
-                    (true, _) => (),
-                }
-            }
-            Ok(Address::Unified(ua)) => {
-                match (
-                    privacy_policy.allow_revealed_amounts(),
-                    (
-                        ua.receiver_types().contains(&unified::Typecode::Orchard),
-                        max_orchard_available - value,
-                    ),
-                    (
-                        ua.receiver_types().contains(&unified::Typecode::Sapling),
-                        max_sapling_available - value,
-                    ),
-                ) {
-                    // The preferred receiver is Orchard, and we either allow revealed
-                    // amounts or have sufficient Orchard funds available to avoid it.
-                    (true, (true, _), _) => (),
-                    (false, (true, Some(rest)), _) => max_orchard_available = rest,
+    // The height the transaction will target, which decides which pool a payment to an
+    // Orchard receiver is constructed in. This is the same call `propose_transfer` makes
+    // first, with the same argument, so the check and the proposal cannot disagree about
+    // the target height; `None` is its `SyncRequired`, reported here as the wallet summary's
+    // absence is above.
+    let (target_height, _) = wallet
+        .get_target_and_anchor_heights(confirmations_policy.trusted())
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+        .ok_or_else(|| LegacyCode::InWarmup.with_static("Wallet sync required"))?;
 
-                    // The preferred receiver is Sapling, and we either allow revealed
-                    // amounts or have sufficient Sapling funds available to avoid it.
-                    (true, _, (true, _)) => (),
-                    (false, _, (true, Some(rest))) => max_sapling_available = rest,
-
-                    // We need to reveal something in order to make progress.
-                    _ => {
-                        if privacy_policy.allow_revealed_recipients() {
-                            // Nothing to do here.
-                        } else if privacy_policy.allow_revealed_amounts() {
-                            return Err(IncompatiblePrivacyPolicy::TransparentReceiver.into());
-                        } else {
-                            return Err(IncompatiblePrivacyPolicy::RevealingReceiverAmounts.into());
-                        }
-                    }
-                }
-            }
-        }
-    }
+    check_recipients_against_privacy_policy(
+        params,
+        target_height.into(),
+        &request,
+        privacy_policy,
+        account_balance,
+    )?;
 
     let transparent_change_policy = transparent_change_policy_for(spend_policy);
 
@@ -1799,12 +1926,20 @@ mod build_request_tests {
 
     use proptest::prelude::*;
 
+    use zcash_protocol::consensus;
+
     use super::arb::*;
     use super::*;
     use crate::components::json_rpc::utils::zec_str;
 
+    /// The network the shared [`arb`] addresses are encoded for, and so the one a request
+    /// carrying them has to be built against.
+    fn params() -> Network {
+        Network::Consensus(consensus::Network::MainNetwork)
+    }
+
     fn err_message(amounts: &[AmountParameter]) -> String {
-        build_request(amounts)
+        build_request(&params(), amounts)
             .expect_err("build_request should fail")
             .message()
             .to_string()
@@ -1820,14 +1955,17 @@ mod build_request_tests {
 
     #[test]
     fn builds_single_recipient() {
-        let request = build_request(&[amount(T_ADDR_1, "0.1")]).expect("valid request");
+        let request = build_request(&params(), &[amount(T_ADDR_1, "0.1")]).expect("valid request");
         assert_eq!(request.payments().len(), 1);
     }
 
     #[test]
     fn builds_multiple_distinct_recipients() {
-        let request = build_request(&[amount(T_ADDR_1, "0.1"), amount(T_ADDR_2, "0.2")])
-            .expect("valid request");
+        let request = build_request(
+            &params(),
+            &[amount(T_ADDR_1, "0.1"), amount(T_ADDR_2, "0.2")],
+        )
+        .expect("valid request");
         assert_eq!(request.payments().len(), 2);
     }
 
@@ -1849,6 +1987,26 @@ mod build_request_tests {
         );
     }
 
+    /// An address that parses but belongs to another network is rejected here too.
+    ///
+    /// This is what lets everything downstream treat a request's recipients as decodable;
+    /// [`check_recipients_against_privacy_policy`] relies on it rather than carrying an
+    /// error case of its own for something this function has already ruled out.
+    #[test]
+    fn rejects_address_from_another_network() {
+        let testnet = Network::Consensus(consensus::Network::TestNetwork);
+
+        let err = build_request(&testnet, &[amount(T_ADDR_1, "0.1")])
+            .expect_err("a mainnet address is not valid on testnet");
+
+        assert!(
+            err.message()
+                .starts_with("Invalid parameter, address not valid on this network:"),
+            "unexpected message: {}",
+            err.message(),
+        );
+    }
+
     #[test]
     fn rejects_memo_to_transparent_recipient() {
         // The memo is valid hex (so memo parsing succeeds), but transparent recipients
@@ -1861,12 +2019,15 @@ mod build_request_tests {
     fn builds_batch_across_all_protocols_at_once() {
         // An exchange paying out to recipients on different protocols (transparent, Sapling,
         // and two unified/Orchard) in a single transaction.
-        let request = build_request(&[
-            amount(T_ADDR_1, "0.1"),
-            amount(SAPLING_ADDR, "0.2"),
-            amount(UNIFIED_ADDR_1, "0.3"),
-            amount(UNIFIED_ADDR_2, "0.4"),
-        ])
+        let request = build_request(
+            &params(),
+            &[
+                amount(T_ADDR_1, "0.1"),
+                amount(SAPLING_ADDR, "0.2"),
+                amount(UNIFIED_ADDR_1, "0.3"),
+                amount(UNIFIED_ADDR_2, "0.4"),
+            ],
+        )
         .expect("a mixed-protocol batch should build a request");
         assert_eq!(request.payments().len(), 4);
     }
@@ -1885,7 +2046,7 @@ mod build_request_tests {
                 .collect::<Vec<_>>();
 
             let unique = indices.iter().collect::<HashSet<_>>().len();
-            let result = build_request(&amounts);
+            let result = build_request(&params(), &amounts);
 
             if unique == indices.len() {
                 let request = result.expect("distinct recipients should build a request");
@@ -1914,7 +2075,7 @@ mod build_request_tests {
                 .map(|(i, &pool_idx)| amount(ADDR_POOL[pool_idx], &zec_str(zatoshis[i])))
                 .collect::<Vec<_>>();
 
-            let request = build_request(&amounts)
+            let request = build_request(&params(), &amounts)
                 .expect("a batch of distinct mixed-protocol recipients should build a request");
             prop_assert_eq!(request.payments().len(), pool_indices.len());
         }
@@ -2068,6 +2229,527 @@ mod privacy_policy_tests {
                 .expect_err("an unknown policy name should be rejected");
             let expected = format!("Unknown privacy policy {s}");
             prop_assert_eq!(err.message(), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod recipient_preflight_tests {
+    //! Tests for [`check_recipients_against_privacy_policy`], [`orchard_receiver_pool`] and
+    //! [`spendable_in`]: the pre-flight that rejects a request whose recipients cannot be
+    //! paid within the caller's privacy policy.
+    //!
+    //! All three are pure functions of the request, the policy, the target height, and the
+    //! account's balances, so neither a wallet database nor a chain is needed here. Whether
+    //! the balance and height handed to the check are the wallet's real ones is
+    //! `propose_and_check`'s job, and is covered in `integration-tests`.
+
+    use proptest::prelude::*;
+    use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest, UnifiedSpendingKey};
+    use zcash_protocol::{
+        consensus,
+        value::{BalanceError, COIN, MAX_MONEY},
+    };
+    use zip32::AccountId;
+
+    use super::arb::{T_ADDR_1, amount};
+    use super::*;
+
+    /// A raw zatoshi amount, for terse fixtures.
+    ///
+    /// This is `zcash_protocol::value::testing::zats` verbatim, inlined only because that
+    /// module cannot be enabled here: every `test-dependencies` feature in librustzcash at
+    /// the pinned revision constrains `proptest` to `<1.7`, and this workspace is on 1.11,
+    /// so turning any of them on fails resolution outright. Everything else in this module
+    /// composes the crates' ordinary public constructors.
+    const fn zats(amount: u64) -> Zatoshis {
+        Zatoshis::const_from_u64(amount)
+    }
+
+    /// The network every address here is encoded for, and that the check runs against.
+    ///
+    /// Which network is irrelevant to the code under test; the two must simply agree, or
+    /// address decoding fails before the policy is ever consulted. Mainnet, so that the
+    /// shared [`arb`] address constants can be used alongside the addresses derived here,
+    /// and because it has a scheduled NU6.3 activation to place heights either side of.
+    const CONSENSUS_NETWORK: consensus::Network = consensus::Network::MainNetwork;
+
+    fn params() -> Network {
+        Network::Consensus(CONSENSUS_NETWORK)
+    }
+
+    /// The first height at which a payment to an Orchard receiver is built in the Ironwood
+    /// pool.
+    ///
+    /// Read from the network rather than written out, so these tests follow the activation
+    /// rather than pinning a second copy of it.
+    fn from_ironwood() -> BlockHeight {
+        params()
+            .activation_height(NetworkUpgrade::Nu6_3)
+            .expect("NU6.3 has a scheduled activation height on mainnet")
+    }
+
+    /// The last height at which a payment to an Orchard receiver is built in the Orchard
+    /// pool.
+    fn before_ironwood() -> BlockHeight {
+        from_ironwood() - 1
+    }
+
+    /// Every payment in these tests is one ZEC, so a pool's funding can be stated in whole
+    /// ZEC and read directly against it.
+    const PAYMENT_ZEC: &str = "1";
+    const PAYMENT: u64 = COIN;
+
+    /// Far more than any payment here, for the cases that are about the policy rather than
+    /// the funds. Half the money supply, so that two pools can hold it at once without
+    /// breaching the cap [`AccountBalance`] enforces across all of them.
+    const AMPLE: u64 = MAX_MONEY / 2;
+
+    /// The same, for a case that funds all three shielded pools at once.
+    const AMPLE_EACH: u64 = MAX_MONEY / 3;
+
+    /// A unified address carrying only an Orchard receiver.
+    const ORCHARD_ONLY: UnifiedAddressRequest = UnifiedAddressRequest::ORCHARD;
+
+    /// A unified address carrying only a Sapling receiver.
+    ///
+    /// `unsafe_custom` is sound here: the request names a shielded receiver, which is the
+    /// invariant its checked counterpart exists to enforce.
+    const SAPLING_ONLY: UnifiedAddressRequest = UnifiedAddressRequest::unsafe_custom(
+        ReceiverRequirement::Omit,
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Omit,
+    );
+
+    /// A unified address carrying both shielded receivers, so either pool can pay it.
+    ///
+    /// `Require` rather than [`UnifiedAddressRequest::SHIELDED`], which is `Allow` and so
+    /// only promises *at least one* of them — not enough for a test whose whole point is
+    /// that the check may choose between two pools.
+    ///
+    /// ZIP 316 forbids a unified address with no shielded receiver, so there is no way to
+    /// build one without — which is why [`IncompatiblePrivacyPolicy::TransparentReceiver`],
+    /// reachable only for such an address, has no test below.
+    const BOTH_SHIELDED: UnifiedAddressRequest = UnifiedAddressRequest::unsafe_custom(
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Omit,
+    );
+
+    /// The seed the fixed recipient addresses are derived from.
+    const SEED: [u8; 32] = [0x2a; 32];
+
+    /// The unified full viewing key a recipient address is derived from.
+    ///
+    /// Which key an address belongs to is irrelevant to a check that never looks at the
+    /// wallet — only the receivers it carries matter — so the fixed cases below pass [`SEED`]
+    /// and stay deterministic, while the properties vary the seed.
+    ///
+    /// Returns `None` for the seeds ZIP 32 rejects, so a property can skip them rather than
+    /// assert on a key that cannot exist.
+    ///
+    /// `zcash_keys` ships `arb_unified_addr` for exactly this, but its `test-dependencies`
+    /// feature is unusable here (see `Cargo.toml`), so this composes the crate's ordinary
+    /// public constructors instead.
+    fn ufvk(seed: &[u8; 32]) -> Option<UnifiedFullViewingKey> {
+        UnifiedSpendingKey::from_seed(&CONSENSUS_NETWORK, seed, AccountId::ZERO)
+            .ok()
+            .map(|usk| usk.to_unified_full_viewing_key())
+    }
+
+    /// A unified address carrying exactly `request`'s receivers, from the fixed seed.
+    fn ua(request: UnifiedAddressRequest) -> String {
+        ua_from(&SEED, request).expect("the fixed seed yields a key with the requested receivers")
+    }
+
+    /// A unified address carrying exactly `request`'s receivers, from an arbitrary seed.
+    fn ua_from(seed: &[u8; 32], request: UnifiedAddressRequest) -> Option<String> {
+        let (addr, _) = ufvk(seed)?.default_address(request).ok()?;
+        Some(addr.encode(&CONSENSUS_NETWORK))
+    }
+
+    /// A bare Sapling address, which names one pool and so cannot be paid from another
+    /// without revealing the crossing amount.
+    fn sapling_addr(seed: &[u8; 32]) -> String {
+        sapling_addr_from(seed).expect("the fixed seeds yield a key with a Sapling receiver")
+    }
+
+    /// A bare Sapling address from an arbitrary seed.
+    fn sapling_addr_from(seed: &[u8; 32]) -> Option<String> {
+        let (_, addr) = ufvk(seed)?.sapling()?.default_address();
+        Some(Address::from(addr).encode(&CONSENSUS_NETWORK))
+    }
+
+    /// An account balance with the given spendable values, in zatoshis.
+    ///
+    /// [`AccountBalance`] caps the sum across every pool at `MAX_MONEY`, so this surfaces a
+    /// [`BalanceError`] rather than swallowing it: a fixture that breaches the cap is a
+    /// broken fixture, and should say so rather than silently drop a pool's funding.
+    fn account_balance(sapling: u64, orchard: u64, ironwood: u64) -> AccountBalance {
+        let mut balance = AccountBalance::ZERO;
+        balance
+            .with_sapling_balance_mut::<_, BalanceError>(|b| b.add_spendable_value(zats(sapling)))
+            .expect("the fixture's balances are within MAX_MONEY");
+        balance
+            .with_orchard_balance_mut::<_, BalanceError>(|b| b.add_spendable_value(zats(orchard)))
+            .expect("the fixture's balances are within MAX_MONEY");
+        balance
+            .with_ironwood_balance_mut::<_, BalanceError>(|b| b.add_spendable_value(zats(ironwood)))
+            .expect("the fixture's balances are within MAX_MONEY");
+        balance
+    }
+
+    /// Runs the check over payments of `(address, ZEC amount)`.
+    fn check(
+        recipients: &[(&str, &str)],
+        privacy_policy: PrivacyPolicy,
+        target_height: BlockHeight,
+        balance: &AccountBalance,
+    ) -> Result<(), IncompatiblePrivacyPolicy> {
+        let amounts = recipients
+            .iter()
+            .map(|(addr, zec)| amount(addr, zec))
+            .collect::<Vec<_>>();
+        let request =
+            build_request(&params(), &amounts).expect("the recipients form a valid request");
+        check_recipients_against_privacy_policy(
+            &params(),
+            target_height,
+            &request,
+            privacy_policy,
+            balance,
+        )
+    }
+
+    /// Asserts that the check rejected the request for the given reason.
+    #[track_caller]
+    fn assert_rejects(
+        result: Result<(), IncompatiblePrivacyPolicy>,
+        expected: IncompatiblePrivacyPolicy,
+    ) {
+        assert_eq!(
+            result.expect_err("the request should be rejected"),
+            expected
+        );
+    }
+
+    /// Before NU6.3, a payment to an Orchard receiver is built in the Orchard pool.
+    #[test]
+    fn orchard_receiver_pool_is_orchard_before_nu6_3() {
+        assert_eq!(
+            orchard_receiver_pool(&params(), before_ironwood()),
+            ShieldedPool::Orchard,
+        );
+    }
+
+    /// From NU6.3 onwards it is built in the Ironwood pool instead, starting at the
+    /// activation height itself.
+    #[test]
+    fn orchard_receiver_pool_is_ironwood_from_nu6_3() {
+        for height in [from_ironwood(), from_ironwood() + 1] {
+            assert_eq!(
+                orchard_receiver_pool(&params(), height),
+                ShieldedPool::Ironwood,
+            );
+        }
+    }
+
+    /// Each pool's spendable value is read from that pool, and no other.
+    #[test]
+    fn spendable_in_reads_each_pool_separately() {
+        let balance = account_balance(1, 2, 3);
+
+        assert_eq!(spendable_in(&balance, ShieldedPool::Sapling), zats(1));
+        assert_eq!(spendable_in(&balance, ShieldedPool::Orchard), zats(2));
+        assert_eq!(spendable_in(&balance, ShieldedPool::Ironwood), zats(3));
+    }
+
+    /// The defect this module exists for: a Sapling recipient the Sapling pool cannot cover
+    /// can only be paid by crossing into it from another pool, which reveals the crossing
+    /// amount. Before the pre-flight had the account's real balances it could not see this,
+    /// and left the conflict to be reported after input selection had already run.
+    #[test]
+    fn underfunded_sapling_recipient_is_rejected_under_full_privacy() {
+        let addr = sapling_addr(&SEED);
+
+        assert_rejects(
+            check(
+                &[(&addr, PAYMENT_ZEC)],
+                PrivacyPolicy::FullPrivacy,
+                before_ironwood(),
+                &account_balance(PAYMENT - 1, AMPLE, 0),
+            ),
+            IncompatiblePrivacyPolicy::RevealingShieldedAmount(ShieldedPool::Sapling),
+        );
+    }
+
+    /// The same payment is accepted once the Sapling pool can cover it on its own.
+    #[test]
+    fn funded_sapling_recipient_is_accepted_under_full_privacy() {
+        let addr = sapling_addr(&SEED);
+
+        check(
+            &[(&addr, PAYMENT_ZEC)],
+            PrivacyPolicy::FullPrivacy,
+            before_ironwood(),
+            &account_balance(PAYMENT, 0, 0),
+        )
+        .expect("a payment the Sapling pool covers reveals nothing");
+    }
+
+    /// A unified address can be paid into either of its shielded receivers, so it is
+    /// rejected only when *neither* pool covers the payment alone.
+    #[test]
+    fn unified_recipient_is_rejected_when_no_single_pool_covers_it() {
+        let addr = ua(BOTH_SHIELDED);
+
+        assert_rejects(
+            check(
+                &[(&addr, PAYMENT_ZEC)],
+                PrivacyPolicy::FullPrivacy,
+                before_ironwood(),
+                // Together the pools hold more than enough; neither does alone, so paying
+                // this address has to cross between them.
+                &account_balance(PAYMENT - 1, PAYMENT - 1, 0),
+            ),
+            IncompatiblePrivacyPolicy::RevealingReceiverAmounts,
+        );
+    }
+
+    /// Either shielded pool covering the payment on its own is enough, whichever receiver
+    /// the address carries.
+    #[test]
+    fn unified_recipient_is_accepted_when_one_pool_covers_it() {
+        for (request, sapling, orchard) in [
+            (BOTH_SHIELDED, PAYMENT, 0),
+            (BOTH_SHIELDED, 0, PAYMENT),
+            (ORCHARD_ONLY, 0, PAYMENT),
+            (SAPLING_ONLY, PAYMENT, 0),
+        ] {
+            let addr = ua(request);
+
+            check(
+                &[(&addr, PAYMENT_ZEC)],
+                PrivacyPolicy::FullPrivacy,
+                before_ironwood(),
+                &account_balance(sapling, orchard, 0),
+            )
+            .expect("a pool that covers the payment alone reveals nothing");
+        }
+    }
+
+    /// Before NU6.3 an Orchard receiver is paid out of the Orchard pool, so Orchard funds
+    /// cover it without crossing.
+    #[test]
+    fn orchard_funds_pay_an_orchard_receiver_before_nu6_3() {
+        let addr = ua(ORCHARD_ONLY);
+
+        check(
+            &[(&addr, PAYMENT_ZEC)],
+            PrivacyPolicy::FullPrivacy,
+            before_ironwood(),
+            &account_balance(0, PAYMENT, 0),
+        )
+        .expect("Orchard funds pay an Orchard receiver in the Orchard era");
+    }
+
+    /// The regression this change fixes.
+    ///
+    /// From NU6.3 the Orchard turnstile is one-way, so a payment to an Orchard receiver is
+    /// built in the Ironwood pool: Orchard funds can reach it only by crossing, which
+    /// reveals the amount. Counting Orchard towards the Orchard receiver — as folding the
+    /// two pools into one balance does — accepts this send here, and leaves
+    /// `enforce_privacy_policy` to reject it after input selection has already run, with a
+    /// different error.
+    #[test]
+    fn orchard_funds_cannot_pay_an_orchard_receiver_from_nu6_3() {
+        let addr = ua(ORCHARD_ONLY);
+
+        assert_rejects(
+            check(
+                &[(&addr, PAYMENT_ZEC)],
+                PrivacyPolicy::FullPrivacy,
+                from_ironwood(),
+                &account_balance(0, PAYMENT, 0),
+            ),
+            IncompatiblePrivacyPolicy::RevealingReceiverAmounts,
+        );
+    }
+
+    /// The other side of the same rule: from NU6.3 it is the Ironwood balance that pays an
+    /// Orchard receiver without crossing.
+    #[test]
+    fn ironwood_funds_pay_an_orchard_receiver_from_nu6_3() {
+        let addr = ua(ORCHARD_ONLY);
+
+        check(
+            &[(&addr, PAYMENT_ZEC)],
+            PrivacyPolicy::FullPrivacy,
+            from_ironwood(),
+            &account_balance(0, 0, PAYMENT),
+        )
+        .expect("Ironwood funds pay an Orchard receiver in the Ironwood era");
+    }
+
+    /// The routing is symmetric: before NU6.3 the payment is built in the Orchard pool, so
+    /// Ironwood funds are the ones that would have to cross.
+    #[test]
+    fn ironwood_funds_cannot_pay_an_orchard_receiver_before_nu6_3() {
+        let addr = ua(ORCHARD_ONLY);
+
+        assert_rejects(
+            check(
+                &[(&addr, PAYMENT_ZEC)],
+                PrivacyPolicy::FullPrivacy,
+                before_ironwood(),
+                &account_balance(0, 0, PAYMENT),
+            ),
+            IncompatiblePrivacyPolicy::RevealingReceiverAmounts,
+        );
+    }
+
+    /// Orchard and Ironwood are separate value pools, so their balances are never added
+    /// together: an account holding most of the payment in each still cannot pay an Orchard
+    /// receiver without crossing, in either era.
+    #[test]
+    fn orchard_and_ironwood_balances_are_never_summed() {
+        let addr = ua(ORCHARD_ONLY);
+
+        for height in [before_ironwood(), from_ironwood()] {
+            assert_rejects(
+                check(
+                    &[(&addr, PAYMENT_ZEC)],
+                    PrivacyPolicy::FullPrivacy,
+                    height,
+                    &account_balance(0, PAYMENT - 1, PAYMENT - 1),
+                ),
+                IncompatiblePrivacyPolicy::RevealingReceiverAmounts,
+            );
+        }
+    }
+
+    /// A pool's balance is spent down across the payments that draw on it, so two payments
+    /// the pool can each afford individually may still not both fit.
+    #[test]
+    fn availability_is_spent_down_across_payments() {
+        let first = sapling_addr(&SEED);
+        let second = sapling_addr(&[0x2b; 32]);
+        assert_ne!(first, second, "the payments must have distinct recipients");
+
+        // Enough for either payment, not for both.
+        let balance = account_balance(2 * PAYMENT - 1, 0, 0);
+
+        check(
+            &[(&first, PAYMENT_ZEC)],
+            PrivacyPolicy::FullPrivacy,
+            before_ironwood(),
+            &balance,
+        )
+        .expect("one payment fits");
+
+        assert_rejects(
+            check(
+                &[(&first, PAYMENT_ZEC), (&second, PAYMENT_ZEC)],
+                PrivacyPolicy::FullPrivacy,
+                before_ironwood(),
+                &balance,
+            ),
+            IncompatiblePrivacyPolicy::RevealingShieldedAmount(ShieldedPool::Sapling),
+        );
+    }
+
+    /// Balances only decide whether a *crossing* is needed, so a policy that already permits
+    /// revealed amounts accepts a shielded recipient however little the account holds — and
+    /// whichever pool the recipient would be paid from.
+    #[test]
+    fn allowing_revealed_amounts_accepts_any_shielded_recipient() {
+        let sapling = sapling_addr(&SEED);
+        let unified = ua(BOTH_SHIELDED);
+        let empty = AccountBalance::ZERO;
+
+        for addr in [&sapling, &unified] {
+            for height in [before_ironwood(), from_ironwood()] {
+                check(
+                    &[(addr, PAYMENT_ZEC)],
+                    PrivacyPolicy::AllowRevealedAmounts,
+                    height,
+                    &empty,
+                )
+                .expect("revealing the crossing amount is permitted");
+            }
+        }
+    }
+
+    proptest! {
+        // Each case derives a spending key, which is expensive, so take fewer samples than
+        // the default 256.
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        /// A transparent recipient reveals its amount whether or not the account can afford
+        /// it, so the decision rests on the policy alone. This is what keeps the check from
+        /// coupling the transparent arm to pool balances.
+        ///
+        /// Quantified over the balances rather than over the policies: the claim is that the
+        /// balances do not enter into it, and `allow_revealed_recipients` is the whole of
+        /// what does. One policy either side of that predicate settles it — which of the
+        /// policies fall on which side is [`PrivacyPolicy::is_compatible_with`]'s business,
+        /// and is covered in `privacy_policy_tests`.
+        #[test]
+        fn transparent_recipients_do_not_consult_balances(
+            sapling in 0u64..=AMPLE_EACH,
+            orchard in 0u64..=AMPLE_EACH,
+            ironwood in 0u64..=AMPLE_EACH,
+        ) {
+            let balance = account_balance(sapling, orchard, ironwood);
+
+            for policy in [PrivacyPolicy::FullPrivacy, PrivacyPolicy::AllowRevealedRecipients] {
+                let result = check(
+                    &[(T_ADDR_1, PAYMENT_ZEC)],
+                    policy,
+                    before_ironwood(),
+                    &balance,
+                );
+                if policy.allow_revealed_recipients() {
+                    prop_assert!(result.is_ok(), "{policy:?} permits transparent recipients");
+                } else {
+                    prop_assert_eq!(
+                        result.expect_err("a transparent recipient is rejected"),
+                        IncompatiblePrivacyPolicy::TransparentRecipient,
+                    );
+                }
+            }
+        }
+
+        /// An account holding ample funds in the pool a recipient is paid from never has to
+        /// cross, so no shielded recipient is rejected.
+        ///
+        /// The pool that has to be funded is the point: before NU6.3 that is Orchard, and
+        /// from NU6.3 it is Ironwood, so this fails if the routing is dropped.
+        ///
+        /// Asserted under `FullPrivacy` alone, which is the strongest form of the claim: it
+        /// is the strictest policy, so every weaker one accepts whatever it accepts.
+        #[test]
+        fn ample_funds_in_the_paying_pool_accept_every_shielded_recipient(
+            seed in prop::array::uniform32(any::<u8>()),
+        ) {
+            let Some(sapling) = sapling_addr_from(&seed) else { return Ok(()) };
+            let Some(unified) = ua_from(&seed, BOTH_SHIELDED) else { return Ok(()) };
+
+            for height in [before_ironwood(), from_ironwood()] {
+                let balance = match orchard_receiver_pool(&params(), height) {
+                    ShieldedPool::Sapling => account_balance(AMPLE, 0, 0),
+                    ShieldedPool::Orchard => account_balance(AMPLE, AMPLE, 0),
+                    ShieldedPool::Ironwood => account_balance(AMPLE, 0, AMPLE),
+                };
+
+                for addr in [&sapling, &unified] {
+                    prop_assert!(
+                        check(&[(addr, PAYMENT_ZEC)], PrivacyPolicy::FullPrivacy, height, &balance)
+                            .is_ok(),
+                        "{addr} was rejected under FullPrivacy at height {height:?}",
+                    );
+                }
+            }
         }
     }
 }
