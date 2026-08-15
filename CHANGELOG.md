@@ -61,6 +61,13 @@ be considered breaking changes.
   to complete even when some accounts or transparent spending keys in the
   `zcashd` wallet could not be imported. The skipped items are reported as
   warnings; they remain accessible only via the original `wallet.dat` file.
+- `z_listreceivedbyaddress` JSON-RPC method, returning amounts received by an
+  address belonging to the wallet. For a shielded or unified address that
+  corresponds to a unified account, the account's received outputs are
+  returned irrespective of the provided address's diversifier, matching
+  `z_listunspent`'s account-level semantics; a transparent address returns
+  only that address's outputs. New `offset` and `limit` parameters (as for
+  `z_listtransactions`) allow paginating large results.
 
 ### Changed
 

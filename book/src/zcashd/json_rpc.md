@@ -121,6 +121,43 @@ Changes to response:
   - `memoStr` field on outputs is no longer only omitted if `memo` does not
     contain valid UTF-8.
 
+### `z_listreceivedbyaddress`
+
+Changes to parameters:
+- New `offset` and `limit` optional parameters (as for `z_listtransactions`),
+  allowing large result sets to be paginated.
+
+Changes to response:
+- For a shielded or unified address that corresponds to a unified account, the
+  received outputs of that account are returned irrespective of whether the
+  provided address's diversifier corresponds to the diversifier of the address
+  that received the funds; this includes change outputs received on
+  wallet-internal addresses, which are reported with `change: true`. A
+  transparent address returns only the outputs received by that specific
+  address.
+- An address that is a bare receiver of a larger Unified Address in the wallet
+  is rejected, as in `zcashd`. However, an address whose receivers exactly
+  match the receivers of a wallet address (for example, the Sapling address of
+  an account created by `z_importkey`) is accepted.
+- Locked notes are now included. `zcashd` silently excluded notes locked via
+  `lockunspent`; whether a note is locked is a concern for input selection,
+  not for reporting what the wallet has received.
+- The `memo` and `memoStr` fields are omitted for shielded outputs whose memo
+  has not yet been downloaded from the chain. This could not occur in
+  `zcashd`, which always had the full transaction available.
+- Sprout is unsupported; the `pool` field can additionally be `"ironwood"`.
+  The `jsindex` and `jsoutindex` fields do not exist; `outindex` is used for
+  all pools, as `zcashd`'s transparent entries already did.
+- `zcashd`'s quirk of skipping coinbase transactions that have no Sapling
+  outputs is not replicated.
+- TEX addresses are rejected.
+- Results are now returned in a deterministic order (mined height ascending,
+  with unmined outputs last); `zcashd`'s ordering was unspecified.
+- Legacy Sapling addresses migrated from a `zcashd` `wallet.dat` are not
+  tracked by the wallet (their notes are not scanned), so querying them
+  returns the "does not belong to this node" error; see the
+  [`zcashd` wallet migration](../cli/migrate-zcashd-wallet.md) documentation.
+
 ### `z_listunspent`
 
 Changes to response:

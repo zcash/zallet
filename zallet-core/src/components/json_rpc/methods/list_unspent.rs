@@ -20,14 +20,16 @@ use zcash_client_backend::{
     wallet::NoteId,
 };
 use zcash_keys::address::Address;
-use zcash_protocol::{ShieldedPool, consensus::BlockHeight, value::Zatoshis};
+use zcash_protocol::{ShieldedPool, value::Zatoshis};
 use zip32::Scope;
 
 use crate::components::{
     database::DbConnection,
     json_rpc::{
         server::LegacyCode,
-        utils::{JsonZec, parse_as_of_height, parse_minconf, value_from_zatoshis},
+        utils::{
+            JsonZec, confirmation_count, parse_as_of_height, parse_minconf, value_from_zatoshis,
+        },
     },
 };
 
@@ -111,20 +113,6 @@ pub(super) const PARAM_INCLUDE_WATCHONLY_DESC: &str =
 pub(super) const PARAM_ADDRESSES_DESC: &str =
     "If non-empty, only outputs received by the provided addresses will be returned.";
 pub(super) const PARAM_AS_OF_HEIGHT_DESC: &str = "Execute the query as if it were run when the blockchain was at the height specified by this argument.";
-
-/// The number of confirmations that an output of a transaction mined at `mined_height` has as
-/// of `target_height`.
-///
-/// An output of a transaction that is not mined in the main chain has zero confirmations. Such
-/// an output can be reported by this RPC when its transaction is in the mempool, or when a
-/// transaction that had been mined has been un-mined by a reorg and its containing block has
-/// not yet been re-scanned.
-fn confirmation_count(target_height: TargetHeight, mined_height: Option<BlockHeight>) -> u32 {
-    // Subtraction of block heights saturates at zero, which correctly reports a transaction
-    // mined at or above the target height (possible when `asOfHeight` places the target below
-    // the chain tip) as having no confirmations as of that height.
-    mined_height.map_or(0, |h| target_height - h)
-}
 
 /// Whether an output with the given number of confirmations is within the range of
 /// confirmations requested for this query.

@@ -86,6 +86,8 @@ mod z_get_total_balance;
 #[cfg(zallet_build = "wallet")]
 pub(crate) mod z_import_address;
 #[cfg(zallet_build = "wallet")]
+mod z_list_received_by_address;
+#[cfg(zallet_build = "wallet")]
 mod z_send_from_account;
 #[cfg(zallet_build = "wallet")]
 mod z_send_many;
@@ -596,6 +598,43 @@ pub(crate) trait WalletRpc {
         addresses: Option<Vec<String>>,
         as_of_height: Option<i64>,
     ) -> list_unspent::Response;
+
+    /// Returns a list of amounts received by an address belonging to the wallet, including
+    /// both spent and unspent outputs.
+    ///
+    /// For a shielded or unified address that corresponds to a unified account, the
+    /// received outputs of that account are returned irrespective of whether the provided
+    /// address's diversifier corresponds to the diversifier of the address that received
+    /// the funds; this includes change outputs received on wallet-internal addresses. A
+    /// transparent address returns only the outputs received by that specific address.
+    ///
+    /// Results are ordered by mined height ascending (unmined outputs last); `offset` and
+    /// `limit` page over that ordering.
+    ///
+    /// # Arguments
+    /// - `address`: The address that received the outputs to list.
+    /// - `minconf`: Only include outputs of transactions confirmed at least this many
+    ///   times (default = 1). Must be at least 1 when `as_of_height` is provided; a value
+    ///   of 0 includes outputs of unmined transactions.
+    /// - `as_of_height`: Execute the query as if it were run when the blockchain was at
+    ///   the height specified by this argument. The default is to use the entire
+    ///   blockchain that the node is aware of. -1 can be used as in other RPC calls to
+    ///   indicate the current height (including the mempool), but this does not support
+    ///   negative values in general. A “future” height will fall back to the current
+    ///   height.
+    /// - `offset`: An optional number of outputs to skip over before a page of results is
+    ///   returned. Defaults to zero.
+    /// - `limit`: An optional upper bound on the number of results that should be
+    ///   returned in a page.
+    #[method(name = "z_listreceivedbyaddress")]
+    async fn z_list_received_by_address(
+        &self,
+        address: &str,
+        minconf: Option<u32>,
+        as_of_height: Option<i64>,
+        offset: Option<u32>,
+        limit: Option<u32>,
+    ) -> z_list_received_by_address::Response;
 
     /// Returns the number of notes available in the wallet for each shielded value pool.
     ///
@@ -1329,6 +1368,25 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             include_watchonly,
             addresses,
             as_of_height,
+        )
+    }
+
+    async fn z_list_received_by_address(
+        &self,
+        address: &str,
+        minconf: Option<u32>,
+        as_of_height: Option<i64>,
+        offset: Option<u32>,
+        limit: Option<u32>,
+    ) -> z_list_received_by_address::Response {
+        self.general.ensure_synced()?;
+        z_list_received_by_address::call(
+            self.wallet().await?.as_ref(),
+            address,
+            minconf,
+            as_of_height,
+            offset,
+            limit,
         )
     }
 
