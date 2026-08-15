@@ -71,7 +71,7 @@ Statuses:
 | `z_listaccounts` | Implemented (altered) | [Changes](json_rpc.md#z_listaccounts) |
 | `z_listaddresses` | Omitted | Use `listaddresses` |
 | `z_listoperationids` | Implemented | |
-| `z_listreceivedbyaddress` | Not yet implemented | [#84](https://github.com/zcash/zallet/issues/84) |
+| `z_listreceivedbyaddress` | Implemented (altered) | [Changes](json_rpc.md#z_listreceivedbyaddress) |
 | `z_listunifiedreceivers` | Implemented | |
 | `z_listunspent` | Implemented (altered) | [Changes](json_rpc.md#z_listunspent) |
 | `z_mergetoaddress` | Not yet implemented | [#87](https://github.com/zcash/zallet/issues/87) |

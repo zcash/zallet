@@ -25,6 +25,16 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `z_listreceivedbyaddress` JSON-RPC method, returning amounts received by an
+  address belonging to the wallet. For a shielded or unified address that
+  corresponds to a unified account, the account's received outputs are
+  returned irrespective of the provided address's diversifier, including the
+  change received on its internal addresses; a transparent address returns
+  only that address's outputs. New `offset` and `limit` parameters (as for
+  `z_listtransactions`) allow paginating large results.
+
 ## [0.1.0-beta.3] - 2026-08-24
 
 ### Added
