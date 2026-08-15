@@ -77,24 +77,27 @@ tempfile = "3"
 librocksdb-sys = { git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev = "0442de85de82234643b5ba0a8f66a13ecf31b17d" }
 
 # TEMPORARY: pin the wallet-critical librustzcash crates to the branch adding
-# `WalletWrite::import_standalone_transparent_address` (zcash/librustzcash#2941),
-# which `zallet import-address` uses to track watch-only transparent addresses
-# imported without key material. The full in-repo dependency closure of the two
-# client crates is patched to the same rev so the whole cohort resolves from a
-# single source. Repoint at crates.io once the change lands in a release.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_pool_migration = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+# `WalletRead::get_account_received_outputs` (zcash/librustzcash#2972), which
+# `z_listreceivedbyaddress` uses to enumerate an account's received outputs
+# (spent and unspent). The branch is based on librustzcash main, so it also
+# carries `WalletWrite::import_standalone_transparent_address`
+# (zcash/librustzcash#2941), which `zallet import-address` uses. The full
+# in-repo dependency closure of the two client crates is patched to the same
+# rev so the whole cohort resolves from a single source. Repoint at crates.io
+# once the changes land in a release.
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+zcash_pool_migration = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "ac28b9150b8efa002b9e541bace60462fed611d4" }
 
 # TEMPORARY: pin the zaino crates to the zodl-inc/zaino branch
 # `update/librustzcash-0.24.0-rc.4`, which bumps zaino to the librustzcash
