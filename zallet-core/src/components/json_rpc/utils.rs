@@ -322,6 +322,24 @@ pub(super) fn parse_minconf(
     }
 }
 
+/// The number of confirmations that an output of a transaction mined at `mined_height` has as
+/// of `target_height`.
+///
+/// An output of a transaction that is not mined in the main chain has zero confirmations. Such
+/// an output can be reported by an RPC when its transaction is in the mempool, or when a
+/// transaction that had been mined has been un-mined by a reorg and its containing block has
+/// not yet been re-scanned.
+#[cfg(zallet_build = "wallet")]
+pub(super) fn confirmation_count(
+    target_height: zcash_client_backend::data_api::wallet::TargetHeight,
+    mined_height: Option<BlockHeight>,
+) -> u32 {
+    // Subtraction of block heights saturates at zero, which correctly reports a transaction
+    // mined at or above the target height (possible when `asOfHeight` places the target below
+    // the chain tip) as having no confirmations as of that height.
+    mined_height.map_or(0, |h| target_height - h)
+}
+
 /// Equivalent of `AmountFromValue` in `zcashd`, permitting the same input formats.
 #[cfg(zallet_build = "wallet")]
 pub(super) fn zatoshis_from_value(value: &JsonValue) -> RpcResult<Zatoshis> {

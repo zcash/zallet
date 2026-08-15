@@ -448,6 +448,14 @@ impl WalletRead for DbConnection {
         self.with(|db_data| db_data.get_received_outputs(txid, target_height, confirmations_policy))
     }
 
+    fn get_account_received_outputs(
+        &self,
+        account: Self::AccountId,
+        query: &zcash_client_backend::data_api::ReceivedOutputsQuery,
+    ) -> Result<Vec<zcash_client_backend::data_api::AccountReceivedOutput>, Self::Error> {
+        self.with(|db_data| db_data.get_account_received_outputs(account, query))
+    }
+
     fn find_account_for_address<P: zcash_protocol::consensus::Parameters>(
         &self,
         params: &P,
