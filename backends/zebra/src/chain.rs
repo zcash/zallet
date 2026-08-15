@@ -318,9 +318,9 @@ impl Chain for ZebraChain {
             // Include the watchdog's diagnosis so "no tip" failures explain themselves when
             // the cause is a stalled read-state syncer rather than normal startup.
             match self.syncer_health.lock().unwrap().as_deref() {
-                Some(diagnosis) => ChainError::unavailable(format!(
-                    "the chain state has no tip yet ({diagnosis})"
-                )),
+                Some(diagnosis) => {
+                    ChainError::unavailable(format!("the chain state has no tip yet ({diagnosis})"))
+                }
                 None => ChainError::unavailable("the chain state has no tip yet"),
             }
         })?;
