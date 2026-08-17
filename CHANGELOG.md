@@ -121,6 +121,10 @@ be considered breaking changes.
 
 ### Fixed
 
+- Wallet sync wakes transaction enhancement after connected-block scanning has
+  queued its requests, so newly mined transparent funds become visible without
+  waiting for another chain-tip change.
+
 - A note commitment tree conflict during sync no longer shuts the wallet down
   permanently. Zallet now rolls the wallet back to a progressively older point
   and rescans, up to a bounded number of attempts and never below the wallet's

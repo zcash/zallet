@@ -948,7 +948,6 @@ async fn steady_state_iteration<C: Chain>(
                 )
             })
             .expect("closure always returns Some");
-        tip_change_signal.notify_one();
         status.set_tip(current_tip.height());
 
         // Find where the wallet's history rejoins the backend's best chain.
@@ -1011,6 +1010,10 @@ async fn steady_state_iteration<C: Chain>(
             // Now that we're done applying the block, update our chain pointer.
             *prev_tip = current_block;
         }
+
+        // Scanning connected blocks can queue transaction enhancement requests. Wake the
+        // request worker only after those requests are visible in the wallet database.
+        tip_change_signal.notify_one();
     }
 
     // The backing node's tip may itself sit at or beyond the divergence height — e.g. the
