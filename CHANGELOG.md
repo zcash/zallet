@@ -121,6 +121,8 @@ be considered breaking changes.
 
 ### Fixed
 
+- Address-based transparent-history recovery now fails before advancing its
+  scan watermark when the selected chain view omits a referenced transaction.
 - A note commitment tree conflict during sync no longer shuts the wallet down
   permanently. Zallet now rolls the wallet back to a progressively older point
   and rescans, up to a bounded number of attempts and never below the wallet's

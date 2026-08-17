@@ -873,6 +873,8 @@ mod tests {
     #[derive(Clone)]
     pub(crate) struct MockChainView {
         tip: ChainBlock,
+        #[cfg(not(feature = "spend-index"))]
+        missing_address_history_transaction: Option<TxId>,
     }
 
     impl ChainView for MockChainView {
@@ -963,7 +965,10 @@ mod tests {
             _address: &TransparentAddress,
             _range: Range<BlockHeight>,
         ) -> Result<Vec<TxId>, ChainError> {
-            Ok(Vec::new())
+            Ok(self
+                .missing_address_history_transaction
+                .into_iter()
+                .collect())
         }
 
         #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
@@ -978,7 +983,11 @@ mod tests {
             height: BlockHeight::from_u32(42),
             hash: BlockHash([7u8; 32]),
         };
-        let view = MockChainView { tip };
+        let view = MockChainView {
+            tip,
+            #[cfg(not(feature = "spend-index"))]
+            missing_address_history_transaction: None,
+        };
         assert_eq!(view.tip().await.unwrap(), tip);
         // The fork point resolves when the locator includes the view's own tip, and
         // not for a locator that excludes it.
@@ -1273,6 +1282,8 @@ mod tests {
         params: super::Network,
         upgrades: Vec<ReportedUpgrade>,
         tip: BlockHeight,
+        #[cfg(not(feature = "spend-index"))]
+        missing_address_history_transaction: Option<TxId>,
     }
 
     impl MockChain {
@@ -1281,7 +1292,18 @@ mod tests {
                 params: super::Network::Consensus(Network::MainNetwork),
                 upgrades,
                 tip: BlockHeight::from_u32(tip),
+                #[cfg(not(feature = "spend-index"))]
+                missing_address_history_transaction: None,
             }
+        }
+
+        #[cfg(not(feature = "spend-index"))]
+        pub(crate) fn with_missing_address_history_transaction(
+            mut self,
+            transaction_id: TxId,
+        ) -> Self {
+            self.missing_address_history_transaction = Some(transaction_id);
+            self
         }
     }
 
@@ -1332,6 +1354,8 @@ mod tests {
                     height: self.tip,
                     hash: BlockHash([0u8; 32]),
                 },
+                #[cfg(not(feature = "spend-index"))]
+                missing_address_history_transaction: self.missing_address_history_transaction,
             })
         }
     }

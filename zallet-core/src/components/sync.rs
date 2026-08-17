@@ -1216,7 +1216,7 @@ fn address_request_bounds(
 }
 
 /// Services a [`TransactionDataRequest::TransactionsInvolvingAddress`] spend-search request on a
-/// backend without a per-outpoint spend index (the `zaino` build).
+/// backend without a per-outpoint spend index.
 ///
 /// Cheap path first: diff the wallet's tracked unspent outputs at the address against the chain's
 /// current unspent set. Only if one of ours is missing (i.e. actually spent on chain) is the
@@ -1266,18 +1266,35 @@ async fn service_address_request<V: ChainView>(
             .await
             .map_err(SyncError::Chain)?;
         for txid in txids {
-            if let Some(tx) = chain_view
-                .get_transaction(txid)
-                .await
-                .map_err(SyncError::Chain)?
-            {
-                decrypt_and_store_transaction(params, db_data, tx.inner(), tx.mined_height())?;
-            }
+            let tx = required_address_history_transaction(
+                txid,
+                chain_view
+                    .get_transaction(txid)
+                    .await
+                    .map_err(SyncError::Chain)?,
+            )
+            .map_err(SyncError::Chain)?;
+            decrypt_and_store_transaction(params, db_data, tx.inner(), tx.mined_height())?;
         }
     }
 
     db_data.notify_address_checked(request, as_of_height)?;
     Ok(())
+}
+
+#[cfg(not(feature = "spend-index"))]
+fn required_address_history_transaction(
+    transaction_id: TxId,
+    transaction: Option<super::chain::ChainTx>,
+) -> Result<super::chain::ChainTx, ChainError> {
+    transaction.ok_or_else(|| {
+        ChainError::invalid_data(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "address history transaction {transaction_id} was absent from the same chain view"
+            ),
+        ))
+    })
 }
 
 /// Fetches information that the wallet requests to complete its view of transaction
@@ -1352,17 +1369,20 @@ async fn data_requests<C: Chain>(
                 }
                 // With `spend-index`, spend detection uses `GetSpendingTx` (below) and any
                 // remaining `TransactionsInvolvingAddress` requests are ephemeral-address
-                // discovery, covered by full-block scanning. Without it (the `zaino` build),
+                // discovery, covered by full-block scanning. Without a per-outpoint spend index,
                 // these carry the spend-search requests and are serviced via address queries.
                 #[cfg(feature = "spend-index")]
                 TransactionDataRequest::TransactionsInvolvingAddress(_) => (),
                 #[cfg(not(feature = "spend-index"))]
                 TransactionDataRequest::TransactionsInvolvingAddress(request) => {
-                    if let Err(e) =
-                        service_address_request(&chain_view, params, db_data, request, view_tip)
-                            .await
+                    match service_address_request(&chain_view, params, db_data, request, view_tip)
+                        .await
                     {
-                        warn!("Failed to service transparent-address data request: {e}");
+                        Ok(()) => {}
+                        Err(e @ SyncError::Chain(ChainError::InvalidData(_))) => return Err(e),
+                        Err(e) => {
+                            warn!("Failed to service transparent-address data request: {e}");
+                        }
                     }
                 }
                 #[cfg(feature = "spend-index")]
@@ -1969,6 +1989,168 @@ mod tests {
             BlockHeight::from_u32(1_810_000)..BlockHeight::from_u32(4_090_001)
         );
         assert_eq!(as_of, tip);
+    }
+}
+
+#[cfg(all(test, not(feature = "spend-index")))]
+mod address_history_tests {
+    use std::{sync::Arc, time::Duration};
+
+    use secrecy::SecretVec;
+    use tokio::sync::Notify;
+    use transparent::{
+        bundle::{OutPoint, TxOut},
+        keys::TransparentKeyScope,
+    };
+    use zcash_client_backend::{
+        data_api::{
+            AccountBirthday, TransactionDataRequest, WalletRead, WalletWrite, chain::ChainState,
+        },
+        proto::compact_formats::{ChainMetadata, CompactBlock},
+        scanning::{Nullifiers, ScanningKeys, scan_block},
+        wallet::WalletTransparentOutput,
+    };
+    use zcash_client_sqlite::AccountUuid;
+    use zcash_primitives::block::BlockHash;
+    use zcash_protocol::{TxId, consensus::BlockHeight, value::Zatoshis};
+
+    use super::{DbConnection, SyncError, data_requests, required_address_history_transaction};
+    use crate::{
+        components::{
+            chain::{ChainError, MockChain},
+            database::Database,
+        },
+        config::ZalletConfig,
+    };
+
+    fn h(height: u32) -> BlockHeight {
+        BlockHeight::from_u32(height)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_address_history_stops_data_requests_without_advancing_watermark() {
+        crate::i18n::load_languages(&[]);
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates wallet database");
+        let mut wallet = database.handle().await.expect("opens wallet database");
+        let birthday = h(1);
+        let tip = h(2);
+        let seed = SecretVec::new(vec![0; 32]);
+        let (account_id, _) = wallet
+            .create_account(
+                "address history test",
+                &seed,
+                &AccountBirthday::from_parts(
+                    ChainState::empty(birthday - 1, BlockHash([0; 32])),
+                    None,
+                ),
+                None,
+            )
+            .expect("creates test account");
+        let transaction_id = TxId::from_bytes([7; 32]);
+        let scanned_birthday = scan_block(
+            wallet.params(),
+            CompactBlock {
+                height: u64::from(u32::from(birthday)),
+                hash: vec![1; 32],
+                prev_hash: vec![0; 32],
+                chain_metadata: Some(ChainMetadata {
+                    sapling_commitment_tree_size: 0,
+                    orchard_commitment_tree_size: 0,
+                    ironwood_commitment_tree_size: 0,
+                }),
+                ..Default::default()
+            },
+            &ScanningKeys::<AccountUuid, ()>::empty(),
+            &Nullifiers::<AccountUuid>::empty(),
+            None,
+        )
+        .expect("scans empty birthday block");
+        wallet
+            .put_blocks(
+                &ChainState::empty(birthday - 1, BlockHash([0; 32])),
+                vec![scanned_birthday],
+            )
+            .expect("stores birthday block");
+        wallet.update_chain_tip(tip).expect("records chain tip");
+        let address = wallet
+            .transaction_data_requests()
+            .expect("reads transaction data requests")
+            .into_iter()
+            .find_map(|request| match request {
+                TransactionDataRequest::TransactionsInvolvingAddress(request) => {
+                    Some(request.address())
+                }
+                _ => None,
+            })
+            .expect("finds an ephemeral-address request");
+        let output = WalletTransparentOutput::from_parts(
+            OutPoint::new([9; 32], 0),
+            TxOut::new(Zatoshis::const_from_u64(100_000), address.script().into()),
+            Some(birthday),
+            Some(account_id),
+            Some(TransparentKeyScope::EPHEMERAL),
+            None,
+        )
+        .expect("builds transparent output");
+        wallet
+            .put_received_transparent_utxo(&output)
+            .expect("stores transparent output");
+
+        let request_start = |wallet: &DbConnection| {
+            let requests = wallet
+                .transaction_data_requests()
+                .expect("reads transaction data requests");
+            requests
+                .iter()
+                .find_map(|request| match request {
+                    TransactionDataRequest::TransactionsInvolvingAddress(request)
+                        if request.address() == address =>
+                    {
+                        Some(request.block_range_start())
+                    }
+                    _ => None,
+                })
+                .expect("finds source-address request")
+        };
+        let watermark_before = request_start(&wallet);
+        let tip_change_signal = Arc::new(Notify::new());
+        tip_change_signal.notify_one();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            data_requests(
+                MockChain::reporting(Vec::new(), u32::from(tip))
+                    .with_missing_address_history_transaction(transaction_id),
+                &config.consensus.network(),
+                &mut wallet,
+                tip_change_signal,
+            ),
+        )
+        .await
+        .expect("invalid address history stops the data-request task")
+        .expect_err("invalid address history propagates");
+
+        assert!(matches!(
+            error,
+            SyncError::Chain(ChainError::InvalidData(_))
+        ));
+        assert_eq!(request_start(&wallet), watermark_before);
+    }
+
+    #[test]
+    fn missing_required_address_history_transaction_fails_closed() {
+        let transaction_id = TxId::from_bytes([7; 32]);
+
+        assert!(matches!(
+            required_address_history_transaction(transaction_id, None),
+            Err(ChainError::InvalidData(_))
+        ));
     }
 }
 
