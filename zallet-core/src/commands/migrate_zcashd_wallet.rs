@@ -403,8 +403,8 @@ impl MigrateZcashdWalletCmd {
         // constructs precise account birthdays with no further chain access. In
         // no-scan mode, estimate a conservative birthday from transaction expiry
         // heights; the importer will schedule a rescan from there.
+        let mut block_heights = HashMap::new();
         let (birthday_chain_state, recover_until) = if let Some(chain_view) = chain_view.as_ref() {
-            let mut block_heights = HashMap::new();
             for tx in document.transactions().values() {
                 if let Some(position) = tx.block_position() {
                     let block_hash = BlockHash(*position.block_hash().as_bytes());
@@ -470,6 +470,7 @@ impl MigrateZcashdWalletCmd {
             birthday_chain_state.as_ref(),
             recover_until,
             no_scan_birthday_estimate,
+            &block_heights,
         );
 
         // Persist all spending material in the keystore before any wallet-database
@@ -905,6 +906,7 @@ fn enriched_document(
     birthday_chain_state: Option<&zewif::ChainState>,
     recover_until: Option<BlockHeight>,
     no_scan_birthday_estimate: Option<BlockHeight>,
+    main_chain_block_heights: &HashMap<BlockHash, BlockHeight>,
 ) -> zewif::Zewif {
     let mut out = zewif::Zewif::new(
         document.export_height(),
@@ -970,10 +972,28 @@ fn enriched_document(
     // recorded only against a non-main-chain block (a conflicted or reorged
     // transaction). Importing them all here is what preserves that history.
     //
-    // The importer stores each transaction as unmined (it has no mined height to
-    // record); for one that was in fact mined, the scan later re-encounters it and
-    // fills in its true height and block.
-    out.set_transactions(document.transactions().clone());
+    // Record the main-chain mined height on each transaction whose block hash
+    // resolved to one. The importer stores a transaction without a mined height as
+    // unmined, and an unmined transaction can only be re-parsed later (to select
+    // its consensus branch ID) if it carries a non-zero expiry height; a mined
+    // transaction whose sender disabled expiry (`nExpiryHeight = 0`) would make
+    // the import fail. Transactions whose block hash did not resolve (never mined,
+    // or recorded against a non-main-chain block) are stored unmined; the scan
+    // fills in the height of any that later re-enter the main chain.
+    let mut transactions = document.transactions().clone();
+    for tx in transactions.values_mut() {
+        if tx.mined_height().is_some() {
+            continue;
+        }
+        let resolved_height = tx
+            .block_position()
+            .map(|position| BlockHash(*position.block_hash().as_bytes()))
+            .and_then(|hash| main_chain_block_heights.get(&hash));
+        if let Some(height) = resolved_height {
+            tx.set_mined_height(zewif::BlockHeight::from_u32(u32::from(*height)));
+        }
+    }
+    out.set_transactions(transactions);
 
     if let Some(store) = secret_store {
         out.set_secrets(zewif::Secrets::Plain(store));
@@ -1256,6 +1276,8 @@ impl From<ChainError> for MigrateError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use incrementalmerkletree::{Position, frontier::Frontier};
     use orchard::tree::MerkleHashOrchard;
     use zcash_client_sqlite::{
@@ -1268,9 +1290,10 @@ mod tests {
     use zcash_protocol::consensus::{BlockHeight, NetworkType};
 
     use super::{
-        MigrateError, MigrateZcashdWalletCmd, ZCASHD_LEGACY_ACCOUNT_INDEX, ZCASHD_LEGACY_SOURCE,
-        check_import_report, derive_regtest_activations, describe_skipped_items, enriched_document,
-        has_seedless_legacy_account, mint_legacy_mnemonic, to_zewif_frontier,
+        BlockHash, MigrateError, MigrateZcashdWalletCmd, ZCASHD_LEGACY_ACCOUNT_INDEX,
+        ZCASHD_LEGACY_SOURCE, check_import_report, derive_regtest_activations,
+        describe_skipped_items, enriched_document, has_seedless_legacy_account,
+        mint_legacy_mnemonic, to_zewif_frontier,
     };
 
     fn node(byte: u8) -> MerkleHashOrchard {
@@ -1554,6 +1577,7 @@ mod tests {
             None,
             None,
             Some(BlockHeight::from_u32(1_900_000)),
+            &HashMap::new(),
         );
 
         let account = &enriched.wallets()[0].accounts()[0];
@@ -1588,6 +1612,7 @@ mod tests {
             Some(&chain_state),
             Some(BlockHeight::from_u32(2_000_000)),
             None,
+            &HashMap::new(),
         );
 
         let account = &enriched.wallets()[0].accounts()[0];
@@ -1609,6 +1634,50 @@ mod tests {
             Some(zewif::BlockHeight::from_u32(2_000_000))
         );
         assert_eq!(enriched.transactions().len(), 1);
+    }
+
+    #[test]
+    fn enrichment_records_resolved_mined_heights() {
+        let (mut document, _legacy_fp, mnemonic_fp) = test_document();
+
+        // A transaction recorded against a block that did not resolve to a
+        // main-chain height (conflicted or reorged).
+        let conflicted_txid = zewif::TxId::from_bytes([6u8; 32]);
+        let mut conflicted = zewif::Transaction::new(conflicted_txid);
+        conflicted.set_block_position(zewif::TxBlockPosition::new(
+            zewif::BlockHash::from_bytes([9u8; 32]),
+            0,
+        ));
+        document.add_transaction(conflicted_txid, conflicted);
+
+        // A never-mined transaction (no block position).
+        let unmined_txid = zewif::TxId::from_bytes([5u8; 32]);
+        document.add_transaction(unmined_txid, zewif::Transaction::new(unmined_txid));
+
+        // The mined transaction from `test_document` sits in block [7u8; 32].
+        let block_heights =
+            HashMap::from([(BlockHash([7u8; 32]), BlockHeight::from_u32(1_234_567))]);
+
+        let enriched = enriched_document(
+            &document,
+            None,
+            Some(&mnemonic_fp),
+            None,
+            None,
+            None,
+            &block_heights,
+        );
+
+        let mined_txid = zewif::TxId::from_bytes([4u8; 32]);
+        assert_eq!(
+            enriched.transactions()[&mined_txid].mined_height(),
+            Some(zewif::BlockHeight::from_u32(1_234_567))
+        );
+        assert_eq!(
+            enriched.transactions()[&conflicted_txid].mined_height(),
+            None
+        );
+        assert_eq!(enriched.transactions()[&unmined_txid].mined_height(), None);
     }
 
     /// A document as produced from a wallet with no HD seed material: the legacy
@@ -1699,8 +1768,15 @@ mod tests {
         let mut store = zewif::SecretStore::new();
         let minted_fp = mint_legacy_mnemonic(&mut store);
 
-        let enriched =
-            enriched_document(&document, Some(store), Some(&minted_fp), None, None, None);
+        let enriched = enriched_document(
+            &document,
+            Some(store),
+            Some(&minted_fp),
+            None,
+            None,
+            None,
+            &HashMap::new(),
+        );
 
         let accounts = enriched.wallets()[0].accounts();
         // The legacy account is anchored to the minted mnemonic.

@@ -129,6 +129,13 @@ be considered breaking changes.
 - A regtest wallet's transactions mined under NU6.3 (Ironwood) no longer fail
   to import with "Consensus branch ID not known". Bumped `zewif-zcashd` to
   0.1.0-rc.5, which includes NU6.3 in the regtest activation schedule.
+- `migrate-zcashd-wallet` now records each migrated transaction's main-chain
+  mined height (resolved from the block hash the zcashd wallet stored) instead
+  of importing every transaction as unmined. Previously, a mined transaction
+  whose sender had disabled expiry (`nExpiryHeight = 0`) could not be read back
+  during the import — there was no height from which to infer its consensus
+  branch ID — and the migration failed with "Consensus branch ID not known,
+  cannot parse this transaction until it is mined".
 - A note commitment tree conflict during sync no longer shuts the wallet down
   permanently. Zallet now rolls the wallet back to a progressively older point
   and rescans, up to a bounded number of attempts and never below the wallet's
