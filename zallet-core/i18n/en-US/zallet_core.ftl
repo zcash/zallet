@@ -310,6 +310,10 @@ err-import-address-no-chain-state =
 
 ## Transaction verification errors
 
+err-account-seed-mismatch =
+    The seed held for account {$account} does not derive the viewing key the wallet has
+    recorded for it. The wallet database is corrupted or has been tampered with. No
+    transaction has been created.
 err-transparent-output-not-wallet-derived =
     The built transaction pays a transparent output ({$output}) that is neither a requested
     payment nor an address derived from the account's own key. The wallet database is

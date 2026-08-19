@@ -130,6 +130,16 @@ be considered breaking changes.
   through an authenticated, encrypted tunnel such as SSH port forwarding or a
   VPN. Previously any bind address was accepted without a warning.
 
+### Changed
+
+- `z_sendmany`, `z_shieldcoinbase` and `z_sendfromaccount` now verify, after
+  decrypting the account's seed and before deriving the key they sign with, that
+  the seed actually derives the viewing key the wallet has recorded for that
+  account. Input selection runs against the account record while signing uses a
+  seed-derived key; a modified record could previously have the wallet select
+  one key's notes and sign with another's. A mismatch is reported as wallet
+  database corruption or tampering, and no transaction is created.
+
 ### Fixed
 
 - `migrate-zcashd-wallet` now passes a fallback network to the wallet parser
