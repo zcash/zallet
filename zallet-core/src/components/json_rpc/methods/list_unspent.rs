@@ -20,7 +20,11 @@ use zcash_client_backend::{
     wallet::NoteId,
 };
 use zcash_keys::address::Address;
-use zcash_protocol::{ShieldedPool, consensus::BlockHeight, value::Zatoshis};
+use zcash_protocol::{
+    ShieldedPool,
+    consensus::{BlockHeight, COINBASE_MATURITY_BLOCKS},
+    value::Zatoshis,
+};
 use zip32::Scope;
 
 use crate::components::{
@@ -82,6 +86,14 @@ pub(crate) struct UnspentOutput {
     /// Omitted if this is a shielded output.
     #[serde(skip_serializing_if = "Option::is_none")]
     generated: Option<bool>,
+
+    /// Number of blocks remaining until this coinbase output reaches maturity
+    /// and becomes spendable. `0` if already mature.
+    ///
+    /// Omitted for non-coinbase transparent outputs and all shielded outputs.
+    #[serde(rename = "blockstomaturity")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocks_to_maturity: Option<u32>,
 
     /// The value of the output in ZEC.
     value: JsonZec,
@@ -375,6 +387,7 @@ pub(crate) fn call(
                 memo_str,
                 wallet_internal: is_internal,
                 generated: None,
+                blocks_to_maturity: None,
             })
         }
 
@@ -422,6 +435,7 @@ pub(crate) fn call(
                 memo_str,
                 wallet_internal,
                 generated: None,
+                blocks_to_maturity: None,
             })
         }
 
@@ -473,6 +487,7 @@ pub(crate) fn call(
                 memo_str,
                 wallet_internal,
                 generated: None,
+                blocks_to_maturity: None,
             })
         }
     }
@@ -508,6 +523,11 @@ fn transparent_unspent_output(
         account_uuid,
         wallet_internal,
         generated: Some(generated),
+        blocks_to_maturity: if generated {
+            Some(COINBASE_MATURITY_BLOCKS.saturating_sub(confirmations))
+        } else {
+            None
+        },
         value: value_from_zatoshis(value),
         value_zat: u64::from(value),
         memo: None,
@@ -634,15 +654,45 @@ mod tests {
     }
 
     #[test]
+    fn transparent_coinbase_output_reports_blocks_to_maturity() {
+        // 10 confirmations, 90 blocks remaining until mature (100 - 10).
+        let rendered = rendered_transparent(true);
+        assert_eq!(rendered["blockstomaturity"], serde_json::json!(90));
+    }
+
+    #[test]
+    fn transparent_mature_coinbase_output_reports_zero_blocks_to_maturity() {
+        let rendered = serde_json::to_value(transparent_unspent_output(
+            "3ec4c1b4b1e61a13c11ec5b0ba1240cca66f0e0d5b1e0303403d0a44ae7d0219".into(),
+            0,
+            100, // exactly at maturity
+            false,
+            Some("t1UYsZVJkLPeMjxEtACvSxfWuNmddpWfxzs".into()),
+            "3ad46f88-8f11-407b-b768-a2d587e971c9".into(),
+            false,
+            Zatoshis::const_from_u64(625_000_000),
+            true,
+        ))
+        .unwrap();
+        assert_eq!(rendered["blockstomaturity"], serde_json::json!(0));
+    }
+
+    #[test]
     fn transparent_non_coinbase_output_is_not_generated() {
         let rendered = rendered_transparent(false);
         assert_eq!(rendered["generated"], serde_json::json!(false));
     }
 
     #[test]
-    fn shielded_output_omits_generated() {
-        // Shielded notes never set `generated`; the field must be omitted entirely
-        // rather than rendered as `null`.
+    fn transparent_non_coinbase_output_omits_blocks_to_maturity() {
+        let rendered = rendered_transparent(false);
+        assert!(rendered.get("blockstomaturity").is_none());
+    }
+
+    #[test]
+    fn shielded_output_omits_generated_and_blocks_to_maturity() {
+        // Shielded notes never set `generated` or `blockstomaturity`; the fields
+        // must be omitted entirely rather than rendered as `null`.
         let output = UnspentOutput {
             txid: "3ec4c1b4b1e61a13c11ec5b0ba1240cca66f0e0d5b1e0303403d0a44ae7d0219".into(),
             pool: "sapling".into(),
@@ -653,6 +703,7 @@ mod tests {
             account_uuid: "3ad46f88-8f11-407b-b768-a2d587e971c9".into(),
             wallet_internal: true,
             generated: None,
+            blocks_to_maturity: None,
             value: value_from_zatoshis(Zatoshis::const_from_u64(100_000)),
             value_zat: 100_000,
             memo: Some("f600".into()),
@@ -661,5 +712,6 @@ mod tests {
 
         let rendered = serde_json::to_value(output).unwrap();
         assert!(rendered.get("generated").is_none());
+        assert!(rendered.get("blockstomaturity").is_none());
     }
 }

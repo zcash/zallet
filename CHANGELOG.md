@@ -27,6 +27,9 @@ be considered breaking changes.
 
 ### Added
 
+- `z_listunspent` transparent coinbase outputs now include a `blockstomaturity`
+  field reporting the number of blocks remaining until the output reaches
+  maturity and becomes spendable.
 - `zallet import-address` CLI command for importing a transparent address as
   watch-only, given the bare address string, its hex-encoded public key
   (P2PKH), or its redeem script (P2SH). A bare-address import stores no key
