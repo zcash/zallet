@@ -31,7 +31,7 @@ Statuses:
 | `getreceivedbyaddress` | Not yet implemented | [#52](https://github.com/zcash/zallet/issues/52) |
 | `gettransaction` | Not planned | Superseded by `z_viewtransaction`, which now includes its top-level fields ([altered semantics](json_rpc.md#z_viewtransaction)); `gettransaction` cannot represent partially-shielded transactions correctly |
 | `getunconfirmedbalance` | Not yet implemented | [#54](https://github.com/zcash/zallet/issues/54) |
-| `getwalletinfo` | Implemented (partial) | Balance fields will not be populated — use dedicated balance methods ([#55](https://github.com/zcash/zallet/issues/55)); most other fields are currently placeholders, and only `unlocked_until` is meaningful |
+| `getwalletinfo` | Implemented (partial) | Balance fields will not be populated — use dedicated balance methods ([#55](https://github.com/zcash/zallet/issues/55)). `unlocked_until` and the seed fingerprints are meaningful, the latter with [altered semantics](json_rpc.md#getwalletinfo) and a new `mnemonic_seedfps` field; the remaining fields are still placeholders ([#620](https://github.com/zcash/zallet/issues/620)) |
 | `importaddress` | Omitted | Use the [`zallet import-address`](../cli/import-address.md) CLI command ([#56](https://github.com/zcash/zallet/issues/56)), which accepts a bare address, a public key, or a redeem script, and imports into the legacy transparent account by default; `z_importaddress` covers the public-key and redeem-script forms over RPC |
 | `importprivkey` | Not yet implemented | [#57](https://github.com/zcash/zallet/issues/57) |
 | `importpubkey` | Omitted | Use `z_importaddress` |

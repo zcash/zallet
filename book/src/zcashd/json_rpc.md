@@ -56,6 +56,11 @@ Changes to response:
 - Transparent addresses for which we have BIP 44 derivation information are now
   listed in a new `derived_transparent` field (an array of objects) instead of
   the `transparent` field.
+- The `seedfp` field of each `unified` group is the ZIP 32 seed fingerprint in
+  its bech32m encoding (`zip32seedfp1…`), whereas `zcashd` reported the
+  `uint256` hex form. Zallet accepts both encodings wherever a fingerprint is
+  given as a parameter, so this affects readers only. The `seedfp` field of each
+  `derived_transparent` group uses the same encoding.
 
 ### `z_exportviewingkey`
 
@@ -76,6 +81,29 @@ Changes to response:
   view-only accounts. Note that a UIVK grants incoming viewing capability for
   every pool in the account, even when the queried address is a Sapling
   address.
+
+### `getwalletinfo`
+
+Changes to response:
+- The balance fields (`balance`, `unconfirmed_balance`, `immature_balance`,
+  `shielded_balance`, `shielded_unconfirmed_balance`) are not populated — use
+  the dedicated balance methods ([#55]).
+- `mnemonic_seedfp` is the ZIP 32 seed fingerprint in its bech32m encoding
+  (`zip32seedfp1…`), as `z_listaccounts` reports it, whereas `zcashd` reported
+  the `uint256` hex form. Zallet accepts both encodings wherever a fingerprint
+  is given as a parameter, so this affects readers only.
+- `mnemonic_seedfp` is present only when the wallet holds exactly one mnemonic
+  phrase. A `zcashd` wallet had at most one, and omitted the field when it had
+  none; a Zallet wallet may hold any number, and there is no one fingerprint to
+  report when it holds several. Its absence therefore no longer implies that the
+  wallet has no mnemonic — read `mnemonic_seedfps` to tell the cases apart.
+- New `mnemonic_seedfps` field, listing every ZIP 32 seed fingerprint the wallet
+  holds in lexicographic order. It is empty if the wallet holds no mnemonic
+  phrases, and is omitted — along with `mnemonic_seedfp` — only if the key store
+  could not be queried, so that a wallet with no phrases is distinguishable from
+  a failed lookup.
+- The remaining fields (`walletversion`, `txcount`, `keypoololdest`,
+  `keypoolsize`) are still placeholders ([#620]).
 
 ### `getrawtransaction`
 
@@ -231,6 +259,8 @@ creation and validation). It measured `zcashd` code that Zallet does not
 contain, so there is nothing equivalent for Zallet to measure and no
 replacement is planned.
 
+[#55]: https://github.com/zcash/zallet/issues/55
+[#620]: https://github.com/zcash/zallet/issues/620
 [pczts]: https://github.com/zcash/zallet/issues/99
 [ZIP 32]: https://zips.z.cash/zip-0032
 [ZIP 317]: https://zips.z.cash/zip-0317
