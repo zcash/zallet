@@ -261,6 +261,12 @@ be considered breaking changes.
   `generate-mnemonic`) rather than failing initialization. `@`-prefixed
   recipient entries are rejected, as indirection through external sources
   cannot be part of the wallet's stored recipient set.
+- `migrate-zcashd-wallet` now acquires the data directory lock for the duration
+  of the migration. It writes accounts and transparent key material into the
+  same wallet database `zallet start` uses, so running the two concurrently
+  could interleave writes; the command now reports that Zallet is already
+  running instead.
+
 - The queue of asynchronous RPC operations (`z_sendmany`, `z_shieldcoinbase`)
   is now bounded (GHSA-3wr9-v982-59fj). Finished operations are still retained
   until collected with `z_getoperationresult`, but once the queue reaches its

@@ -58,6 +58,12 @@ impl MigrateZcashdWalletCmd {
     pub(crate) async fn run_with<F: ChainFactory>(&self, factory: &F) -> Result<(), Error> {
         let config = APP.config();
 
+        // Hold the data directory lock for the whole migration. This command writes
+        // accounts, transparent key material and exposure information into the same
+        // wallet database that `zallet start` uses, so running the two concurrently
+        // would interleave writes into a wallet neither had exclusive use of.
+        let _lock = config.lock_datadir()?;
+
         if !self.this_is_beta_code_and_you_will_need_to_redo_the_migration_later {
             return Err(ErrorKind::Generic.context(fl!("migrate-beta-code")).into());
         }

@@ -361,4 +361,60 @@ mod tests {
             PathBuf::from("/etc/zallet/zallet.toml"),
         );
     }
+
+    /// The lock is exclusive while its guard is alive, and released once the guard is
+    /// dropped. Commands bind it as `let _lock = ...` for exactly this reason; binding
+    /// it as `let _ = ...` would drop it immediately and silently lock nothing.
+    #[test]
+    fn datadir_lock_is_released_when_its_guard_is_dropped() {
+        let datadir = tempfile::tempdir().expect("creates tempdir");
+
+        let guard = lock_datadir(datadir.path()).expect("locks an unlocked datadir");
+        assert!(
+            lock_datadir(datadir.path()).is_err(),
+            "the datadir must not be lockable while a guard is held",
+        );
+
+        drop(guard);
+        lock_datadir(datadir.path()).expect("the datadir is lockable again once released");
+    }
+
+    /// A command that takes the lock and then fails must not leave the datadir locked;
+    /// `migrate-zcashd-wallet` returns early on several paths (e.g. the beta-code guard)
+    /// after acquiring it.
+    #[test]
+    fn datadir_lock_is_released_when_its_holder_returns_early() {
+        let datadir = tempfile::tempdir().expect("creates tempdir");
+
+        fn locks_then_fails(datadir: &Path) -> Result<(), Error> {
+            let _lock = lock_datadir(datadir)?;
+            Err(ErrorKind::Generic
+                .context("simulated command failure".to_owned())
+                .into())
+        }
+
+        assert!(locks_then_fails(datadir.path()).is_err());
+        lock_datadir(datadir.path()).expect("the early return released the lock");
+    }
+
+    /// Dropping a cancelled future drops the locals it is holding, so a command
+    /// interrupted mid-migration (Ctrl-C, runtime shutdown) releases the lock too.
+    #[tokio::test]
+    async fn datadir_lock_is_released_when_its_holding_future_is_cancelled() {
+        let datadir = tempfile::tempdir().expect("creates tempdir");
+
+        let holds_lock_forever = async {
+            let _lock = lock_datadir(datadir.path()).expect("locks an unlocked datadir");
+            std::future::pending::<()>().await;
+        };
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), holds_lock_forever)
+                .await
+                .is_err(),
+            "the future must still be holding the lock when it is cancelled",
+        );
+
+        lock_datadir(datadir.path()).expect("cancelling the holder released the lock");
+    }
 }
