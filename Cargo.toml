@@ -159,8 +159,8 @@ schemerz-rusqlite = "0.370.0"
 shardtree = "0.7"
 time = "0.3"
 uuid = "1"
-zcash_client_backend = "=0.24.0-rc.7"
-zcash_client_sqlite = "=0.22.0-rc.7"
+zcash_client_backend = "=0.24.0"
+zcash_client_sqlite = "=0.22.0"
 zcash_note_encryption = "0.4"
 zip32 = "0.2"
 bip32 = "0.2"
@@ -178,22 +178,24 @@ tonic = "0.14"
 debug = "line-tables-only"
 
 [patch.crates-io]
-# TEMPORARY: pin the wallet-critical librustzcash crates to the branch adding
-# `WalletWrite::import_standalone_transparent_address` (zcash/librustzcash#2941),
-# which `zallet import-address` uses to track watch-only transparent addresses
-# imported without key material. The full in-repo dependency closure of the two
-# client crates is patched to the same rev so the whole cohort resolves from a
-# single source. Repoint at crates.io once the change lands in a release.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_pool_migration = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+# TEMPORARY: pin the wallet-critical librustzcash crates to a `main` rev carrying
+# the fix for reading back a stored unmined transaction with a zero expiry height
+# (zcash/librustzcash#2975, fixed by zcash/librustzcash#2983), which
+# `zallet migrate-zcashd-wallet` needs in order to re-read the transactions it
+# imports from a zcashd wallet before any chain scan. The full in-repo dependency
+# closure of the two client crates is patched to the same rev so the whole cohort
+# resolves from a single source. Repoint at crates.io once the fix lands in a
+# release.
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+zcash_pool_migration = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }

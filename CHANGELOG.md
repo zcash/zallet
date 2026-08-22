@@ -163,6 +163,14 @@ be considered breaking changes.
 - A regtest wallet's transactions mined under NU6.3 (Ironwood) no longer fail
   to import with "Consensus branch ID not known". Bumped `zewif-zcashd` to
   0.1.0-rc.5, which includes NU6.3 in the regtest activation schedule.
+- `migrate-zcashd-wallet` no longer aborts with "Consensus branch ID not known"
+  when the `zcashd` wallet contains an unmined transaction with a zero expiry
+  height, such as an imported coinbase transaction. The importer stores such a
+  transaction with neither a mined height nor a usable expiry height, and the
+  read-back it performs to tally the import then had no epoch from which to
+  select a consensus branch ID. Fixed upstream by bumping the librustzcash
+  wallet crates, which now fall back to the wallet's view of the chain tip
+  (zcash/librustzcash#2975).
 - Updated transitive dependencies flagged by `cargo audit`: `crossbeam-epoch`
   0.9.18 → 0.9.20 (RUSTSEC-2026-0204, invalid pointer dereference in
   `fmt::Pointer`), the yanked `num-bigint` 0.4.7 and `spin` 0.9.8 to their
