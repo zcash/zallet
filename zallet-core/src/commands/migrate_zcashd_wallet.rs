@@ -908,10 +908,45 @@ fn watched_addresses_to_import<P: Parameters>(
     params: &P,
     exposure_height: BlockHeight,
 ) -> (Vec<WatchedAddress>, usize) {
-    // TODO: the document is not examined yet, which is why the addresses zcashd
-    // watched without key material are still dropped. See the failing tests below.
-    let _ = (document, report, tracked, params, exposure_height);
-    (vec![], 0)
+    let accounts_by_name: HashMap<&str, zcash_client_sqlite::AccountUuid> = report
+        .imported_accounts
+        .iter()
+        .map(|a| (a.name.as_str(), a.account_uuid))
+        .collect();
+    let mut undecodable = 0usize;
+    let mut seen = HashSet::new();
+    let mut to_import = Vec::new();
+    for wallet in document.wallets() {
+        for account in wallet.accounts() {
+            let Some(account_uuid) = accounts_by_name.get(account.name()) else {
+                continue;
+            };
+            for address in account.addresses() {
+                let zewif::ProtocolAddress::Transparent(taddr) = address.address() else {
+                    continue;
+                };
+                if taddr.spend_authority().is_some() || taddr.pubkey().is_some() {
+                    continue;
+                }
+                let Ok(decoded) = TransparentAddress::decode(params, taddr.address()) else {
+                    undecodable += 1;
+                    continue;
+                };
+                if tracked.contains(&decoded) || !seen.insert(decoded) {
+                    continue;
+                }
+                to_import.push(WatchedAddress {
+                    account_uuid: *account_uuid,
+                    address: decoded,
+                    exposure_height: address
+                        .exposed_at_height()
+                        .map_or(exposure_height, |h| BlockHeight::from(u32::from(h))),
+                });
+            }
+        }
+    }
+    to_import.sort_by_key(|watched| watched.address);
+    (to_import, undecodable)
 }
 
 /// Registers the transparent addresses that zcashd watched but for which no key
@@ -1388,7 +1423,10 @@ fn log_import_report(report: &ZewifImportReport) {
     }
     if report.redeem_scripts_not_representable > 0 {
         warn!(
-            "Skipped {} watch-only redeem scripts that the wallet cannot represent",
+            "Skipped {} watch-only redeem scripts that the wallet cannot represent; \
+             their P2SH addresses are registered as watch-only addresses, so funds \
+             they receive remain visible, but the scripts must be re-imported into a \
+             wallet that can hold them to be spent from.",
             report.redeem_scripts_not_representable,
         );
     }
