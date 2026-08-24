@@ -72,6 +72,8 @@ mod list_unspent;
 mod lock_wallet;
 #[cfg(zallet_build = "wallet")]
 mod openrpc;
+#[cfg(feature = "rpc-cli")]
+pub(crate) mod rpc_cli;
 // PCZT methods. The stateless roles (combine, inspect, prove) and their shared
 // helpers are available in every build; create, sign, and extract (which
 // records the extracted transaction) require wallet state.
