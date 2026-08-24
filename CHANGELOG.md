@@ -169,6 +169,15 @@ be considered breaking changes.
   did. Addresses that are also seed-derived receivers of an imported account
   are excluded — both here and in the watch-only pubkey registration — so
   they keep the gap-limit-inferred exposure that seed recovery depends on.
+- `migrate-zcashd-wallet` now records the P2SH addresses of the redeem scripts it
+  imports (from zcashd's `importaddress <redeemscript>` and
+  `addmultisigaddress`) as exposed. Such an address was in use outside the wallet
+  before it was imported, but it has no derivation, so it was reached by neither
+  the exposures recorded in the migrated wallet nor the gap-limit inference that
+  covers derived receivers; one that had never appeared in a wallet transaction
+  was left with no exposure height at all. One consequence is that
+  `listaddresses`, which reports only exposed addresses, did not surface it where
+  `zcashd` did.
 - `migrate-zcashd-wallet` prints the backup reminder before reporting an
   error from the post-import registration and verification steps.
 - The `__cookie__` JSON-RPC username is now actually reserved. It is documented

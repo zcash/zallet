@@ -11,7 +11,9 @@ use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::{
     Account as _, AccountSource, WalletRead, WalletWrite as _, chain::ChainState,
 };
-use zcash_client_backend::wallet::TransparentAddressMetadata;
+use zcash_client_backend::wallet::{
+    Exposure, TransparentAddressMetadata, TransparentAddressSource,
+};
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_client_sqlite::zewif::{
     AccountSkipReason, DiscardSecrets, SecretSink, SkippedAccount, SkippedTransparentKey,
@@ -849,10 +851,16 @@ fn expose_spending_key_addresses(
 fn unexposed_script_addresses(
     receivers: impl IntoIterator<Item = (TransparentAddress, TransparentAddressMetadata)>,
 ) -> Vec<TransparentAddress> {
-    // TODO: `receivers` is not examined yet, which is why the addresses of the
-    // imported redeem scripts are still left unexposed. See the failing test below.
-    let _ = receivers;
-    vec![]
+    let mut addresses = receivers
+        .into_iter()
+        .filter(|(_, meta)| {
+            matches!(meta.source(), TransparentAddressSource::StandaloneScript(_))
+                && !matches!(meta.exposure(), Exposure::Exposed { .. })
+        })
+        .map(|(address, _)| address)
+        .collect::<Vec<_>>();
+    addresses.sort();
+    addresses
 }
 
 /// Marks the P2SH addresses of the imported standalone redeem scripts (from zcashd's
