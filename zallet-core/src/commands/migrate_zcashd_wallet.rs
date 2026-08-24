@@ -11,6 +11,7 @@ use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::{
     Account as _, AccountSource, WalletRead, WalletWrite as _, chain::ChainState,
 };
+use zcash_client_backend::wallet::TransparentAddressMetadata;
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_client_sqlite::zewif::{
     AccountSkipReason, DiscardSecrets, SecretSink, SkippedAccount, SkippedTransparentKey,
@@ -583,11 +584,11 @@ impl MigrateZcashdWalletCmd {
             .or(no_scan_birthday_estimate)
             .unwrap_or(sapling_activation);
         // The import has committed: register watch-only transparent pubkeys, expose
-        // the imported standalone spending keys' addresses, then evaluate the import
-        // report. All of these must happen after the imported accounts are fully set
-        // up, so that a failure here never leaves committed accounts half-configured.
-        // The backup reminder is printed before propagating any error from these
-        // steps, as the minted-seed notice above refers to it.
+        // the addresses of the imported standalone spending keys and redeem scripts,
+        // then evaluate the import report. All of these must happen after the imported
+        // accounts are fully set up, so that a failure here never leaves committed
+        // accounts half-configured. The backup reminder is printed before propagating
+        // any error from these steps, as the minted-seed notice above refers to it.
         let post_import = derived_transparent_receivers(&mut db_data, &report)
             .and_then(|derived| {
                 register_watch_pubkeys(
@@ -603,7 +604,8 @@ impl MigrateZcashdWalletCmd {
                     &report,
                     exposure_height,
                     &derived,
-                )
+                )?;
+                expose_registered_script_addresses(&mut db_data, &report, exposure_height)
             })
             .and_then(|()| {
                 let document_account_count = document
@@ -826,6 +828,77 @@ fn expose_spending_key_addresses(
     }
     info!(
         "Marking {} imported transparent spending-key addresses as exposed",
+        to_expose.len(),
+    );
+    db_data
+        .mark_transparent_addresses_exposed(&to_expose)
+        .map_err(MigrateError::Database)
+}
+
+/// Selects the P2SH addresses among `receivers` that the wallet does not already
+/// consider exposed.
+///
+/// A P2SH address registered from a redeem script carries no derivation, so the
+/// child-index inference that the ZeWIF importer uses to fill in the exposures the
+/// document does not record directly cannot reach it. Any such address that the
+/// document's transactions did not already reveal is therefore left unexposed by the
+/// import, and needs marking here.
+///
+/// The result is sorted, so that a migration run marks exposures in a deterministic
+/// order regardless of the iteration order of the wallet's receiver map.
+fn unexposed_script_addresses(
+    receivers: impl IntoIterator<Item = (TransparentAddress, TransparentAddressMetadata)>,
+) -> Vec<TransparentAddress> {
+    // TODO: `receivers` is not examined yet, which is why the addresses of the
+    // imported redeem scripts are still left unexposed. See the failing test below.
+    let _ = receivers;
+    vec![]
+}
+
+/// Marks the P2SH addresses of the imported standalone redeem scripts (from zcashd's
+/// `importaddress <redeemscript>` and `addmultisigaddress`) as exposed as of
+/// `exposure_height`.
+///
+/// A redeem script reaches a zcashd wallet only because its P2SH address was already
+/// in use outside that wallet, so the address has been disclosed by the time it is
+/// migrated and the wallet's exposure metadata should say so. The ZeWIF importer
+/// cannot establish that on its own: it marks an address exposed only where the
+/// document accounts for an exposure of it, and the child-index inference that fills
+/// in the derived receivers the document does not mention cannot reach an address with
+/// no derivation. A P2SH address that never appeared in a migrated transaction is
+/// therefore left with no exposure height at all.
+///
+/// One consequence today is that the address goes unreported: `listaddresses` is built
+/// on `list_addresses`, which returns only exposed addresses, so an imported-but-never-
+/// funded P2SH address is invisible where zcashd always listed it. zcash/zallet#782
+/// proposes to report standalone imports from `get_transparent_receivers` instead,
+/// which applies no exposure filter; the exposure record needs to be right either way.
+///
+/// The registered scripts are read back from the wallet rather than recomputed from
+/// the document: the importer skips the redeem scripts the wallet cannot represent,
+/// and the standalone-script receivers of the accounts this import created are exactly
+/// the scripts it registered.
+fn expose_registered_script_addresses(
+    db_data: &mut DbHandle,
+    report: &ZewifImportReport,
+    exposure_height: BlockHeight,
+) -> Result<(), MigrateError> {
+    let mut to_expose = Vec::new();
+    for account in &report.imported_accounts {
+        let receivers = db_data
+            .get_transparent_receivers(account.account_uuid, true, true)
+            .map_err(MigrateError::Database)?;
+        to_expose.extend(
+            unexposed_script_addresses(receivers)
+                .into_iter()
+                .map(|address| (address, exposure_height)),
+        );
+    }
+    if to_expose.is_empty() {
+        return Ok(());
+    }
+    info!(
+        "Marking {} imported P2SH redeem script addresses as exposed",
         to_expose.len(),
     );
     db_data
@@ -1544,6 +1617,105 @@ mod tests {
                 &derived_receivers,
             ),
             vec![TransparentAddress::from_pubkey(&registered)],
+        );
+    }
+
+    /// Exposure marking after a migration covers exactly the P2SH addresses the
+    /// importer registered a redeem script for and did not already expose: a
+    /// standalone pubkey, a bare imported address and a derived receiver each belong
+    /// to another step, an address the import exposed keeps the height its
+    /// transactions established, and one the wallet cannot judge is marked, because
+    /// the migration knows what the wallet does not. The selection is returned in
+    /// address order, so a run does not depend on the iteration order of the wallet's
+    /// receiver map.
+    #[test]
+    fn unexposed_script_addresses_selects_only_unexposed_p2sh() {
+        use transparent::{
+            address::TransparentAddress,
+            keys::{NonHardenedChildIndex, TransparentKeyScope},
+        };
+        use zcash_client_backend::wallet::{Exposure, GapMetadata, TransparentAddressMetadata};
+        use zcash_script::script::{Code, Redeem};
+
+        // A P2PKH-shaped redeem script, with its hash varied per address so that no
+        // two registered scripts are identical.
+        let redeem = |byte: u8| {
+            let mut script = hex::decode("76a91411695b6cd891484c2d49ec5aa738ec2b2f89777788ac")
+                .expect("valid hex");
+            script[3] = byte;
+            Redeem::parse(&Code(script)).expect("valid redeem script")
+        };
+        let exposed = Exposure::Exposed {
+            at_height: BlockHeight::from_u32(100),
+            gap_metadata: GapMetadata::DerivationUnknown,
+        };
+        let pubkey = secp256k1::SecretKey::from_slice(&[0x01; 32])
+            .expect("valid secret key")
+            .public_key(&secp256k1::Secp256k1::new());
+
+        let unexposed_high = TransparentAddress::ScriptHash([0x0b; 20]);
+        let unexposed_low = TransparentAddress::ScriptHash([0x0a; 20]);
+        let unknowable = TransparentAddress::ScriptHash([0x0f; 20]);
+
+        let receivers = vec![
+            (
+                unexposed_high,
+                TransparentAddressMetadata::standalone_script(
+                    redeem(0x0b),
+                    Exposure::Unknown,
+                    None,
+                ),
+            ),
+            (
+                unexposed_low,
+                TransparentAddressMetadata::standalone_script(
+                    redeem(0x0a),
+                    Exposure::Unknown,
+                    None,
+                ),
+            ),
+            // Already exposed by the import, at the height its transactions revealed.
+            (
+                TransparentAddress::ScriptHash([0x0c; 20]),
+                TransparentAddressMetadata::standalone_script(redeem(0x0c), exposed, None),
+            ),
+            // The wallet cannot tell whether this one was exposed; the migration can.
+            // A redeem script reached the zcashd wallet only because its address was
+            // already in use outside it.
+            (
+                unknowable,
+                TransparentAddressMetadata::standalone_script(
+                    redeem(0x0f),
+                    Exposure::CannotKnow,
+                    None,
+                ),
+            ),
+            // Handled by `register_watch_pubkeys` / `expose_spending_key_addresses`.
+            (
+                TransparentAddress::from_pubkey(&pubkey),
+                TransparentAddressMetadata::standalone_p2pkh(pubkey, Exposure::Unknown, None),
+            ),
+            // A P2SH address imported without its redeem script: nothing to spend
+            // with, and not something this migration path registers.
+            (
+                TransparentAddress::ScriptHash([0x0d; 20]),
+                TransparentAddressMetadata::standalone_address(Exposure::Unknown, None),
+            ),
+            // Derived receivers keep the importer's gap-inferred exposure.
+            (
+                TransparentAddress::PublicKeyHash([0x0e; 20]),
+                TransparentAddressMetadata::derived(
+                    TransparentKeyScope::EXTERNAL,
+                    NonHardenedChildIndex::ZERO,
+                    Exposure::Unknown,
+                    None,
+                ),
+            ),
+        ];
+
+        assert_eq!(
+            super::unexposed_script_addresses(receivers),
+            vec![unexposed_low, unexposed_high, unknowable],
         );
     }
 
