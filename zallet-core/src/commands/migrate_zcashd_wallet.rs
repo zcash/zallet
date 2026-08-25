@@ -683,6 +683,22 @@ fn collect_transparent_receivers(
     Ok(receivers)
 }
 
+/// Marks `to_expose` as exposed, doing nothing when there is nothing to mark.
+///
+/// Every caller assembles its addresses conditionally and several can end up with
+/// none, which `mark_transparent_addresses_exposed` should not be troubled with.
+fn mark_addresses_exposed(
+    db_data: &mut DbHandle,
+    to_expose: &[(TransparentAddress, BlockHeight)],
+) -> Result<(), MigrateError> {
+    if to_expose.is_empty() {
+        return Ok(());
+    }
+    db_data
+        .mark_transparent_addresses_exposed(to_expose)
+        .map_err(MigrateError::Database)
+}
+
 /// Registers watch-only transparent pubkeys (from zcashd's `importpubkey`) with the
 /// accounts whose address lists carry them, exposing their addresses as of
 /// `exposure_height`.
@@ -731,11 +747,7 @@ fn register_watch_pubkeys(
             db_data
                 .import_standalone_transparent_pubkeys(account_uuid, watch_pubkeys.into_iter())
                 .map_err(MigrateError::Database)?;
-            if !to_expose.is_empty() {
-                db_data
-                    .mark_transparent_addresses_exposed(&to_expose)
-                    .map_err(MigrateError::Database)?;
-            }
+            mark_addresses_exposed(db_data, &to_expose)?;
         }
     }
     if skipped_uncompressed_watch_pubkeys > 0 {
@@ -850,9 +862,7 @@ fn expose_spending_key_addresses(
         "Marking {} imported transparent spending-key addresses as exposed",
         to_expose.len(),
     );
-    db_data
-        .mark_transparent_addresses_exposed(&to_expose)
-        .map_err(MigrateError::Database)
+    mark_addresses_exposed(db_data, &to_expose)
 }
 
 /// Best-effort removal of a provisionally stored mnemonic from the keystore, after
