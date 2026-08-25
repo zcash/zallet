@@ -696,55 +696,45 @@ fn register_watch_pubkeys(
     exposure_height: BlockHeight,
     derived_receivers: &HashSet<TransparentAddress>,
 ) -> Result<(), MigrateError> {
-    let accounts_by_name: HashMap<&str, zcash_client_sqlite::AccountUuid> = report
-        .imported_accounts
-        .iter()
-        .map(|a| (a.name.as_str(), a.account_uuid))
-        .collect();
     let mut skipped_uncompressed_watch_pubkeys = 0usize;
-    for wallet in document.wallets() {
-        for account in wallet.accounts() {
-            let Some(account_uuid) = accounts_by_name.get(account.name()) else {
-                continue;
-            };
-            let mut watch_pubkeys = Vec::new();
-            for address in account.addresses() {
-                if let zewif::ProtocolAddress::Transparent(t) = address.address()
-                    && t.spend_authority().is_none()
-                    && let Some(pubkey) = t.pubkey()
-                {
-                    // `import_standalone_transparent_pubkeys` derives the stored
-                    // P2PKH address from the compressed pubkey serialization, so an
-                    // uncompressed pubkey would be tracked under a different
-                    // address than zcashd had on-chain.
-                    match PublicKey::from_slice(pubkey.as_slice()) {
-                        Ok(pk) if pubkey.as_slice().len() == 33 => watch_pubkeys.push(pk),
-                        _ => skipped_uncompressed_watch_pubkeys += 1,
-                    }
+    for (account_uuid, account) in imported_document_accounts(document, report) {
+        let mut watch_pubkeys = Vec::new();
+        for address in account.addresses() {
+            if let zewif::ProtocolAddress::Transparent(t) = address.address()
+                && t.spend_authority().is_none()
+                && let Some(pubkey) = t.pubkey()
+            {
+                // `import_standalone_transparent_pubkeys` derives the stored
+                // P2PKH address from the compressed pubkey serialization, so an
+                // uncompressed pubkey would be tracked under a different
+                // address than zcashd had on-chain.
+                match PublicKey::from_slice(pubkey.as_slice()) {
+                    Ok(pk) if pubkey.as_slice().len() == 33 => watch_pubkeys.push(pk),
+                    _ => skipped_uncompressed_watch_pubkeys += 1,
                 }
             }
-            if !watch_pubkeys.is_empty() {
-                info!(
-                    "Registering {} watch-only transparent pubkeys with account '{}'",
-                    watch_pubkeys.len(),
-                    account.name(),
-                );
-                // A watched pubkey may coincide with one of the wallet's own derived
-                // receivers; those keep the importer's gap-inferred exposure.
-                let to_expose: Vec<(TransparentAddress, BlockHeight)> = watch_pubkeys
-                    .iter()
-                    .map(TransparentAddress::from_pubkey)
-                    .filter(|address| !derived_receivers.contains(address))
-                    .map(|address| (address, exposure_height))
-                    .collect();
+        }
+        if !watch_pubkeys.is_empty() {
+            info!(
+                "Registering {} watch-only transparent pubkeys with account '{}'",
+                watch_pubkeys.len(),
+                account.name(),
+            );
+            // A watched pubkey may coincide with one of the wallet's own derived
+            // receivers; those keep the importer's gap-inferred exposure.
+            let to_expose: Vec<(TransparentAddress, BlockHeight)> = watch_pubkeys
+                .iter()
+                .map(TransparentAddress::from_pubkey)
+                .filter(|address| !derived_receivers.contains(address))
+                .map(|address| (address, exposure_height))
+                .collect();
+            db_data
+                .import_standalone_transparent_pubkeys(account_uuid, watch_pubkeys.into_iter())
+                .map_err(MigrateError::Database)?;
+            if !to_expose.is_empty() {
                 db_data
-                    .import_standalone_transparent_pubkeys(*account_uuid, watch_pubkeys.into_iter())
+                    .mark_transparent_addresses_exposed(&to_expose)
                     .map_err(MigrateError::Database)?;
-                if !to_expose.is_empty() {
-                    db_data
-                        .mark_transparent_addresses_exposed(&to_expose)
-                        .map_err(MigrateError::Database)?;
-                }
             }
         }
     }
@@ -756,6 +746,34 @@ fn register_watch_pubkeys(
         );
     }
     Ok(())
+}
+
+/// Pairs each of the document's accounts that the import created a wallet account
+/// for with the UUID of that wallet account.
+///
+/// The document names accounts and the import report records the UUID each was
+/// created as, so matching the two by name is what lets a step that reads the
+/// document address the wallet rows it produced. An account the import did not
+/// create — one it skipped — is left out, as there is nothing to register against.
+fn imported_document_accounts<'a>(
+    document: &'a zewif::Zewif,
+    report: &ZewifImportReport,
+) -> Vec<(zcash_client_sqlite::AccountUuid, &'a zewif::Account)> {
+    let accounts_by_name: HashMap<&str, zcash_client_sqlite::AccountUuid> = report
+        .imported_accounts
+        .iter()
+        .map(|a| (a.name.as_str(), a.account_uuid))
+        .collect();
+    document
+        .wallets()
+        .iter()
+        .flat_map(|wallet| wallet.accounts())
+        .filter_map(|account| {
+            accounts_by_name
+                .get(account.name())
+                .map(|account_uuid| (*account_uuid, account))
+        })
+        .collect()
 }
 
 /// Computes the P2PKH addresses of the standalone transparent spending keys that
