@@ -5,7 +5,7 @@ use abscissa_core::Runnable;
 
 use bip0039::{Count, English, Mnemonic};
 use rand::{RngCore, rngs::OsRng};
-use secp256k1::PublicKey;
+use secp256k1::{PublicKey, constants::PUBLIC_KEY_SIZE};
 use secrecy::{SecretVec, Zeroize};
 use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::{
@@ -763,9 +763,12 @@ fn register_watch_pubkeys(
                 // P2PKH address from the compressed pubkey serialization, so an
                 // uncompressed pubkey would be tracked under a different
                 // address than zcashd had on-chain.
-                match PublicKey::from_slice(pubkey.as_slice()) {
-                    Ok(pk) if pubkey.as_slice().len() == 33 => watch_pubkeys.push(pk),
-                    _ => skipped_uncompressed_watch_pubkeys += 1,
+                if pubkey.as_slice().len() == PUBLIC_KEY_SIZE
+                    && let Ok(pk) = PublicKey::from_slice(pubkey.as_slice())
+                {
+                    watch_pubkeys.push(pk);
+                } else {
+                    skipped_uncompressed_watch_pubkeys += 1;
                 }
             }
         }
