@@ -585,45 +585,48 @@ impl MigrateZcashdWalletCmd {
             .map(|cs| BlockHeight::from_u32(u32::from(cs.height()) + 1))
             .or(no_scan_birthday_estimate)
             .unwrap_or(sapling_activation);
-        // The import has committed: register the watch-only transparent material the
-        // importer has no path for, expose the addresses of the imported standalone
-        // spending keys and redeem scripts, then evaluate the import report. All of
-        // these must happen after the imported accounts are fully set up, so that a
-        // failure here never leaves committed accounts half-configured. The backup
-        // reminder is printed before propagating any error from these steps, as the
-        // minted-seed notice above refers to it.
-        let post_import = derived_transparent_receivers(&mut db_data, &report)
-            .and_then(|derived| {
-                register_watch_pubkeys(
-                    &mut db_data,
-                    &document,
-                    &report,
-                    exposure_height,
-                    &derived,
-                )?;
-                expose_spending_key_addresses(
-                    &mut db_data,
-                    &document,
-                    &report,
-                    exposure_height,
-                    &derived,
-                )?;
-                register_watch_addresses(&mut db_data, &document, &report, exposure_height)?;
-                expose_registered_script_addresses(&mut db_data, &report, exposure_height)
-            })
-            .and_then(|()| {
-                let document_account_count = document
-                    .wallets()
-                    .iter()
-                    .map(|wallet| wallet.accounts().len())
-                    .sum();
-                check_import_report(&report, document_account_count, allow_partial_import)
-            });
+        // The backup reminder is printed before propagating any error from the
+        // post-import steps, as the minted-seed notice above refers to it.
+        let post_import = finish_import(
+            &mut db_data,
+            &document,
+            &report,
+            exposure_height,
+            allow_partial_import,
+        );
         print_backup_reminder();
         post_import?;
 
         Ok(())
     }
+}
+
+/// Completes a committed import: registers the watch-only transparent material the
+/// ZeWIF importer has no path for, exposes the addresses of the imported standalone
+/// spending keys and redeem scripts, then evaluates the import report.
+///
+/// All of this must happen after the imported accounts are fully set up, so that a
+/// failure here never leaves committed accounts half-configured. The steps run in
+/// order because each reads back what the ones before it registered.
+fn finish_import(
+    db_data: &mut DbHandle,
+    document: &zewif::Zewif,
+    report: &ZewifImportReport,
+    exposure_height: BlockHeight,
+    allow_partial_import: bool,
+) -> Result<(), MigrateError> {
+    let derived = derived_transparent_receivers(db_data, report)?;
+    register_watch_pubkeys(db_data, document, report, exposure_height, &derived)?;
+    expose_spending_key_addresses(db_data, document, report, exposure_height, &derived)?;
+    register_watch_addresses(db_data, document, report, exposure_height)?;
+    expose_registered_script_addresses(db_data, report, exposure_height)?;
+
+    let document_account_count = document
+        .wallets()
+        .iter()
+        .map(|wallet| wallet.accounts().len())
+        .sum();
+    check_import_report(report, document_account_count, allow_partial_import)
 }
 
 /// Derives the ZeWIF document's regtest activation schedule from the configured
