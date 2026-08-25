@@ -866,8 +866,9 @@ fn registered_spending_key_addresses<P: Parameters>(
         if derived_receivers.contains(&address) {
             continue;
         }
-        let encoded = address.encode(params);
-        if !skipped.contains(encoded.as_str()) && seen.insert(encoded) {
+        // Encoding is only needed to test against the report's skipped addresses,
+        // which name theirs as strings.
+        if seen.insert(address) && !skipped.contains(address.encode(params).as_str()) {
             addresses.push(address);
         }
     }
