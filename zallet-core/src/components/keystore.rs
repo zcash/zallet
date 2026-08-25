@@ -139,9 +139,6 @@ use crate::fl;
 
 use sapling::zip32::{DiversifiableFullViewingKey, ExtendedSpendingKey};
 
-#[cfg(feature = "transparent-key-import")]
-use {transparent::address::TransparentAddress, zcash_keys::address::Address};
-
 pub(super) mod db;
 
 mod error;
@@ -1110,54 +1107,66 @@ impl KeyStore {
         Ok(None)
     }
 
+    /// Decrypts the standalone transparent spending keys for the given public keys.
+    ///
+    /// Returns the keys that are present in the keystore, in the order their pubkeys
+    /// were given. A pubkey with no stored key material (for example, a multisig member
+    /// key held by another party) is skipped rather than treated as an error, so the
+    /// result may hold fewer entries than `pubkeys`.
     #[cfg(feature = "transparent-key-import")]
-    pub(crate) async fn decrypt_standalone_transparent_key(
+    pub(crate) async fn decrypt_standalone_transparent_keys(
         &self,
-        address: &TransparentAddress,
-    ) -> Result<secp256k1::SecretKey, Error> {
+        pubkeys: &[secp256k1::PublicKey],
+    ) -> Result<Vec<secp256k1::SecretKey>, Error> {
         // Acquire a read lock on the identities for decryption.
         let identities = self.identities.read().await;
         if identities.is_empty() {
             return Err(ErrorKind::Generic.context(fl!("err-wallet-locked")).into());
         }
 
-        let (pubkey_bytes, encrypted_key_bytes) = self
-            .with_db(|conn, network| {
-                let addr_str = Address::Transparent(*address).encode(network);
-                let row = conn
-                    .query_row(
-                        "SELECT ztk.pubkey, encrypted_transparent_privkey
-                         FROM ext_zallet_keystore_standalone_transparent_keys ztk
-                         JOIN addresses a ON ztk.pubkey = a.imported_transparent_receiver_pubkey
-                         WHERE a.cached_transparent_receiver_address = :address",
-                        named_params! {
-                            ":address": addr_str,
-                        },
-                        |row| {
-                            Ok((
-                                row.get::<_, Vec<u8>>("pubkey")?,
-                                row.get::<_, Vec<u8>>("encrypted_transparent_privkey")?,
-                            ))
-                        },
+        let rows = self
+            .with_db(|conn, _| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT encrypted_transparent_privkey
+                         FROM ext_zallet_keystore_standalone_transparent_keys
+                         WHERE pubkey = :pubkey",
                     )
                     .map_err(|e| ErrorKind::Generic.context(e))?;
-                Ok(row)
+
+                let mut rows = Vec::with_capacity(pubkeys.len());
+                for pubkey in pubkeys {
+                    let row = stmt
+                        .query_row(named_params! {":pubkey": &pubkey.serialize()}, |row| {
+                            row.get::<_, Vec<u8>>(0)
+                        })
+                        .optional()
+                        .map_err(|e| ErrorKind::Generic.context(e))?;
+                    if let Some(encrypted_key_bytes) = row {
+                        rows.push((*pubkey, encrypted_key_bytes));
+                    }
+                }
+                Ok(rows)
             })
             .await?;
 
-        let secret_key =
-            decrypt_standalone_transparent_privkey(&identities, &encrypted_key_bytes[..])?;
+        let mut keys = Vec::with_capacity(rows.len());
+        for (pubkey, encrypted_key_bytes) in rows {
+            let secret_key =
+                decrypt_standalone_transparent_privkey(&identities, &encrypted_key_bytes[..])?;
 
-        // The ciphertext is not bound to the pubkey the row is keyed by, so verify that
-        // the decrypted key reproduces the pubkey used for the lookup.
-        let pubkey = secret_key.public_key(&secp256k1::Secp256k1::signing_only());
-        if pubkey.serialize()[..] != pubkey_bytes[..] {
-            return Err(ErrorKind::Generic
-                .context(fl!("err-keystore-key-material-mismatch"))
-                .into());
+            // The ciphertext is not bound to the pubkey the row is keyed by, so verify
+            // that the decrypted key reproduces the pubkey used for the lookup.
+            if secret_key.public_key(&secp256k1::Secp256k1::signing_only()) != pubkey {
+                return Err(ErrorKind::Generic
+                    .context(fl!("err-keystore-key-material-mismatch"))
+                    .into());
+            }
+
+            keys.push(secret_key);
         }
 
-        Ok(secret_key)
+        Ok(keys)
     }
 }
 
@@ -1698,6 +1707,42 @@ mod tests {
                 !keystore.backup_required(&seed_fp).await.unwrap(),
                 "keystore.require_backup = false must not block derivation",
             );
+        });
+    }
+
+    /// Standalone transparent keys are looked up by member pubkey, with no
+    /// dependency on the wallet's address table, so a P2SH multisig member key is
+    /// as reachable as a standalone P2PKH key. A pubkey whose spending key the
+    /// keystore does not hold (e.g. a multisig member key held by another party)
+    /// is skipped rather than reported as an error.
+    #[cfg(feature = "zcashd-import")]
+    #[test]
+    fn standalone_transparent_keys_are_looked_up_by_pubkey() {
+        let datadir = tempdir().unwrap();
+
+        run_async(|| async {
+            let keystore = test_keystore(&datadir).await;
+
+            let secp = secp256k1::Secp256k1::new();
+            let held = secp256k1::SecretKey::from_slice(&[0x11; 32]).expect("valid key bytes");
+            let absent = secp256k1::SecretKey::from_slice(&[0x22; 32]).expect("valid key bytes");
+
+            keystore
+                .encrypt_and_store_standalone_transparent_key(
+                    &zcash_keys::keys::transparent::Key::new(held, true),
+                )
+                .await
+                .unwrap();
+
+            let keys = keystore
+                .decrypt_standalone_transparent_keys(&[
+                    held.public_key(&secp),
+                    absent.public_key(&secp),
+                ])
+                .await
+                .unwrap();
+
+            assert_eq!(keys, vec![held]);
         });
     }
 

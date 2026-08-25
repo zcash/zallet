@@ -9,6 +9,7 @@ use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
 use zcash_client_backend::{
     data_api::{Account as _, WalletRead},
     keys::UnifiedSpendingKey,
+    wallet::TransparentAddressSource,
 };
 use zcash_keys::encoding::AddressCodec;
 
@@ -82,9 +83,13 @@ async fn get_transparent_secret_key(
     };
 
     // Derive/decrypt based on address source.
-    match (metadata.source().scope(), metadata.source().address_index()) {
+    match metadata.source() {
         // HD: derive from seed.
-        (Some(scope), Some(address_index)) => {
+        TransparentAddressSource::Derived {
+            scope,
+            address_index,
+        } => {
+            let (scope, address_index) = (*scope, *address_index);
             // Ephemeral (ZIP 320) addresses are internal to transaction construction;
             // refuse to prove ownership of them.
             if scope == TransparentKeyScope::EPHEMERAL {
@@ -114,14 +119,19 @@ async fn get_transparent_secret_key(
         }
         // Standalone imported key.
         #[cfg(feature = "transparent-key-import")]
-        (None, None) => keystore
-            .decrypt_standalone_transparent_key(address)
+        TransparentAddressSource::StandalonePubkey(pubkey) => keystore
+            .decrypt_standalone_transparent_keys(std::slice::from_ref(pubkey))
             .await
-            .map_err(map_wallet_locked_error),
-        #[cfg(not(feature = "transparent-key-import"))]
-        (None, None) => Err(LegacyCode::Wallet.with_static("Private key not available")),
-        // Invalid state: scope and address_index should both be Some or both be None.
-        _ => Err(LegacyCode::Wallet.with_static("Private key not available")),
+            .map_err(map_wallet_locked_error)?
+            .pop()
+            .ok_or_else(|| LegacyCode::Wallet.with_static("Private key not available")),
+        // A script import holds member keys rather than a key for the P2SH address
+        // itself, and an address-only import holds no key material at all.
+        #[cfg(feature = "transparent-key-import")]
+        TransparentAddressSource::StandaloneScript(_)
+        | TransparentAddressSource::StandaloneAddress => {
+            Err(LegacyCode::Wallet.with_static("Private key not available"))
+        }
     }
 }
 

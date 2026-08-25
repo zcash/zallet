@@ -163,6 +163,18 @@ be considered breaking changes.
 
 ### Fixed
 
+- `z_sendmany` and `z_shieldcoinbase` can now spend UTXOs held at an imported
+  standalone P2SH multisig address, such as one migrated from `zcashd`'s
+  `addmultisigaddress`. The signing-key lookup only understood P2PKH
+  addresses, so a spend selecting a P2SH input failed with an opaque
+  "Error: Query returned no rows" database error. The wallet now resolves the
+  redeem script's member pubkeys and signs with every member key the keystore
+  holds. A spend from a multisig for which the keystore holds fewer member
+  keys than the script's threshold still fails, but at signing with a
+  missing-key error rather than a database error.
+- `signmessage` with an address that was imported without key material now
+  reports "Private key not available" instead of "Error: Query returned no
+  rows".
 - `migrate-zcashd-wallet` now marks the addresses of imported standalone
   transparent spending keys (from zcashd's `importprivkey`) as exposed, so
   `listaddresses` surfaces them even if they were never funded, as `zcashd`
