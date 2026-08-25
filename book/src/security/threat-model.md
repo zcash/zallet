@@ -31,8 +31,16 @@ with an encryption of their own key material is detected at the point of use,
 because the recomputed fingerprint does not match the row that selected it.
 
 These per-read re-derive checks were landed in #643 and cover mnemonic seeds,
-standalone Sapling extended spending keys, standalone transparent secret keys,
-and seed-derived account UFVKs at spend time.
+standalone Sapling extended spending keys, and standalone transparent secret
+keys. The same release also re-derives a built transaction's transparent
+outputs from the seed-derived account key before broadcast, so a substituted
+transparent change address is rejected.
+
+The account's own recorded viewing key (`accounts.ufvk`) is **not** validated
+against the seed. Spending authority is unaffected, because signing derives
+from the seed rather than from that record, but receive-address derivation
+reads it as-is. See [Full filesystem compromise](#full-filesystem-compromise)
+below.
 
 ### RPC channel hygiene
 
@@ -119,7 +127,7 @@ recover keys from memory regardless of the wallet software in use.
 | Spend funds | **Yes** | The spending key is age-encrypted; the attacker cannot decrypt it without the identity file. |
 | Substitute a keystore ciphertext with their own key | No | Per-read re-derive check: the recomputed fingerprint does not match the row key. |
 | Substitute a cached transparent change address | No | Per-read re-derive check: change outputs are re-derived from the USK before broadcast. |
-| Forge a UFVK signature over a swapped UFVK | No | Computationally infeasible without the spending key (the signature is produced at import time by the USK). |
+| Substitute the account's recorded UFVK (`accounts.ufvk`) | No | Not currently caught. Newly derived receive addresses follow the substituted key. Transparent change is caught, because it is re-derived from the seed before broadcast; shielded change is not. |
 | Append an age recipient to silently receive future ciphertexts | No | Not caught by per-read checks. The operator's defense is encrypting backups and verifying restored DB provenance. |
 
 [age]: https://age-encryption.org/
