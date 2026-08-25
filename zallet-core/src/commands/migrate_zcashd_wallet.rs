@@ -653,16 +653,34 @@ fn derived_transparent_receivers(
     db_data: &mut DbHandle,
     report: &ZewifImportReport,
 ) -> Result<HashSet<TransparentAddress>, MigrateError> {
-    let mut derived = HashSet::new();
-    for account in &report.imported_accounts {
-        derived.extend(
+    collect_transparent_receivers(
+        db_data,
+        report.imported_accounts.iter().map(|a| a.account_uuid),
+        false,
+    )
+}
+
+/// Collects the transparent receivers of `accounts` into a set, change addresses
+/// included.
+///
+/// `include_standalone` selects whether imported standalone addresses count as
+/// receivers of the account that holds them; the two callers differ on that, and on
+/// which accounts they ask about, but not otherwise.
+fn collect_transparent_receivers(
+    db_data: &mut DbHandle,
+    accounts: impl IntoIterator<Item = zcash_client_sqlite::AccountUuid>,
+    include_standalone: bool,
+) -> Result<HashSet<TransparentAddress>, MigrateError> {
+    let mut receivers = HashSet::new();
+    for account_uuid in accounts {
+        receivers.extend(
             db_data
-                .get_transparent_receivers(account.account_uuid, true, false)
+                .get_transparent_receivers(account_uuid, true, include_standalone)
                 .map_err(MigrateError::Database)?
                 .into_keys(),
         );
     }
-    Ok(derived)
+    Ok(receivers)
 }
 
 /// Registers watch-only transparent pubkeys (from zcashd's `importpubkey`) with the
