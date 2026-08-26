@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  init-rage:
+    image: alpine:edge
+    entrypoint: ["sh", "-c"]
+    command: -c "
+      set -e
+      && apk update
+      && apk add --no-cache rage
+      && if [ ! -f /data/identity.txt ]; then
+        echo '[init] generating identity.txt with rage-keygen'
+        && rage-keygen -o /data/identity.txt;
+      else
+        echo '[init] identity.txt already exists, skipping.';
+      fi"
+    volumes:
+      - ./zallet_data:/datad
+
+  zallet:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: zallet
+    restart: unless-stopped
+    depends_on:
+      init-rage:
+        condition: service_completed_successfully
+    volumes:
+      - ./zallet_data:/data
+    entrypoint: ["/usr/local/bin/zallet"]
+    command: ["--config", "/data/zallet.toml"]
