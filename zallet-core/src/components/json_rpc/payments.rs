@@ -2467,3 +2467,160 @@ mod proposal_policy_tests {
         assert_eq!(check_shielded_action_limits(&proposal, 2), Ok(()));
     }
 }
+
+#[cfg(all(test, zallet_build = "wallet"))]
+mod spending_key_tests {
+    use super::spending_key_for_account;
+    use crate::components::keystore::{BackupStatus, testing as ks_testing};
+    use crate::config::ZalletConfig;
+    use tempfile::tempdir;
+    use zcash_client_backend::data_api::{
+        Account as _, WalletRead, WalletWrite, chain::ChainState,
+    };
+    use zcash_primitives::block::BlockHash;
+    use zcash_protocol::consensus::{BlockHeight, NetworkType};
+
+    /// The real attack this check exists to catch: an attacker who can write to `wallet.db`
+    /// swaps the `ufvk` column of an account row to a different key's ufvk, while leaving the
+    /// `hd_seed_fingerprint` unchanged. Input selection reads the substituted ufvk and
+    /// selects notes the attacker chose; signing derives the USK from the real seed. Without
+    /// the check the wallet would spend the victim's notes under a key the attacker controls.
+    ///
+    /// Upstream `validate_seed` returns `Err(CorruptedData)` for this case (seed fingerprint
+    /// matches but the derived viewing key does not match the recorded one), not `Ok(false)`.
+    /// This test proves the helper surfaces that as `err-account-seed-mismatch` rather than
+    /// a generic database error, and that no spending key is derived.
+    #[test]
+    fn spending_key_for_account_rejects_tampered_uivk() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempdir().unwrap();
+
+        ks_testing::run_async(|| async {
+            let keystore = ks_testing::keystore(&datadir).await;
+
+            // Account 1: seed derived from mnemonic A.
+            let seed_fp_a = keystore
+                .encrypt_and_store_mnemonic(ks_testing::phrase([0x5a; 32]), BackupStatus::Confirmed)
+                .await
+                .unwrap();
+            let seed_a = keystore.decrypt_seed(&seed_fp_a).await.unwrap();
+
+            // Account 2: seed derived from mnemonic B.
+            let seed_fp_b = keystore
+                .encrypt_and_store_mnemonic(ks_testing::phrase([0xa5; 32]), BackupStatus::Confirmed)
+                .await
+                .unwrap();
+            let seed_b = keystore.decrypt_seed(&seed_fp_b).await.unwrap();
+
+            // Open a separate connection to the same wallet DB for the spend-path call.
+            let config = ZalletConfig {
+                datadir: Some(datadir.path().to_path_buf()),
+                consensus: crate::config::ConsensusSection {
+                    network: NetworkType::Test,
+                    ..Default::default()
+                },
+                keystore: crate::config::KeyStoreSection {
+                    encryption_identity: Some(datadir.path().join("encryption-identity.txt")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let db = crate::components::database::Database::open(&config)
+                .await
+                .unwrap();
+            let mut handle = db.handle().await.unwrap();
+
+            let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(
+                ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
+                None,
+            );
+
+            let (account_id_a, _) = handle
+                .create_account("account_a", &seed_a, &birthday, None)
+                .expect("creates account A");
+            let (account_id_b, _) = handle
+                .create_account("account_b", &seed_b, &birthday, None)
+                .expect("creates account B");
+
+            // Derivation for account A (the real seed fingerprint + account index).
+            let account_a = handle.get_account(account_id_a).unwrap().unwrap();
+            let derivation = account_a
+                .source()
+                .key_derivation()
+                .expect("account A is seed-derived")
+                .clone();
+
+            // Positive case: the intact account validates and returns a spending key.
+            let usk =
+                spending_key_for_account(handle.as_ref(), &keystore, account_id_a, &derivation)
+                    .await;
+            assert!(usk.is_ok(), "an intact account must yield a spending key");
+
+            // Tamper: replace account A's ufvk with account B's, leaving the seed
+            // fingerprint unchanged. This is the real attack: same seed, swapped viewing
+            // key row. `parse_account_row` reads `ufvk` first (falling back to `uivk` only
+            // when `ufvk` is NULL), so the UFVK is the column that drives the comparison in
+            // `validate_seed`. Account B is deleted first to avoid the ufvk UNIQUE
+            // constraint.
+            //
+            // Drop the handle first so the pool connection is released, then tamper on
+            // a fresh connection and re-acquire a handle so the pool sees the change.
+            drop(handle);
+
+            let db_path = config.wallet_db_path();
+            let tamper_conn = rusqlite::Connection::open(&db_path).unwrap();
+
+            let ufvk_b: String = tamper_conn
+                .query_row(
+                    "SELECT ufvk FROM accounts WHERE uuid = ?",
+                    [&account_id_b.expose_uuid()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+
+            tamper_conn
+                .execute(
+                    "DELETE FROM accounts WHERE uuid = ?",
+                    [&account_id_b.expose_uuid()],
+                )
+                .unwrap();
+            tamper_conn
+                .execute(
+                    "UPDATE accounts SET ufvk = ? WHERE uuid = ?",
+                    rusqlite::params![ufvk_b, account_id_a.expose_uuid()],
+                )
+                .unwrap();
+            drop(tamper_conn);
+
+            let handle = db.handle().await.unwrap();
+
+            // Verify the tamper is visible to the pool connection.
+            let visible_ufvk: String = handle.as_ref().with_raw(|conn, _| {
+                conn.query_row(
+                    "SELECT ufvk FROM accounts WHERE uuid = ?",
+                    [&account_id_a.expose_uuid()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            });
+            assert!(
+                visible_ufvk == ufvk_b,
+                "tamper not visible: expected account A's ufvk to be B's, got {visible_ufvk}",
+            );
+
+            // The tampered account must be rejected with the tamper message, not a generic
+            // database error.
+            let err =
+                spending_key_for_account(handle.as_ref(), &keystore, account_id_a, &derivation)
+                    .await
+                    .expect_err("a tampered ufvk must be rejected");
+
+            let msg = err.message();
+            assert!(
+                msg.contains("does not derive the viewing key"),
+                "expected the tamper message, got: {msg}",
+            );
+        });
+    }
+}
