@@ -330,7 +330,10 @@ fn validate_seed_accepts_only_the_accounts_own_seed() {
             );
 
             // A different seed derives a different key, so it must not validate against
-            // this account — this is the substitution the check exists to catch.
+            // this account. This pins that `validate_seed` returns `Ok(false)` for an
+            // unrelated seed, which is the semantics the spend path depends on. The
+            // actual substitution attack (same seed, swapped ufvk row) is exercised in
+            // `payments::spending_key_tests::spending_key_for_account_rejects_tampered_uivk`.
             assert!(
                 !handle.validate_seed(account_id, &other_seed).unwrap(),
                 "a seed that does not derive the account's key must be rejected",
