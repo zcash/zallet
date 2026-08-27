@@ -168,6 +168,12 @@ pub(super) fn confirmations_policy_for_minconf(
 /// that gap by checking the recorded viewing key against the one this seed derives, and
 /// fails closed.
 ///
+/// `validate_seed` returns `Ok(false)` for a seed that does not derive the recorded key,
+/// and `Err(CorruptedData)` when the seed fingerprint matches but the viewing key does
+/// not (the real substitution attack: same seed, swapped ufvk row). Both are treated as
+/// corruption or tampering: the operation is refused with `err-account-seed-mismatch`
+/// and no spending key is derived.
+///
 /// The check is free at every call site: the seed is decrypted here anyway, so no
 /// operation loads a secret it did not already load, and a locked wallet still fails at
 /// the decryption step rather than at this one.
@@ -189,14 +195,14 @@ pub(super) async fn spending_key_for_account(
             _ => LegacyCode::Database.with_message(e.to_string()),
         })?;
 
-    if !wallet
-        .validate_seed(account_id, &seed)
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-    {
-        return Err(LegacyCode::Wallet.with_message(fl!(
-            "err-account-seed-mismatch",
-            account = account_id.expose_uuid().to_string(),
-        )));
+    match wallet.validate_seed(account_id, &seed) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => {
+            return Err(LegacyCode::Wallet.with_message(fl!(
+                "err-account-seed-mismatch",
+                account = account_id.expose_uuid().to_string(),
+            )));
+        }
     }
 
     UnifiedSpendingKey::from_seed(
