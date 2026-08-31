@@ -5,7 +5,10 @@ use abscissa_core::Runnable;
 
 use bip0039::{Count, English, Mnemonic};
 use rand::{RngCore, rngs::OsRng};
-use secp256k1::{PublicKey, constants::PUBLIC_KEY_SIZE};
+use secp256k1::{
+    PublicKey,
+    constants::{PUBLIC_KEY_SIZE, UNCOMPRESSED_PUBLIC_KEY_SIZE},
+};
 use secrecy::{SecretVec, Zeroize};
 use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::{
@@ -752,6 +755,7 @@ fn register_watch_pubkeys(
     derived_receivers: &HashSet<TransparentAddress>,
 ) -> Result<(), MigrateError> {
     let mut skipped_uncompressed_watch_pubkeys = 0usize;
+    let mut skipped_malformed_watch_pubkeys = 0usize;
     for (account_uuid, account) in imported_document_accounts(document, report) {
         let mut watch_pubkeys = Vec::new();
         for address in account.addresses() {
@@ -759,16 +763,19 @@ fn register_watch_pubkeys(
                 && t.spend_authority().is_none()
                 && let Some(pubkey) = t.pubkey()
             {
-                // `import_standalone_transparent_pubkeys` derives the stored
-                // P2PKH address from the compressed pubkey serialization, so an
-                // uncompressed pubkey would be tracked under a different
-                // address than zcashd had on-chain.
-                if pubkey.as_slice().len() == PUBLIC_KEY_SIZE
-                    && let Ok(pk) = PublicKey::from_slice(pubkey.as_slice())
-                {
-                    watch_pubkeys.push(pk);
-                } else {
-                    skipped_uncompressed_watch_pubkeys += 1;
+                match pubkey.as_slice() {
+                    bytes if bytes.len() == PUBLIC_KEY_SIZE => match PublicKey::from_slice(bytes) {
+                        Ok(pk) => watch_pubkeys.push(pk),
+                        Err(_) => skipped_malformed_watch_pubkeys += 1,
+                    },
+                    // `import_standalone_transparent_pubkeys` derives the stored P2PKH
+                    // address from the compressed pubkey serialization, so an
+                    // uncompressed pubkey would be tracked under a different address
+                    // than zcashd had on-chain.
+                    bytes if bytes.len() == UNCOMPRESSED_PUBLIC_KEY_SIZE => {
+                        skipped_uncompressed_watch_pubkeys += 1
+                    }
+                    _ => skipped_malformed_watch_pubkeys += 1,
                 }
             }
         }
@@ -794,9 +801,15 @@ fn register_watch_pubkeys(
     }
     if skipped_uncompressed_watch_pubkeys > 0 {
         warn!(
-            "Skipped {} watch-only entries with uncompressed or malformed public \
-             keys; Zallet only supports compressed-form pubkey imports.",
+            "Skipped {} watch-only entries whose public keys zcashd stored in \
+             uncompressed form; Zallet only supports compressed-form pubkey imports.",
             skipped_uncompressed_watch_pubkeys,
+        );
+    }
+    if skipped_malformed_watch_pubkeys > 0 {
+        warn!(
+            "Skipped {} watch-only entries whose public keys could not be parsed.",
+            skipped_malformed_watch_pubkeys,
         );
     }
     Ok(())
