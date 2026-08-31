@@ -49,6 +49,13 @@ be considered breaking changes.
   was left with no exposure height at all. One consequence is that
   `listaddresses`, which reports only exposed addresses, did not surface it where
   `zcashd` did.
+- `migrate-zcashd-wallet` no longer aborts when a `zcashd` wallet's watch-only
+  pubkeys (from `importpubkey`) include one whose address the Zallet wallet already
+  tracks. Every such pubkey was registered regardless, and the wallet rejects an
+  import of key material another account holds, so migrating a second `zcashd`
+  wallet that shared a watched key failed with a database error *after* the import
+  had committed. Such an address now keeps the registration and the exposure it
+  already had.
 
 ## [0.1.0-beta.3] - 2026-08-24
 
