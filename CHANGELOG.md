@@ -25,6 +25,14 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- `z_importkey` with `rescan="yes"` now re-scans when the key is already known to
+  the wallet; previously it scanned nothing. The account's birthday is lowered to
+  `startHeight`, so the rescan reaches blocks below the wallet's previous earliest
+  birthday. This rewinds the **entire wallet** to `startHeight`: the note commitment
+  trees are shared, so every account re-scans from there.
+
 ## [0.1.0-beta.3] - 2026-08-24
 
 ### Added
