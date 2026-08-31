@@ -187,6 +187,13 @@ be considered breaking changes.
   see. As in `zcashd`, and as for any address imported with `zallet
   import-address`, funds they receive are reported but cannot be spent without
   importing the corresponding key material.
+- `migrate-zcashd-wallet` no longer aborts when a `zcashd` wallet's watch-only
+  pubkeys (from `importpubkey`) include one whose address the Zallet wallet already
+  tracks. Every such pubkey was registered regardless, and the wallet rejects an
+  import of key material another account holds, so migrating a second `zcashd`
+  wallet that shared a watched key failed with a database error *after* the import
+  had committed. Such an address now keeps the registration and the exposure it
+  already had, as the watch-only address registration does for its own candidates.
 - `migrate-zcashd-wallet` prints the backup reminder before reporting an
   error from the post-import registration and verification steps.
 - The `__cookie__` JSON-RPC username is now actually reserved. It is documented
