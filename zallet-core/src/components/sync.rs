@@ -1011,6 +1011,15 @@ async fn steady_state_iteration<C: Chain>(
             // Now that we're done applying the block, update our chain pointer.
             *prev_tip = current_block;
         }
+
+        // Wake the data-requests task again, now that those blocks are applied. The
+        // notification above fires as soon as the new tip is *observed*, which is before
+        // the blocks have been scanned and before the requests they generate exist; a
+        // task woken by it can find nothing to do and go back to sleep, stranding that
+        // work until the next tip change. While the chain is idle there is no next tip
+        // change, so the wallet's transparent balance can sit part-way through the
+        // outputs it owns.
+        tip_change_signal.notify_one();
     }
 
     // The backing node's tip may itself sit at or beyond the divergence height — e.g. the
