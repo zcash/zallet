@@ -1042,7 +1042,9 @@ fn watched_addresses_to_import<P: Parameters>(
 /// spent from, which is what it was in zcashd as well.
 ///
 /// This runs after the registration steps that precede it, so that the receivers read
-/// back here account for everything they added.
+/// back here account for everything they added. The registrations and the exposures
+/// they call for are applied as one database transaction, so a failure partway leaves
+/// the wallet as it was rather than watching addresses it does not report.
 fn register_watch_addresses(
     db_data: &mut DbHandle,
     document: &zewif::Zewif,
@@ -1067,14 +1069,15 @@ fn register_watch_addresses(
         "Registering {} watch-only transparent addresses that carry no key material",
         to_import.len(),
     );
-    let mut to_expose = Vec::with_capacity(to_import.len());
-    for watched in to_import {
-        db_data
-            .import_standalone_transparent_address(watched.account_uuid, watched.address)
-            .map_err(MigrateError::Database)?;
-        to_expose.push((watched.address, watched.exposure_height));
-    }
-    mark_addresses_exposed(db_data, &to_expose)
+    db_data
+        .import_standalone_transparent_addresses(to_import.into_iter().map(|watched| {
+            (
+                watched.account_uuid,
+                watched.address,
+                watched.exposure_height,
+            )
+        }))
+        .map_err(MigrateError::Database)
 }
 
 /// Selects the P2SH addresses among `receivers` that the wallet does not already
