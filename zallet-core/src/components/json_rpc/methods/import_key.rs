@@ -1,8 +1,12 @@
+use std::collections::HashSet;
+
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use schemars::JsonSchema;
 use serde::Serialize;
-use zcash_client_backend::data_api::{AccountPurpose, WalletRead, WalletWrite};
+use zcash_client_backend::data_api::{
+    Account, AccountPurpose, WalletRead, WalletWrite, error::RewindError,
+};
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_keys::{encoding::decode_extended_spending_key, keys::UnifiedFullViewingKey};
 use zcash_protocol::consensus::{BlockHeight, NetworkConstants};
@@ -44,6 +48,13 @@ fn validate_rescan(rescan: Option<&str>) -> RpcResult<&str> {
         Some(_) => Err(LegacyCode::InvalidParameter
             .with_static("Invalid rescan value. Must be \"yes\", \"no\", or \"whenkeyisnew\".")),
     }
+}
+
+/// Whether re-importing an already-known key should rewind the wallet to rescan.
+///
+/// A new key needs no rewind: its account import already queues the birthday range.
+fn should_rescan_existing_key(is_new_key: bool, rescan: &str) -> bool {
+    !is_new_key && rescan == "yes"
 }
 
 /// Decodes a Sapling extended spending key and derives the default payment address.
@@ -131,10 +142,10 @@ pub(crate) async fn call<C: Chain>(
         .map_err(|e| LegacyCode::Wallet.with_message(e.to_string()))?;
 
     // Check if the key is already known to the wallet.
-    let is_new_key = wallet
+    let existing_account = wallet
         .get_account_for_ufvk(&ufvk)
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-        .is_none();
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+    let is_new_key = existing_account.is_none();
 
     // For a new key, resolve its birthday before opening the transaction, since the birthday
     // fetch is async and may query the chain.
@@ -144,11 +155,6 @@ pub(crate) async fn call<C: Chain>(
         //   historical blocks from that point.
         // - "no" → use the current chain tip so the sync engine only tracks new
         //   transactions going forward.
-        //
-        // TODO: When rescan is "yes" and the key already exists, zcashd would force a
-        // rescan from start_height. `WalletWrite::rewind_to_height` could now drive this,
-        // but it rewinds the *entire* wallet (every account) rather than just this key, so
-        // we defer wiring it up until that global side effect is the desired behaviour.
         let effective_height = match rescan {
             "yes" | "whenkeyisnew" => start_height,
             "no" => chain_tip.unwrap_or_else(|| {
@@ -165,6 +171,16 @@ pub(crate) async fn call<C: Chain>(
             LegacyCode::Database.with_message(format!("Failed to obtain a chain snapshot: {e}"))
         })?;
         Some(fetch_account_birthday(&chain_view, effective_height, None).await?)
+    } else {
+        None
+    };
+
+    // Resolved before the transaction for the same reason as the birthday above: async.
+    let rewind_to = if should_rescan_existing_key(is_new_key, rescan) {
+        let chain_view = chain.snapshot().await.map_err(|e| {
+            LegacyCode::Database.with_message(format!("Failed to obtain a chain snapshot: {e}"))
+        })?;
+        Some(fetch_account_birthday(&chain_view, start_height, None).await?)
     } else {
         None
     };
@@ -204,6 +220,27 @@ pub(crate) async fn call<C: Chain>(
             ImportError::Database(e) => LegacyCode::Database.with_message(e.to_string()),
             ImportError::Keystore(e) => LegacyCode::Wallet.with_message(e.to_string()),
         })?;
+
+    // Rewind to just before `start_height` and lower this account's birthday to it, so the
+    // sync engine re-scans `start_height..=tip`. `truncate_to_height` cannot do this: scan
+    // ranges are floored at `MIN(birthday_height)` across all accounts. The commitment trees
+    // are shared, so every account re-scans; only this account's birthday moves.
+    if let (Some(account), Some(birthday)) = (&existing_account, &rewind_to) {
+        wallet
+            .rewind_to_chain_state(
+                birthday.prior_chain_state().clone(),
+                HashSet::from([account.id()]),
+            )
+            .map_err(|e| match e {
+                RewindError::RewindBeyondBirthdays(_) => LegacyCode::InvalidParameter
+                    .with_message(format!("Cannot rescan from height {start_height}.")),
+                RewindError::DataSource(e) => {
+                    LegacyCode::Database.with_message(format!("Rescan failed: {e}"))
+                }
+                // `RewindError` is `#[non_exhaustive]`; don't blame the caller for new variants.
+                _ => LegacyCode::Database.with_static("Rescan failed."),
+            })?;
+    }
 
     // Reload viewing keys so the key is scanned without a restart. Run this unconditionally:
     // a re-import must be able to repair an account the sync engine never loaded. Don't wait
@@ -260,6 +297,42 @@ mod tests {
         assert!(validate_rescan(Some("always")).is_err());
         assert!(validate_rescan(Some("")).is_err());
         assert!(validate_rescan(Some("true")).is_err());
+    }
+
+    // -- should_rescan_existing_key tests --
+
+    // The only combination that rewinds; the other arms keep the prior no-op behaviour.
+    #[test]
+    fn known_key_with_rescan_yes_rewinds() {
+        assert!(should_rescan_existing_key(false, "yes"));
+    }
+
+    #[test]
+    fn new_key_never_rewinds() {
+        for rescan in ["yes", "no", "whenkeyisnew"] {
+            assert!(
+                !should_rescan_existing_key(true, rescan),
+                "a new key must not rewind (rescan={rescan})",
+            );
+        }
+    }
+
+    #[test]
+    fn known_key_without_rescan_yes_does_not_rewind() {
+        assert!(!should_rescan_existing_key(false, "no"));
+        assert!(!should_rescan_existing_key(false, "whenkeyisnew"));
+    }
+
+    // Guards the matrix above against `validate_rescan` accepting a new value.
+    #[test]
+    fn every_validated_rescan_value_is_covered() {
+        for rescan in [None, Some("yes"), Some("no"), Some("whenkeyisnew")] {
+            let validated = validate_rescan(rescan).unwrap();
+            assert!(
+                ["yes", "no", "whenkeyisnew"].contains(&validated),
+                "unhandled rescan value {validated:?}",
+            );
+        }
     }
 
     // -- decode_key_and_address tests --
