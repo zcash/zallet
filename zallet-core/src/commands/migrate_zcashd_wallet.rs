@@ -982,10 +982,17 @@ struct WatchedAddress {
 ///
 /// An address the document records an exposure height for takes that height, as the
 /// import would have done had it recognized the address; the rest take
-/// `exposure_height`. The result is sorted, so that a migration run registers
-/// addresses in a deterministic order, and an address recorded by more than one
-/// account is registered once, under the first account that records it: the wallet
-/// rejects an import of the same address into a second account.
+/// `exposure_height`. No converter records one today — `zewif-zcashd` never sets the
+/// field, and neither does [`enriched_document`] — so every address currently takes
+/// `exposure_height`. The branch is here because the ZeWIF importer has the same one
+/// over the same field, and an address this step registers should not end up with a
+/// worse exposure than the import would have given it had the wallet been able to
+/// hold the address; a document that does record heights must not silently lose them.
+///
+/// The result is sorted, so that a migration run registers addresses in a
+/// deterministic order, and an address recorded by more than one account is registered
+/// once, under the first account that records it: the wallet rejects an import of the
+/// same address into a second account.
 ///
 /// Returns the selected addresses along with the number of address strings that could
 /// not be decoded for this network, which the caller warns about.
@@ -2182,6 +2189,9 @@ mod tests {
     /// applied had it recognized the address. The rest take the migration's own
     /// exposure height; the disclosure that put such an address into a zcashd wallet
     /// happened before the migration either way.
+    ///
+    /// No converter records an exposure height yet, so this pins a branch that a
+    /// zcashd wallet cannot currently reach, against the day one does.
     #[test]
     fn watched_addresses_take_the_documents_exposure_height_where_it_records_one() {
         use transparent::address::TransparentAddress;
