@@ -1290,17 +1290,23 @@ async fn data_requests<C: Chain>(
     tip_change_signal: Arc<Notify>,
 ) -> Result<(), SyncError> {
     loop {
-        // Wait for the chain tip to advance
-        tip_change_signal.notified().await;
+        let requests = db_data.transaction_data_requests()?;
+        if requests.is_empty() {
+            // Nothing to do; wait for the chain tip to advance and bring more work.
+            debug!("No transaction data requests, sleeping until the chain tip changes.");
+            tip_change_signal.notified().await;
+            continue;
+        }
 
         let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
 
-        let requests = db_data.transaction_data_requests()?;
-        if requests.is_empty() {
-            // Wait for new requests.
-            debug!("No transaction data requests, sleeping until the chain tip changes.");
-            continue;
-        }
+        // Servicing a pass can leave work behind: requests queued while the pass was
+        // running, entries deliberately kept for retry (`SpentSpenderUnknown`), and ones
+        // that hit a transient chain error. Previously the loop went straight back to
+        // waiting on the chain tip, so on an idle chain that remainder was stranded and
+        // the wallet's transparent balance stayed frozen part-way. Re-check the queue
+        // after each pass instead, and only wait on the tip when a pass resolves nothing.
+        let outstanding_before = requests.len();
 
         let view_tip = chain_view.tip().await.map_err(SyncError::Chain)?.height();
         info!("{} transaction data requests to service", requests.len());
@@ -1398,6 +1404,17 @@ async fn data_requests<C: Chain>(
                     }
                 }
             }
+        }
+
+        // If the queue did not shrink, this pass resolved nothing that it can resolve on
+        // its own, so go back to waiting on the chain rather than spinning against the
+        // same entries. Otherwise loop straight round and drain what is left.
+        if db_data.transaction_data_requests()?.len() >= outstanding_before {
+            debug!(
+                "Transaction data requests made no progress this pass; \
+                 sleeping until the chain tip changes."
+            );
+            tip_change_signal.notified().await;
         }
     }
 }

@@ -25,6 +25,18 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Wallet balances no longer stall part-way while the chain is idle. Transaction
+  data requests were only serviced when the chain tip advanced, so any request
+  still queued at the end of a pass — including ones added while that pass was
+  running — waited for the next block. On a chain that was not producing blocks
+  the remainder was never serviced, leaving RPCs such as `z_gettotalbalance` and
+  `z_listunspent` reporting a subset of the wallet's transparent outputs
+  indefinitely. The queue is now drained while it is making progress, and only
+  waits on the chain tip when there is nothing left to do (or when a pass cannot
+  resolve anything further on its own).
+
 ## [0.1.0-beta.3] - 2026-08-24
 
 ### Added
