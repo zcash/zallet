@@ -5,11 +5,17 @@ use abscissa_core::Runnable;
 
 use bip0039::{Count, English, Mnemonic};
 use rand::{RngCore, rngs::OsRng};
-use secp256k1::PublicKey;
+use secp256k1::{
+    PublicKey,
+    constants::{PUBLIC_KEY_SIZE, UNCOMPRESSED_PUBLIC_KEY_SIZE},
+};
 use secrecy::{SecretVec, Zeroize};
 use transparent::address::TransparentAddress;
 use zcash_client_backend::data_api::{
     Account as _, AccountSource, WalletRead, WalletWrite as _, chain::ChainState,
+};
+use zcash_client_backend::wallet::{
+    Exposure, TransparentAddressMetadata, TransparentAddressSource,
 };
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_client_sqlite::zewif::{
@@ -582,42 +588,49 @@ impl MigrateZcashdWalletCmd {
             .map(|cs| BlockHeight::from_u32(u32::from(cs.height()) + 1))
             .or(no_scan_birthday_estimate)
             .unwrap_or(sapling_activation);
-        // The import has committed: register watch-only transparent pubkeys, expose
-        // the imported standalone spending keys' addresses, then evaluate the import
-        // report. All of these must happen after the imported accounts are fully set
-        // up, so that a failure here never leaves committed accounts half-configured.
-        // The backup reminder is printed before propagating any error from these
-        // steps, as the minted-seed notice above refers to it.
-        let post_import = derived_transparent_receivers(&mut db_data, &report)
-            .and_then(|derived| {
-                register_watch_pubkeys(
-                    &mut db_data,
-                    &document,
-                    &report,
-                    exposure_height,
-                    &derived,
-                )?;
-                expose_spending_key_addresses(
-                    &mut db_data,
-                    &document,
-                    &report,
-                    exposure_height,
-                    &derived,
-                )
-            })
-            .and_then(|()| {
-                let document_account_count = document
-                    .wallets()
-                    .iter()
-                    .map(|wallet| wallet.accounts().len())
-                    .sum();
-                check_import_report(&report, document_account_count, allow_partial_import)
-            });
+        // The backup reminder is printed before propagating any error from the
+        // post-import steps, as the minted-seed notice above refers to it.
+        let post_import = finish_import(
+            &mut db_data,
+            &document,
+            &report,
+            exposure_height,
+            allow_partial_import,
+        );
         print_backup_reminder();
         post_import?;
 
         Ok(())
     }
+}
+
+/// Completes a committed import: registers the watch-only transparent material the
+/// ZeWIF importer has no path for, exposes the addresses of the imported standalone
+/// spending keys and redeem scripts, then evaluates the import report.
+///
+/// All of this must happen after the imported accounts are fully set up, so that a
+/// failure here never leaves committed accounts half-configured. The steps run in
+/// order because each reads back what the ones before it registered.
+fn finish_import(
+    db_data: &mut DbHandle,
+    document: &zewif::Zewif,
+    report: &ZewifImportReport,
+    exposure_height: BlockHeight,
+    allow_partial_import: bool,
+) -> Result<(), MigrateError> {
+    let tracked = tracked_transparent_receivers(db_data)?;
+    let derived = derived_transparent_receivers(db_data, report)?;
+    register_watch_pubkeys(db_data, document, report, exposure_height, &tracked)?;
+    expose_spending_key_addresses(db_data, document, report, exposure_height, &derived)?;
+    register_watch_addresses(db_data, document, report, exposure_height)?;
+    expose_registered_script_addresses(db_data, report, exposure_height)?;
+
+    let document_account_count = document
+        .wallets()
+        .iter()
+        .map(|wallet| wallet.accounts().len())
+        .sum();
+    check_import_report(report, document_account_count, allow_partial_import)
 }
 
 /// Derives the ZeWIF document's regtest activation schedule from the configured
@@ -667,16 +680,107 @@ fn derived_transparent_receivers(
     db_data: &mut DbHandle,
     report: &ZewifImportReport,
 ) -> Result<HashSet<TransparentAddress>, MigrateError> {
-    let mut derived = HashSet::new();
-    for account in &report.imported_accounts {
-        derived.extend(
+    collect_transparent_receivers(
+        db_data,
+        report.imported_accounts.iter().map(|a| a.account_uuid),
+        false,
+    )
+}
+
+/// Collects the transparent receivers of every account in the wallet, standalone
+/// imports included.
+///
+/// Both watch-only registration steps check their candidates against this rather than
+/// against the accounts this run imported. A migration can run against a wallet that
+/// already holds accounts, and the wallet rejects an import of material another
+/// account has already imported; an address that is a derived receiver of another
+/// account must also keep the exposure its own derivation gives it, rather than be
+/// force-exposed as an import.
+///
+/// Each step reads its own set, as the steps before it register material that belongs
+/// in the sets after them.
+fn tracked_transparent_receivers(
+    db_data: &mut DbHandle,
+) -> Result<HashSet<TransparentAddress>, MigrateError> {
+    let accounts = db_data.get_account_ids().map_err(MigrateError::Database)?;
+    collect_transparent_receivers(db_data, accounts, true)
+}
+
+/// Collects the transparent receivers of `accounts` into a set, change addresses
+/// included.
+///
+/// `include_standalone` selects whether imported standalone addresses count as
+/// receivers of the account that holds them; the two callers differ on that, and on
+/// which accounts they ask about, but not otherwise.
+fn collect_transparent_receivers(
+    db_data: &mut DbHandle,
+    accounts: impl IntoIterator<Item = zcash_client_sqlite::AccountUuid>,
+    include_standalone: bool,
+) -> Result<HashSet<TransparentAddress>, MigrateError> {
+    let mut receivers = HashSet::new();
+    for account_uuid in accounts {
+        receivers.extend(
             db_data
-                .get_transparent_receivers(account.account_uuid, true, false)
+                .get_transparent_receivers(account_uuid, true, include_standalone)
                 .map_err(MigrateError::Database)?
                 .into_keys(),
         );
     }
-    Ok(derived)
+    Ok(receivers)
+}
+
+/// Marks `to_expose` as exposed, doing nothing when there is nothing to mark.
+///
+/// Every caller assembles its addresses conditionally and several can end up with
+/// none, which `mark_transparent_addresses_exposed` should not be troubled with.
+fn mark_addresses_exposed(
+    db_data: &mut DbHandle,
+    to_expose: &[(TransparentAddress, BlockHeight)],
+) -> Result<(), MigrateError> {
+    if to_expose.is_empty() {
+        return Ok(());
+    }
+    db_data
+        .mark_transparent_addresses_exposed(to_expose)
+        .map_err(MigrateError::Database)
+}
+
+/// Selects the watch-only transparent pubkeys `account` records that the wallet does
+/// not already track, with the number of them declined for their serialization:
+/// uncompressed first, then unparsable.
+///
+/// zcashd recorded a watch-only pubkey (`importpubkey`) against the address it
+/// controls and no spend authority. An entry carrying a spend authority is the
+/// importer's to register, and one carrying neither is
+/// [`watched_addresses_to_import`]'s.
+fn account_watch_pubkeys(
+    account: &zewif::Account,
+    tracked: &HashSet<TransparentAddress>,
+) -> (Vec<PublicKey>, usize, usize) {
+    let mut to_import = Vec::new();
+    let mut uncompressed = 0usize;
+    let mut malformed = 0usize;
+    for address in account.addresses() {
+        if let zewif::ProtocolAddress::Transparent(t) = address.address()
+            && t.spend_authority().is_none()
+            && let Some(pubkey) = t.pubkey()
+        {
+            match pubkey.as_slice() {
+                bytes if bytes.len() == PUBLIC_KEY_SIZE => match PublicKey::from_slice(bytes) {
+                    Ok(pk) => to_import.push(pk),
+                    Err(_) => malformed += 1,
+                },
+                // `import_standalone_transparent_pubkeys` derives the stored P2PKH
+                // address from the compressed pubkey serialization, so an uncompressed
+                // pubkey would be tracked under a different address than zcashd had
+                // on-chain.
+                bytes if bytes.len() == UNCOMPRESSED_PUBLIC_KEY_SIZE => uncompressed += 1,
+                _ => malformed += 1,
+            }
+        }
+    }
+    to_import.retain(|pubkey| !tracked.contains(&TransparentAddress::from_pubkey(pubkey)));
+    (to_import, uncompressed, malformed)
 }
 
 /// Registers watch-only transparent pubkeys (from zcashd's `importpubkey`) with the
@@ -685,73 +789,88 @@ fn derived_transparent_receivers(
 ///
 /// The ZeWIF importer registers spendable transparent keys from the secret store
 /// and P2SH redeem scripts, but has no path for pubkey-only (watch) addresses.
+///
+/// A pubkey whose address `tracked` already names is left alone, as in
+/// [`register_watch_addresses`]. The wallet rejects an import of a pubkey another
+/// account holds, which would fail a migration that has already committed; one this
+/// account holds is a no-op; and one held as a derived receiver — zcashd also stored
+/// seed-derived keys as watch entries — must keep the importer's gap-inferred
+/// exposure, as force-exposing it beyond the gap could hide funded addresses from
+/// seed recovery. An address the wallet tracks is not this step's to expose either:
+/// whatever exposure it carries was established by whatever registered it.
 fn register_watch_pubkeys(
     db_data: &mut DbHandle,
     document: &zewif::Zewif,
     report: &ZewifImportReport,
     exposure_height: BlockHeight,
-    derived_receivers: &HashSet<TransparentAddress>,
+    tracked: &HashSet<TransparentAddress>,
 ) -> Result<(), MigrateError> {
+    let mut skipped_uncompressed_watch_pubkeys = 0usize;
+    let mut skipped_malformed_watch_pubkeys = 0usize;
+    for (account_uuid, account) in imported_document_accounts(document, report) {
+        let (watch_pubkeys, uncompressed, malformed) = account_watch_pubkeys(account, tracked);
+        skipped_uncompressed_watch_pubkeys += uncompressed;
+        skipped_malformed_watch_pubkeys += malformed;
+        if watch_pubkeys.is_empty() {
+            continue;
+        }
+        info!(
+            "Registering {} watch-only transparent pubkeys with account '{}'",
+            watch_pubkeys.len(),
+            account.name(),
+        );
+        let to_expose: Vec<(TransparentAddress, BlockHeight)> = watch_pubkeys
+            .iter()
+            .map(TransparentAddress::from_pubkey)
+            .map(|address| (address, exposure_height))
+            .collect();
+        db_data
+            .import_standalone_transparent_pubkeys(account_uuid, watch_pubkeys.into_iter())
+            .map_err(MigrateError::Database)?;
+        mark_addresses_exposed(db_data, &to_expose)?;
+    }
+    if skipped_uncompressed_watch_pubkeys > 0 {
+        warn!(
+            "Skipped {} watch-only entries whose public keys zcashd stored in \
+             uncompressed form; Zallet only supports compressed-form pubkey imports.",
+            skipped_uncompressed_watch_pubkeys,
+        );
+    }
+    if skipped_malformed_watch_pubkeys > 0 {
+        warn!(
+            "Skipped {} watch-only entries whose public keys could not be parsed.",
+            skipped_malformed_watch_pubkeys,
+        );
+    }
+    Ok(())
+}
+
+/// Pairs each of the document's accounts that the import created a wallet account
+/// for with the UUID of that wallet account.
+///
+/// The document names accounts and the import report records the UUID each was
+/// created as, so matching the two by name is what lets a step that reads the
+/// document address the wallet rows it produced. An account the import did not
+/// create — one it skipped — is left out, as there is nothing to register against.
+fn imported_document_accounts<'a>(
+    document: &'a zewif::Zewif,
+    report: &ZewifImportReport,
+) -> Vec<(zcash_client_sqlite::AccountUuid, &'a zewif::Account)> {
     let accounts_by_name: HashMap<&str, zcash_client_sqlite::AccountUuid> = report
         .imported_accounts
         .iter()
         .map(|a| (a.name.as_str(), a.account_uuid))
         .collect();
-    let mut skipped_uncompressed_watch_pubkeys = 0usize;
-    for wallet in document.wallets() {
-        for account in wallet.accounts() {
-            let Some(account_uuid) = accounts_by_name.get(account.name()) else {
-                continue;
-            };
-            let mut watch_pubkeys = Vec::new();
-            for address in account.addresses() {
-                if let zewif::ProtocolAddress::Transparent(t) = address.address()
-                    && t.spend_authority().is_none()
-                    && let Some(pubkey) = t.pubkey()
-                {
-                    // `import_standalone_transparent_pubkeys` derives the stored
-                    // P2PKH address from the compressed pubkey serialization, so an
-                    // uncompressed pubkey would be tracked under a different
-                    // address than zcashd had on-chain.
-                    match PublicKey::from_slice(pubkey.as_slice()) {
-                        Ok(pk) if pubkey.as_slice().len() == 33 => watch_pubkeys.push(pk),
-                        _ => skipped_uncompressed_watch_pubkeys += 1,
-                    }
-                }
-            }
-            if !watch_pubkeys.is_empty() {
-                info!(
-                    "Registering {} watch-only transparent pubkeys with account '{}'",
-                    watch_pubkeys.len(),
-                    account.name(),
-                );
-                // A watched pubkey may coincide with one of the wallet's own derived
-                // receivers; those keep the importer's gap-inferred exposure.
-                let to_expose: Vec<(TransparentAddress, BlockHeight)> = watch_pubkeys
-                    .iter()
-                    .map(TransparentAddress::from_pubkey)
-                    .filter(|address| !derived_receivers.contains(address))
-                    .map(|address| (address, exposure_height))
-                    .collect();
-                db_data
-                    .import_standalone_transparent_pubkeys(*account_uuid, watch_pubkeys.into_iter())
-                    .map_err(MigrateError::Database)?;
-                if !to_expose.is_empty() {
-                    db_data
-                        .mark_transparent_addresses_exposed(&to_expose)
-                        .map_err(MigrateError::Database)?;
-                }
-            }
-        }
-    }
-    if skipped_uncompressed_watch_pubkeys > 0 {
-        warn!(
-            "Skipped {} watch-only entries with uncompressed or malformed public \
-             keys; Zallet only supports compressed-form pubkey imports.",
-            skipped_uncompressed_watch_pubkeys,
-        );
-    }
-    Ok(())
+    document
+        .wallets()
+        .iter()
+        .flat_map(|wallet| wallet.accounts())
+        .filter_map(|account| {
+            accounts_by_name
+                .get(account.name())
+                .map(|account_uuid| (*account_uuid, account))
+        })
+        .collect()
 }
 
 /// Computes the P2PKH addresses of the standalone transparent spending keys that
@@ -790,8 +909,9 @@ fn registered_spending_key_addresses<P: Parameters>(
         if derived_receivers.contains(&address) {
             continue;
         }
-        let encoded = address.encode(params);
-        if !skipped.contains(encoded.as_str()) && seen.insert(encoded) {
+        // Encoding is only needed to test against the report's skipped addresses,
+        // which name theirs as strings.
+        if seen.insert(address) && !skipped.contains(address.encode(params).as_str()) {
             addresses.push(address);
         }
     }
@@ -828,9 +948,218 @@ fn expose_spending_key_addresses(
         "Marking {} imported transparent spending-key addresses as exposed",
         to_expose.len(),
     );
+    mark_addresses_exposed(db_data, &to_expose)
+}
+
+/// A transparent address that zcashd watched and that the document records without
+/// key material Zallet can import, together with the account that records it and the
+/// height at which it is known to have been disclosed.
+struct WatchedAddress {
+    account_uuid: zcash_client_sqlite::AccountUuid,
+    address: TransparentAddress,
+    exposure_height: BlockHeight,
+}
+
+/// Selects the watch-only transparent addresses of the imported accounts that the
+/// wallet does not track after the import, and so must be registered as bare
+/// addresses for the migration not to lose them.
+///
+/// A candidate is an address the document records with neither a spend authority nor
+/// a public key: zcashd's `importaddress <address>` records exactly that, and so does
+/// `importaddress <redeemscript>` for the script's P2SH address. Key material the
+/// import deliberately declined keeps that treatment, because the address still
+/// carries the material: an uncompressed public key is excluded here as it is in
+/// [`register_watch_pubkeys`], which warns rather than track the address zcashd never
+/// used.
+///
+/// `tracked` names the receivers the wallet holds once the import and the
+/// registration steps before this one have run, and removing them is what leaves only
+/// the addresses that need registering. Deciding that here instead — by mirroring the
+/// rules the wallet applies to a redeem script — would let the two drift apart: a
+/// script the wallet can represent is tracked under its P2SH address already, and one
+/// it cannot (non-multisig, or beyond the 520-byte P2SH limit) is not tracked at all,
+/// and is reached by this step precisely because the wallet dropped it.
+///
+/// An address the document records an exposure height for takes that height, as the
+/// import would have done had it recognized the address; the rest take
+/// `exposure_height`. No converter records one today — `zewif-zcashd` never sets the
+/// field, and neither does [`enriched_document`] — so every address currently takes
+/// `exposure_height`. The branch is here because the ZeWIF importer has the same one
+/// over the same field, and an address this step registers should not end up with a
+/// worse exposure than the import would have given it had the wallet been able to
+/// hold the address; a document that does record heights must not silently lose them.
+///
+/// The result is sorted, so that a migration run registers addresses in a
+/// deterministic order, and an address recorded by more than one account is registered
+/// once, under the first account that records it: the wallet rejects an import of the
+/// same address into a second account.
+///
+/// Returns the selected addresses along with the number of address strings that could
+/// not be decoded for this network, which the caller warns about.
+fn watched_addresses_to_import<P: Parameters>(
+    document: &zewif::Zewif,
+    report: &ZewifImportReport,
+    tracked: &HashSet<TransparentAddress>,
+    params: &P,
+    exposure_height: BlockHeight,
+) -> (Vec<WatchedAddress>, usize) {
+    let mut undecodable = 0usize;
+    let mut seen = HashSet::new();
+    let mut to_import = Vec::new();
+    for (account_uuid, account) in imported_document_accounts(document, report) {
+        for address in account.addresses() {
+            let zewif::ProtocolAddress::Transparent(taddr) = address.address() else {
+                continue;
+            };
+            if taddr.spend_authority().is_some() || taddr.pubkey().is_some() {
+                continue;
+            }
+            let Ok(decoded) = TransparentAddress::decode(params, taddr.address()) else {
+                undecodable += 1;
+                continue;
+            };
+            if tracked.contains(&decoded) || !seen.insert(decoded) {
+                continue;
+            }
+            to_import.push(WatchedAddress {
+                account_uuid,
+                address: decoded,
+                exposure_height: address
+                    .exposed_at_height()
+                    .map_or(exposure_height, |h| BlockHeight::from(u32::from(h))),
+            });
+        }
+    }
+    to_import.sort_by_key(|watched| watched.address);
+    (to_import, undecodable)
+}
+
+/// Registers the transparent addresses that zcashd watched but for which no key
+/// material reached the wallet (from zcashd's `importaddress <address>`, and from the
+/// redeem scripts the wallet cannot represent) as bare watch-only addresses, exposing
+/// each as of the height at which it was disclosed.
+///
+/// zcashd watched such an address, so a migration that dropped it would stop
+/// reporting funds the source wallet could see. The ZeWIF importer has no path for
+/// one: it registers spendable transparent keys and representable P2SH redeem
+/// scripts, and counts every other address the document records in
+/// `addresses_not_recognized`. The Zallet wallet can hold a bare transparent address
+/// — `zallet import-address` takes one — so the migration registers it here rather
+/// than warning that it was skipped. Without key material such an address cannot be
+/// spent from, which is what it was in zcashd as well.
+///
+/// This runs after the registration steps that precede it, so that the receivers read
+/// back here account for everything they added. The registrations and the exposures
+/// they call for are applied as one database transaction, so a failure partway leaves
+/// the wallet as it was rather than watching addresses it does not report.
+fn register_watch_addresses(
+    db_data: &mut DbHandle,
+    document: &zewif::Zewif,
+    report: &ZewifImportReport,
+    exposure_height: BlockHeight,
+) -> Result<(), MigrateError> {
+    let tracked = tracked_transparent_receivers(db_data)?;
+    let params = *db_data.params();
+    let (to_import, undecodable) =
+        watched_addresses_to_import(document, report, &tracked, &params, exposure_height);
+    if undecodable > 0 {
+        warn!(
+            "Skipped {} watch-only transparent addresses that could not be decoded for \
+             this network.",
+            undecodable,
+        );
+    }
+    if to_import.is_empty() {
+        return Ok(());
+    }
+    info!(
+        "Registering {} watch-only transparent addresses that carry no key material",
+        to_import.len(),
+    );
     db_data
-        .mark_transparent_addresses_exposed(&to_expose)
+        .import_standalone_transparent_addresses(to_import.into_iter().map(|watched| {
+            (
+                watched.account_uuid,
+                watched.address,
+                watched.exposure_height,
+            )
+        }))
         .map_err(MigrateError::Database)
+}
+
+/// Selects the P2SH addresses among `receivers` that the wallet does not already
+/// consider exposed.
+///
+/// A P2SH address registered from a redeem script carries no derivation, so the
+/// child-index inference that the ZeWIF importer uses to fill in the exposures the
+/// document does not record directly cannot reach it. Any such address that the
+/// document's transactions did not already reveal is therefore left unexposed by the
+/// import, and needs marking here.
+///
+/// The result is sorted, so that a migration run marks exposures in a deterministic
+/// order regardless of the iteration order of the wallet's receiver map.
+fn unexposed_script_addresses(
+    receivers: impl IntoIterator<Item = (TransparentAddress, TransparentAddressMetadata)>,
+) -> Vec<TransparentAddress> {
+    let mut addresses = receivers
+        .into_iter()
+        .filter(|(_, meta)| {
+            matches!(meta.source(), TransparentAddressSource::StandaloneScript(_))
+                && !matches!(meta.exposure(), Exposure::Exposed { .. })
+        })
+        .map(|(address, _)| address)
+        .collect::<Vec<_>>();
+    addresses.sort();
+    addresses
+}
+
+/// Marks the P2SH addresses of the imported standalone redeem scripts (from zcashd's
+/// `importaddress <redeemscript>` and `addmultisigaddress`) as exposed as of
+/// `exposure_height`.
+///
+/// A redeem script reaches a zcashd wallet only because its P2SH address was already
+/// in use outside that wallet, so the address has been disclosed by the time it is
+/// migrated and the wallet's exposure metadata should say so. The ZeWIF importer
+/// cannot establish that on its own: it marks an address exposed only where the
+/// document accounts for an exposure of it, and the child-index inference that fills
+/// in the derived receivers the document does not mention cannot reach an address with
+/// no derivation. A P2SH address that never appeared in a migrated transaction is
+/// therefore left with no exposure height at all.
+///
+/// One consequence today is that the address goes unreported: `listaddresses` is built
+/// on `list_addresses`, which returns only exposed addresses, so an imported-but-never-
+/// funded P2SH address is invisible where zcashd always listed it. zcash/zallet#782
+/// proposes to report standalone imports from `get_transparent_receivers` instead,
+/// which applies no exposure filter; the exposure record needs to be right either way.
+///
+/// The registered scripts are read back from the wallet rather than recomputed from
+/// the document: the importer skips the redeem scripts the wallet cannot represent,
+/// and the standalone-script receivers of the accounts this import created are exactly
+/// the scripts it registered.
+fn expose_registered_script_addresses(
+    db_data: &mut DbHandle,
+    report: &ZewifImportReport,
+    exposure_height: BlockHeight,
+) -> Result<(), MigrateError> {
+    let mut to_expose = Vec::new();
+    for account in &report.imported_accounts {
+        let receivers = db_data
+            .get_transparent_receivers(account.account_uuid, true, true)
+            .map_err(MigrateError::Database)?;
+        to_expose.extend(
+            unexposed_script_addresses(receivers)
+                .into_iter()
+                .map(|address| (address, exposure_height)),
+        );
+    }
+    if to_expose.is_empty() {
+        return Ok(());
+    }
+    info!(
+        "Marking {} imported P2SH redeem script addresses as exposed",
+        to_expose.len(),
+    );
+    mark_addresses_exposed(db_data, &to_expose)
 }
 
 /// Best-effort removal of a provisionally stored mnemonic from the keystore, after
@@ -1178,7 +1507,10 @@ fn log_import_report(report: &ZewifImportReport) {
     }
     if report.redeem_scripts_not_representable > 0 {
         warn!(
-            "Skipped {} watch-only redeem scripts that the wallet cannot represent",
+            "Skipped {} watch-only redeem scripts that the wallet cannot represent; \
+             their P2SH addresses are registered as watch-only addresses, so funds \
+             they receive remain visible, but the scripts must be re-imported into a \
+             wallet that can hold them to be spent from.",
             report.redeem_scripts_not_representable,
         );
     }
@@ -1439,9 +1771,9 @@ mod tests {
     use zcash_protocol::consensus::{BlockHeight, NetworkType};
 
     use super::{
-        BlockHash, HashMap, MigrateError, MigrateZcashdWalletCmd, ZCASHD_LEGACY_ACCOUNT_INDEX,
-        ZCASHD_LEGACY_SOURCE, backfill_mined_heights, check_import_report,
-        derive_regtest_activations, describe_skipped_items, enriched_document,
+        BlockHash, HashMap, HashSet, MigrateError, MigrateZcashdWalletCmd,
+        ZCASHD_LEGACY_ACCOUNT_INDEX, ZCASHD_LEGACY_SOURCE, backfill_mined_heights,
+        check_import_report, derive_regtest_activations, describe_skipped_items, enriched_document,
         has_seedless_legacy_account, mint_legacy_mnemonic, to_zewif_frontier,
     };
 
@@ -1533,8 +1865,7 @@ mod tests {
             reason: TransparentKeySkipReason::UncompressedPubKey,
         });
 
-        let derived_receivers =
-            std::collections::HashSet::from([TransparentAddress::from_pubkey(&derived)]);
+        let derived_receivers = HashSet::from([TransparentAddress::from_pubkey(&derived)]);
 
         assert_eq!(
             super::registered_spending_key_addresses(
@@ -1544,6 +1875,404 @@ mod tests {
                 &derived_receivers,
             ),
             vec![TransparentAddress::from_pubkey(&registered)],
+        );
+    }
+
+    /// Exposure marking after a migration covers exactly the P2SH addresses the
+    /// importer registered a redeem script for and did not already expose: a
+    /// standalone pubkey, a bare imported address and a derived receiver each belong
+    /// to another step, an address the import exposed keeps the height its
+    /// transactions established, and one the wallet cannot judge is marked, because
+    /// the migration knows what the wallet does not. The selection is returned in
+    /// address order, so a run does not depend on the iteration order of the wallet's
+    /// receiver map.
+    #[test]
+    fn unexposed_script_addresses_selects_only_unexposed_p2sh() {
+        use transparent::{
+            address::TransparentAddress,
+            keys::{NonHardenedChildIndex, TransparentKeyScope},
+        };
+        use zcash_client_backend::wallet::{Exposure, GapMetadata, TransparentAddressMetadata};
+        use zcash_script::script::{Code, Redeem};
+
+        // A P2PKH-shaped redeem script, with its hash varied per address so that no
+        // two registered scripts are identical.
+        let redeem = |byte: u8| {
+            let mut script = hex::decode("76a91411695b6cd891484c2d49ec5aa738ec2b2f89777788ac")
+                .expect("valid hex");
+            script[3] = byte;
+            Redeem::parse(&Code(script)).expect("valid redeem script")
+        };
+        let exposed = Exposure::Exposed {
+            at_height: BlockHeight::from_u32(100),
+            gap_metadata: GapMetadata::DerivationUnknown,
+        };
+        let pubkey = secp256k1::SecretKey::from_slice(&[0x01; 32])
+            .expect("valid secret key")
+            .public_key(&secp256k1::Secp256k1::new());
+
+        let unexposed_high = TransparentAddress::ScriptHash([0x0b; 20]);
+        let unexposed_low = TransparentAddress::ScriptHash([0x0a; 20]);
+        let unknowable = TransparentAddress::ScriptHash([0x0f; 20]);
+
+        let receivers = vec![
+            (
+                unexposed_high,
+                TransparentAddressMetadata::standalone_script(
+                    redeem(0x0b),
+                    Exposure::Unknown,
+                    None,
+                ),
+            ),
+            (
+                unexposed_low,
+                TransparentAddressMetadata::standalone_script(
+                    redeem(0x0a),
+                    Exposure::Unknown,
+                    None,
+                ),
+            ),
+            // Already exposed by the import, at the height its transactions revealed.
+            (
+                TransparentAddress::ScriptHash([0x0c; 20]),
+                TransparentAddressMetadata::standalone_script(redeem(0x0c), exposed, None),
+            ),
+            // The wallet cannot tell whether this one was exposed; the migration can.
+            // A redeem script reached the zcashd wallet only because its address was
+            // already in use outside it.
+            (
+                unknowable,
+                TransparentAddressMetadata::standalone_script(
+                    redeem(0x0f),
+                    Exposure::CannotKnow,
+                    None,
+                ),
+            ),
+            // Handled by `register_watch_pubkeys` / `expose_spending_key_addresses`.
+            (
+                TransparentAddress::from_pubkey(&pubkey),
+                TransparentAddressMetadata::standalone_p2pkh(pubkey, Exposure::Unknown, None),
+            ),
+            // A P2SH address held without its redeem script belongs to
+            // `register_watch_addresses`, which exposes what it registers.
+            (
+                TransparentAddress::ScriptHash([0x0d; 20]),
+                TransparentAddressMetadata::standalone_address(Exposure::Unknown, None),
+            ),
+            // Derived receivers keep the importer's gap-inferred exposure.
+            (
+                TransparentAddress::PublicKeyHash([0x0e; 20]),
+                TransparentAddressMetadata::derived(
+                    TransparentKeyScope::EXTERNAL,
+                    NonHardenedChildIndex::ZERO,
+                    Exposure::Unknown,
+                    None,
+                ),
+            ),
+        ];
+
+        assert_eq!(
+            super::unexposed_script_addresses(receivers),
+            vec![unexposed_low, unexposed_high, unknowable],
+        );
+    }
+
+    /// A document address entry for `address`, as zcashd's `importaddress <address>`
+    /// records one: watched, with no key material of any kind.
+    fn watched_taddr(
+        address: transparent::address::TransparentAddress,
+    ) -> zewif::transparent::Address {
+        use zcash_keys::encoding::AddressCodec;
+        use zcash_protocol::consensus::MAIN_NETWORK;
+
+        zewif::transparent::Address::new(address.encode(&MAIN_NETWORK))
+    }
+
+    /// Wraps a transparent address entry as the document records it on an account.
+    fn document_address(taddr: zewif::transparent::Address) -> zewif::Address {
+        zewif::Address::new(zewif::ProtocolAddress::Transparent(taddr))
+    }
+
+    /// A redeem script recorded on a document address. Its contents do not matter to
+    /// the selection, only whether the address carries one and whether the wallet
+    /// ended up tracking the address it hashes to.
+    fn recorded_redeem_script() -> zewif::Script {
+        zewif::Script::from(zewif::Data::from_vec(vec![0x51]))
+    }
+
+    /// A document account named `name`, recording `addresses`.
+    fn account_with(name: &str, addresses: Vec<zewif::Address>) -> zewif::Account {
+        let mut account = zewif::Account::new(zewif::AccountViewingKey::TransparentAddressSet);
+        account.set_name(name);
+        for address in addresses {
+            account.add_address(address);
+        }
+        account
+    }
+
+    /// A single-wallet document holding `accounts`, in the order given.
+    fn document_with(accounts: Vec<zewif::Account>) -> zewif::Zewif {
+        let mut wallet = zewif::ZewifWallet::new(zewif::Network::Mainnet);
+        for account in accounts {
+            wallet.add_account(account);
+        }
+        let mut document = zewif::Zewif::new(
+            zewif::BlockHeight::from_u32(2_000_000),
+            zewif::BlockHash::from_bytes([9u8; 32]),
+        );
+        document.add_wallet(wallet);
+        document
+    }
+
+    /// An import report naming the accounts a migration run created.
+    fn report_with(accounts: &[(&str, AccountUuid)]) -> ZewifImportReport {
+        let mut report = ZewifImportReport::default();
+        for (name, account_uuid) in accounts {
+            report.imported_accounts.push(ImportedAccount {
+                name: (*name).into(),
+                account_uuid: *account_uuid,
+                birthday_basis: BirthdayBasis::ChainState,
+            });
+        }
+        report
+    }
+
+    /// A watched pubkey whose address the wallet already tracks is not this step's to
+    /// register: the wallet rejects an import of a pubkey another account holds, which
+    /// would fail a migration that has already committed, and an address held as a
+    /// derived receiver must keep the exposure its derivation gives it. An entry with a
+    /// spend authority belongs to the importer and one with no key material at all to
+    /// `register_watch_addresses`, while a pubkey zcashd stored uncompressed is counted
+    /// rather than tracked under an address zcashd never used.
+    #[test]
+    fn watch_pubkeys_exclude_what_the_wallet_already_tracks() {
+        use transparent::address::TransparentAddress;
+
+        let secp = secp256k1::Secp256k1::new();
+        let key = |byte: u8| {
+            secp256k1::SecretKey::from_slice(&[byte; 32])
+                .expect("valid secret key")
+                .public_key(&secp)
+        };
+        let fresh = key(0x01);
+        let already_tracked = key(0x02);
+        let uncompressed = key(0x03);
+        let spendable = key(0x04);
+
+        let pubkey_entry = |pubkey: &secp256k1::PublicKey, bytes: Vec<u8>| {
+            let mut entry = watched_taddr(TransparentAddress::from_pubkey(pubkey));
+            entry.set_pubkey(
+                zewif::transparent::TransparentPubKey::from_bytes(bytes)
+                    .expect("valid pubkey bytes"),
+            );
+            entry
+        };
+
+        let mut spendable_entry = pubkey_entry(&spendable, spendable.serialize().to_vec());
+        spendable_entry
+            .set_spend_authority(zewif::transparent::TransparentSpendAuthority::Imported);
+
+        let account = account_with(
+            "Legacy",
+            vec![
+                document_address(pubkey_entry(&fresh, fresh.serialize().to_vec())),
+                document_address(pubkey_entry(
+                    &already_tracked,
+                    already_tracked.serialize().to_vec(),
+                )),
+                document_address(pubkey_entry(
+                    &uncompressed,
+                    uncompressed.serialize_uncompressed().to_vec(),
+                )),
+                document_address(spendable_entry),
+                document_address(watched_taddr(TransparentAddress::ScriptHash([0x05; 20]))),
+            ],
+        );
+
+        assert_eq!(
+            super::account_watch_pubkeys(
+                &account,
+                &HashSet::from([TransparentAddress::from_pubkey(&already_tracked)]),
+            ),
+            (vec![fresh], 1, 0),
+        );
+    }
+
+    /// The addresses registered as bare watch-only imports are the ones the import
+    /// left untracked: zcashd's `importaddress <address>` records no key material at
+    /// all, and a redeem script the wallet cannot represent leaves its P2SH address
+    /// with none the wallet could keep. Material the import did handle is tracked
+    /// already, material it declined keeps that treatment, and an address recorded by
+    /// an account this run did not import has no account to be registered against.
+    #[test]
+    fn watched_addresses_cover_only_what_the_import_left_untracked() {
+        use transparent::address::TransparentAddress;
+        use zcash_protocol::consensus::MAIN_NETWORK;
+
+        let pubkey = secp256k1::SecretKey::from_slice(&[0x01; 32])
+            .expect("valid secret key")
+            .public_key(&secp256k1::Secp256k1::new());
+
+        let bare_p2pkh = TransparentAddress::PublicKeyHash([0x01; 20]);
+        let bare_p2sh = TransparentAddress::ScriptHash([0x02; 20]);
+        let script_registered = TransparentAddress::ScriptHash([0x03; 20]);
+        let script_dropped = TransparentAddress::ScriptHash([0x04; 20]);
+        let spendable = TransparentAddress::PublicKeyHash([0x05; 20]);
+        let unowned = TransparentAddress::ScriptHash([0x06; 20]);
+
+        // A redeem script the wallet could represent: registered by the import, and
+        // so tracked under its P2SH address by the time this step runs.
+        let mut registered_entry = watched_taddr(script_registered);
+        registered_entry.set_redeem_script(recorded_redeem_script());
+        // One it could not (non-multisig, or beyond the P2SH size limit): dropped by
+        // the import, leaving the address tracked by nothing.
+        let mut dropped_entry = watched_taddr(script_dropped);
+        dropped_entry.set_redeem_script(recorded_redeem_script());
+        // A watched pubkey belongs to `register_watch_pubkeys`, which registers the
+        // key itself and so tracks the address as spendable-shaped material.
+        let mut pubkey_entry = watched_taddr(TransparentAddress::from_pubkey(&pubkey));
+        pubkey_entry.set_pubkey(
+            zewif::transparent::TransparentPubKey::from_bytes(pubkey.serialize().to_vec())
+                .expect("valid pubkey bytes"),
+        );
+        // An address the wallet holds a spending key for belongs to the import and to
+        // `expose_spending_key_addresses`.
+        let mut spendable_entry = watched_taddr(spendable);
+        spendable_entry
+            .set_spend_authority(zewif::transparent::TransparentSpendAuthority::Imported);
+
+        let document = document_with(vec![
+            account_with(
+                "Legacy",
+                vec![
+                    document_address(watched_taddr(bare_p2sh)),
+                    document_address(watched_taddr(bare_p2pkh)),
+                    document_address(registered_entry),
+                    document_address(dropped_entry),
+                    document_address(pubkey_entry),
+                    document_address(spendable_entry),
+                ],
+            ),
+            account_with(
+                "Not imported",
+                vec![document_address(watched_taddr(unowned))],
+            ),
+        ]);
+
+        let account_uuid = AccountUuid::from_uuid(uuid::Uuid::from_bytes([0x0a; 16]));
+        let tracked = HashSet::from([script_registered]);
+
+        let (to_import, undecodable) = super::watched_addresses_to_import(
+            &document,
+            &report_with(&[("Legacy", account_uuid)]),
+            &tracked,
+            &MAIN_NETWORK,
+            BlockHeight::from_u32(500),
+        );
+
+        assert_eq!(undecodable, 0);
+        assert_eq!(
+            to_import
+                .into_iter()
+                .map(|watched| (watched.account_uuid, watched.address))
+                .collect::<Vec<_>>(),
+            vec![
+                (account_uuid, bare_p2pkh),
+                (account_uuid, bare_p2sh),
+                (account_uuid, script_dropped),
+            ],
+        );
+    }
+
+    /// An address the document records an exposure height for takes that height: it
+    /// is the height at which the address was seen, and is what the import would have
+    /// applied had it recognized the address. The rest take the migration's own
+    /// exposure height; the disclosure that put such an address into a zcashd wallet
+    /// happened before the migration either way.
+    ///
+    /// No converter records an exposure height yet, so this pins a branch that a
+    /// zcashd wallet cannot currently reach, against the day one does.
+    #[test]
+    fn watched_addresses_take_the_documents_exposure_height_where_it_records_one() {
+        use transparent::address::TransparentAddress;
+        use zcash_protocol::consensus::MAIN_NETWORK;
+
+        let recorded = TransparentAddress::ScriptHash([0x01; 20]);
+        let unrecorded = TransparentAddress::ScriptHash([0x02; 20]);
+
+        let mut recorded_entry = document_address(watched_taddr(recorded));
+        recorded_entry.set_exposed_at_height(zewif::BlockHeight::from_u32(123));
+
+        let document = document_with(vec![account_with(
+            "Legacy",
+            vec![recorded_entry, document_address(watched_taddr(unrecorded))],
+        )]);
+        let account_uuid = AccountUuid::from_uuid(uuid::Uuid::from_bytes([0x0a; 16]));
+
+        let (to_import, _) = super::watched_addresses_to_import(
+            &document,
+            &report_with(&[("Legacy", account_uuid)]),
+            &HashSet::new(),
+            &MAIN_NETWORK,
+            BlockHeight::from_u32(500),
+        );
+
+        assert_eq!(
+            to_import
+                .into_iter()
+                .map(|watched| (watched.address, watched.exposure_height))
+                .collect::<Vec<_>>(),
+            vec![
+                (recorded, BlockHeight::from_u32(123)),
+                (unrecorded, BlockHeight::from_u32(500)),
+            ],
+        );
+    }
+
+    /// The wallet rejects an import of an address that another account already holds,
+    /// so an address recorded by two accounts is registered once, under the first that
+    /// records it. An address string the wallet cannot decode for its own network is
+    /// counted for the caller to warn about: no account can hold it, and one such
+    /// entry is not worth failing a migration that has already committed.
+    #[test]
+    fn watched_addresses_are_registered_once_and_undecodable_strings_counted() {
+        use transparent::address::TransparentAddress;
+        use zcash_keys::encoding::AddressCodec;
+        use zcash_protocol::consensus::{MAIN_NETWORK, TEST_NETWORK};
+
+        let shared = TransparentAddress::ScriptHash([0x01; 20]);
+        let first = AccountUuid::from_uuid(uuid::Uuid::from_bytes([0x0a; 16]));
+        let second = AccountUuid::from_uuid(uuid::Uuid::from_bytes([0x0b; 16]));
+
+        let document = document_with(vec![
+            account_with(
+                "First",
+                vec![
+                    document_address(watched_taddr(shared)),
+                    document_address(zewif::transparent::Address::new("not an address")),
+                    document_address(zewif::transparent::Address::new(
+                        TransparentAddress::ScriptHash([0x02; 20]).encode(&TEST_NETWORK),
+                    )),
+                ],
+            ),
+            account_with("Second", vec![document_address(watched_taddr(shared))]),
+        ]);
+
+        let (to_import, undecodable) = super::watched_addresses_to_import(
+            &document,
+            &report_with(&[("First", first), ("Second", second)]),
+            &HashSet::new(),
+            &MAIN_NETWORK,
+            BlockHeight::from_u32(500),
+        );
+
+        assert_eq!(undecodable, 2);
+        assert_eq!(
+            to_import
+                .into_iter()
+                .map(|watched| (watched.account_uuid, watched.address))
+                .collect::<Vec<_>>(),
+            vec![(first, shared)],
         );
     }
 

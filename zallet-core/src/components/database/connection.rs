@@ -215,6 +215,42 @@ impl DbConnection {
             })
         })
     }
+
+    /// Imports the given transparent addresses into their accounts as watch-only
+    /// addresses carrying no key material, marking each exposed as of the height given
+    /// alongside it.
+    ///
+    /// This creates a single database transaction for the whole batch, so a failure
+    /// partway through leaves the wallet as it was, rather than with some of the
+    /// addresses registered and none of them marked exposed. Registration and exposure
+    /// travel together for the same reason: an address the wallet watches without
+    /// recording that it has been disclosed is one that `listaddresses` will not
+    /// report.
+    ///
+    /// The imported addresses will contribute to the balance of their accounts, but
+    /// the wallet holds neither the public key (P2PKH) nor the redeem script (P2SH)
+    /// from which each was derived, so funds they receive cannot be spent until that
+    /// material is imported. See
+    /// [`WalletWrite::import_standalone_transparent_address`].
+    #[cfg(feature = "zcashd-import")]
+    pub(crate) fn import_standalone_transparent_addresses(
+        &mut self,
+        addresses: impl IntoIterator<Item = (AccountUuid, TransparentAddress, BlockHeight)>,
+    ) -> Result<
+        (),
+        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletRead>::Error,
+    > {
+        self.with_mut(|mut db_data| {
+            db_data.transactionally(|wdb| {
+                let mut to_expose = Vec::new();
+                for (account, address, exposure_height) in addresses {
+                    wdb.import_standalone_transparent_address(account, address)?;
+                    to_expose.push((address, exposure_height));
+                }
+                wdb.mark_transparent_addresses_exposed(&to_expose)
+            })
+        })
+    }
 }
 
 impl WalletRead for DbConnection {

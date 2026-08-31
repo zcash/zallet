@@ -171,6 +171,31 @@ be considered breaking changes.
   did. Addresses that are also seed-derived receivers of an imported account
   are excluded — both here and in the watch-only pubkey registration — so
   they keep the gap-limit-inferred exposure that seed recovery depends on.
+- `migrate-zcashd-wallet` now records the P2SH addresses of the redeem scripts it
+  imports (from zcashd's `importaddress <redeemscript>` and
+  `addmultisigaddress`) as exposed. Such an address was in use outside the wallet
+  before it was imported, but it has no derivation, so it was reached by neither
+  the exposures recorded in the migrated wallet nor the gap-limit inference that
+  covers derived receivers; one that had never appeared in a wallet transaction
+  was left with no exposure height at all. One consequence is that
+  `listaddresses`, which reports only exposed addresses, did not surface it where
+  `zcashd` did.
+- `migrate-zcashd-wallet` now migrates the transparent addresses that `zcashd`
+  watched without holding any key material for them, as watch-only addresses.
+  These are the addresses imported with `importaddress <address>`, and the P2SH
+  addresses of redeem scripts that the Zallet wallet cannot represent
+  (non-multisig, or beyond the 520-byte P2SH limit); both were previously dropped
+  with a warning, leaving the migrated wallet blind to funds that `zcashd` could
+  see. As in `zcashd`, and as for any address imported with `zallet
+  import-address`, funds they receive are reported but cannot be spent without
+  importing the corresponding key material.
+- `migrate-zcashd-wallet` no longer aborts when a `zcashd` wallet's watch-only
+  pubkeys (from `importpubkey`) include one whose address the Zallet wallet already
+  tracks. Every such pubkey was registered regardless, and the wallet rejects an
+  import of key material another account holds, so migrating a second `zcashd`
+  wallet that shared a watched key failed with a database error *after* the import
+  had committed. Such an address now keeps the registration and the exposure it
+  already had, as the watch-only address registration does for its own candidates.
 - `migrate-zcashd-wallet` prints the backup reminder before reporting an
   error from the post-import registration and verification steps.
 - The `__cookie__` JSON-RPC username is now actually reserved. It is documented
