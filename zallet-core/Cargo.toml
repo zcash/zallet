@@ -125,11 +125,13 @@ zcash_client_backend = { workspace = true, features = [
     "pczt",
     "sync-decryptor",
     "transparent-inputs",
+    "zcashd-compat",
 ] }
 zcash_client_sqlite = { workspace = true, features = [
     "orchard",
     "serde",
     "transparent-inputs",
+    "zcashd-compat",
 ] }
 zcash_note_encryption.workspace = true
 zip32.workspace = true

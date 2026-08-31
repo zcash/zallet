@@ -544,6 +544,38 @@ Returns the list of operation ids currently known to the wallet.
 #### Arguments
 - `status` (string, optional) Filter result by the operation's state e.g. "success".
 
+## `z_listreceivedbyaddress`
+
+*Only available in wallet builds of Zallet.*
+
+Returns a list of amounts received by an address belonging to the wallet, including
+both spent and unspent outputs.
+
+For a shielded or unified address that corresponds to a unified account, the
+received outputs of that account are returned irrespective of whether the provided
+address's diversifier corresponds to the diversifier of the address that received
+the funds; this includes change outputs received on wallet-internal addresses. A
+transparent address returns only the outputs received by that specific address.
+
+Results are ordered by mined height ascending (unmined outputs last); `offset` and
+`limit` page over that ordering.
+
+#### Arguments
+- `address`: The address that received the outputs to list.
+- `minconf`: Only include outputs of transactions confirmed at least this many
+  times (default = 1). Must be at least 1 when `as_of_height` is provided; a value
+  of 0 includes outputs of unmined transactions.
+- `as_of_height`: Execute the query as if it were run when the blockchain was at
+  the height specified by this argument. The default is to use the entire
+  blockchain that the node is aware of. -1 can be used as in other RPC calls to
+  indicate the current height (including the mempool), but this does not support
+  negative values in general. A “future” height will fall back to the current
+  height.
+- `offset`: An optional number of outputs to skip over before a page of results is
+  returned. Defaults to zero.
+- `limit`: An optional upper bound on the number of results that should be
+  returned in a page.
+
 ## `z_listtransactions`
 
 Returns a list of the wallet's transactions, optionally filtered by account and block
