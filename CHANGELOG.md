@@ -27,6 +27,11 @@ be considered breaking changes.
 
 ### Fixed
 
+- `migrate-zcashd-wallet` now includes un-mined transactions when estimating
+  the wallet birthday. An expired or conflicted transaction still shows that
+  the wallet's addresses were in use around its expiry height, so history near
+  such a transaction is no longer at risk of being skipped by the post-import
+  scan.
 - Fixed a race that could leave wallet data requests unprocessed. The sync task
   now signals data-request processing after new blocks are stored. It also
   signals after each mempool transaction is stored.
