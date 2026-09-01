@@ -25,6 +25,12 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a race that could leave wallet data requests unprocessed. The sync task
+  now signals data-request processing after new blocks are stored. It also
+  signals after each mempool transaction is stored.
+
 ## [0.1.0-beta.3] - 2026-08-24
 
 ### Added
