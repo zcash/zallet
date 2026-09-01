@@ -1028,15 +1028,6 @@ async fn steady_state_iteration<C: Chain>(
     // any) has been rescanned.
     status.set_fully_synced(db_data.block_fully_scanned()?.map(|m| m.block_height()));
     status.mark_tip_reached();
-
-    // Wake the data-requests task now that those blocks are applied. The notification
-    // above fires as soon as a new tip is *observed*, which is before the blocks have
-    // been scanned and before the requests they generate exist; a task woken by it can
-    // find nothing to do and go back to sleep, stranding that work until the next tip
-    // change. While the chain is idle there is no next tip change, so the wallet's
-    // transparent balance can sit part-way through the outputs it owns. Signalling
-    // again here means there is always a wakeup after the work is actually queued.
-    tip_change_signal.notify_one();
     // TODO(zcash/zallet#195): when this actually clears an in-progress recovery (i.e. on
     // the `Recovering` → synced edge, not on every tip-reached), trigger an online backup
     // so the recovered state is durably captured before any subsequent failure.

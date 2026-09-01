@@ -25,18 +25,6 @@ be considered breaking changes.
 
 ## [Unreleased]
 
-### Fixed
-
-- Wallet balances no longer stall part-way while the chain is idle. The
-  data-requests task was woken as soon as a new chain tip was observed, which
-  is before those blocks are scanned and before the transaction data requests
-  they generate exist, so it could wake, find nothing to do, and sleep again —
-  stranding that work until the next tip change. On a chain that was not
-  producing blocks it was never picked up, leaving RPCs such as
-  `z_gettotalbalance` and `z_listunspent` reporting a subset of the wallet's
-  transparent outputs. The task is now also woken once the blocks have been
-  applied and their requests queued.
-
 ## [0.1.0-beta.3] - 2026-08-24
 
 ### Added
