@@ -18,7 +18,7 @@ use zcash_client_sqlite::zewif::{
 };
 use zcash_keys::encoding::AddressCodec;
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
+use zcash_protocol::consensus::{BlockHeight, H0, NetworkType, NetworkUpgrade, Parameters};
 use zewif_zcashd::{
     BDBDump, EncryptedKeyPolicy, ParseOptions, ZcashdDump, ZcashdParser, ZcashdWallet,
 };
@@ -261,10 +261,6 @@ impl MigrateZcashdWalletCmd {
             info!("No-scan mode: skipping chain scanning");
             (None, None)
         };
-        let sapling_activation = network_params
-            .activation_height(NetworkUpgrade::Sapling)
-            .expect("Sapling activation height is defined.");
-
         // The export height records the chain tip at export time. Without a chain
         // backend, approximate it with the wallet's maximum transaction expiry height
         // (expiry heights are near the height at which a transaction was created).
@@ -278,7 +274,7 @@ impl MigrateZcashdWalletCmd {
                     .max()
                     .map(BlockHeight::from_u32)
             })
-            .unwrap_or(sapling_activation);
+            .unwrap_or(H0);
 
         // Export the parsed wallet to a ZeWIF document. Everything below operates on
         // the document alone.
@@ -431,12 +427,14 @@ impl MigrateZcashdWalletCmd {
             );
 
             // The estimate never exceeds the tip, which also stands in for it when
-            // the wallet records no transactions at all.
+            // the wallet records no transactions at all. A zcashd wallet may predate
+            // Sapling, so an estimate below Sapling activation stands as-is, and
+            // with no evidence at all the birthday falls back to genesis.
             let birthday_height = earliest_activity_estimate(&document)
                 .into_iter()
                 .chain(chain_tip)
                 .min()
-                .map_or(sapling_activation, |h| std::cmp::max(h, sapling_activation));
+                .unwrap_or(H0);
 
             // Fetch the tree state corresponding to the last block prior to the
             // wallet's birthday height.
@@ -454,10 +452,7 @@ impl MigrateZcashdWalletCmd {
             (None, None)
         };
         let no_scan_birthday_estimate = if chain_view.is_none() {
-            Some(
-                earliest_activity_estimate(&document)
-                    .map_or(sapling_activation, |h| std::cmp::max(h, sapling_activation)),
-            )
+            Some(earliest_activity_estimate(&document).unwrap_or(H0))
         } else {
             None
         };
@@ -572,7 +567,7 @@ impl MigrateZcashdWalletCmd {
             .as_ref()
             .map(|cs| BlockHeight::from_u32(u32::from(cs.height()) + 1))
             .or(no_scan_birthday_estimate)
-            .unwrap_or(sapling_activation);
+            .unwrap_or(H0);
         // The import has committed: register watch-only transparent pubkeys, expose
         // the imported standalone spending keys' addresses, then evaluate the import
         // report. All of these must happen after the imported accounts are fully set
