@@ -172,11 +172,9 @@ impl WalletSync {
         // an atomic.
         let current_boundary = Arc::new(AtomicU32::new(starting_boundary.into()));
 
-        // TODO: Zaino should provide us an API that allows us to be notified when the chain tip
-        // changes; here, we produce our own signal via the "mempool stream closing" side effect
-        // that occurs in the light client API when the chain tip changes.
-        let tip_change_signal_source = Arc::new(Notify::new());
-        let req_tip_change_signal_receiver = tip_change_signal_source.clone();
+        // Wake the data-requests task after sync steps that can add or unblock requests.
+        let data_request_signal = Arc::new(Notify::new());
+        let data_request_signal_receiver = data_request_signal.clone();
 
         // Spawn the ongoing sync tasks.
         let steady_state_task = {
@@ -184,6 +182,7 @@ impl WalletSync {
             let lower_boundary = current_boundary.clone();
             let decryptor = decryptor.clone();
             let status = status.clone();
+            let data_request_signal = data_request_signal.clone();
             crate::spawn!("Steady state sync", async move {
                 steady_state(
                     chain,
@@ -191,7 +190,7 @@ impl WalletSync {
                     db_data.as_mut(),
                     starting_tip,
                     lower_boundary,
-                    tip_change_signal_source,
+                    data_request_signal,
                     decryptor,
                     shutdown_height,
                     status,
@@ -206,12 +205,14 @@ impl WalletSync {
             let chain = chain.clone();
             let mut db_data = db.handle().await?;
             let upper_boundary = current_boundary.clone();
+            let data_request_signal = data_request_signal.clone();
             crate::spawn!("Recover history", async move {
                 recover_history(
                     chain,
                     &params,
                     db_data.as_mut(),
                     upper_boundary,
+                    data_request_signal,
                     decryptor,
                     recover_batch_size,
                     shutdown_height,
@@ -229,7 +230,7 @@ impl WalletSync {
                 chain,
                 &params,
                 db_data.as_mut(),
-                req_tip_change_signal_receiver,
+                data_request_signal_receiver,
             )
             .await?;
             Ok(())
@@ -789,16 +790,15 @@ async fn steady_state<C: Chain>(
     db_data: &mut DbConnection,
     mut prev_tip: ChainBlock,
     lower_boundary: Arc<AtomicU32>,
-    tip_change_signal: Arc<Notify>,
+    data_request_signal: Arc<Notify>,
     decryptor: WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
     status: SyncStatusWriter,
 ) -> Result<(), SyncError> {
     info!("Steady-state sync task started");
 
-    // Wake up any tasks waiting on the tip-change signal, so they can service work that
-    // accumulated while the wallet was offline.
-    tip_change_signal.notify_one();
+    // Process data requests that accumulated while the wallet was offline.
+    data_request_signal.notify_one();
 
     let mut tree_recovery = TreeRecovery::default();
 
@@ -809,7 +809,7 @@ async fn steady_state<C: Chain>(
             db_data,
             &mut prev_tip,
             &lower_boundary,
-            &tip_change_signal,
+            &data_request_signal,
             &decryptor,
             shutdown_height,
             &status,
@@ -922,7 +922,7 @@ async fn steady_state_iteration<C: Chain>(
     db_data: &mut DbConnection,
     prev_tip: &mut ChainBlock,
     lower_boundary: &AtomicU32,
-    tip_change_signal: &Notify,
+    data_request_signal: &Notify,
     decryptor: &WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
     status: &SyncStatusWriter,
@@ -948,7 +948,6 @@ async fn steady_state_iteration<C: Chain>(
                 )
             })
             .expect("closure always returns Some");
-        tip_change_signal.notify_one();
         status.set_tip(current_tip.height());
 
         // Find where the wallet's history rejoins the backend's best chain.
@@ -1011,6 +1010,9 @@ async fn steady_state_iteration<C: Chain>(
             // Now that we're done applying the block, update our chain pointer.
             *prev_tip = current_block;
         }
+
+        // Block scanning can add data requests. Notify after the database writes commit.
+        data_request_signal.notify_one();
     }
 
     // The backing node's tip may itself sit at or beyond the divergence height — e.g. the
@@ -1028,15 +1030,6 @@ async fn steady_state_iteration<C: Chain>(
     // any) has been rescanned.
     status.set_fully_synced(db_data.block_fully_scanned()?.map(|m| m.block_height()));
     status.mark_tip_reached();
-
-    // Wake the data-requests task now that those blocks are applied. The notification
-    // above fires as soon as a new tip is *observed*, which is before the blocks have
-    // been scanned and before the requests they generate exist; a task woken by it can
-    // find nothing to do and go back to sleep, stranding that work until the next tip
-    // change. While the chain is idle there is no next tip change, so the wallet's
-    // transparent balance can sit part-way through the outputs it owns. Signalling
-    // again here means there is always a wakeup after the work is actually queued.
-    tip_change_signal.notify_one();
     // TODO(zcash/zallet#195): when this actually clears an in-progress recovery (i.e. on
     // the `Recovering` → synced edge, not on every tip-reached), trigger an online backup
     // so the recovered state is durably captured before any subsequent failure.
@@ -1057,6 +1050,9 @@ async fn steady_state_iteration<C: Chain>(
                 // decryptor (`Handle::queue_tx`) once a single-tx store path exists.
                 // See zcash/zallet#477.
                 decrypt_and_store_transaction(params, db_data, &tx, None)?;
+                // This stream stays open until the tip changes. Notify now so requests do not
+                // wait for the next block.
+                data_request_signal.notify_one();
             }
 
             // Mempool stream ended, signalling that the chain tip has changed.
@@ -1096,6 +1092,7 @@ async fn recover_history<C: Chain>(
     params: &Network,
     db_data: &mut DbConnection,
     upper_boundary: Arc<AtomicU32>,
+    data_request_signal: Arc<Notify>,
     decryptor: WalletDecryptorHandle,
     batch_size: u32,
     shutdown_height: Option<BlockHeight>,
@@ -1178,6 +1175,10 @@ async fn recover_history<C: Chain>(
                     Err(error) => return Err(error),
                 }
             };
+            // `scan_blocks` may commit the prefix below a consensus-divergence boundary
+            // before returning `Break`, so signal before inspecting the outcome.
+            data_request_signal.notify_one();
+
             if outcome.is_break() {
                 // Reached the consensus-divergence height. History recovery operates below
                 // the boundary in practice, so this is belt-and-suspenders; stop scanning
@@ -1296,18 +1297,16 @@ async fn data_requests<C: Chain>(
     chain: C,
     params: &Network,
     db_data: &mut DbConnection,
-    tip_change_signal: Arc<Notify>,
+    data_request_signal: Arc<Notify>,
 ) -> Result<(), SyncError> {
     loop {
-        // Wait for the chain tip to advance
-        tip_change_signal.notified().await;
+        data_request_signal.notified().await;
 
         let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
 
         let requests = db_data.transaction_data_requests()?;
         if requests.is_empty() {
-            // Wait for new requests.
-            debug!("No transaction data requests, sleeping until the chain tip changes.");
+            debug!("No transaction data requests, waiting for new work.");
             continue;
         }
 
@@ -1773,7 +1772,7 @@ mod tests {
         // subsequent iteration as well.
         let prev_tip = ChainBlock::new(BlockHeight::from_u32(0), BlockHash([0xff; 32]));
         let lower_boundary = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let tip_change_signal = std::sync::Arc::new(Notify::new());
+        let data_request_signal = std::sync::Arc::new(Notify::new());
 
         let steady_state_task = tokio::spawn(async move {
             steady_state(
@@ -1782,7 +1781,7 @@ mod tests {
                 db_data.as_mut(),
                 prev_tip,
                 lower_boundary,
-                tip_change_signal,
+                data_request_signal,
                 decryptor,
                 None,
                 status,
