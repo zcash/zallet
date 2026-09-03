@@ -60,6 +60,16 @@ Additional CLI arguments:
   accessible only via the original `wallet.dat` file. Without this flag, such
   a migration fails with an error enumerating what was left behind. A
   migration that imports nothing at all is an error regardless of this flag.
+  Note that the check runs *after* the importable accounts and their key
+  material have been written to the wallet database and keystore, so a
+  failed migration cannot simply be re-run against the same wallet database:
+  the re-run is refused as a duplicate import. Decide on this flag before the
+  first run. To accept a partial import after a failure, start again with a
+  fresh wallet database (delete `wallet.db` and re-run
+  [`zallet init-wallet-encryption`]) and pass the flag. The items that can
+  trigger it in a `zcashd` wallet are transparent spending keys with
+  uncompressed public keys, and transparent spending keys whose address is
+  not listed under any imported account.
 - `--no-scan`: Do not connect to the chain backend. Keys, accounts and
   transactions are still imported, but nothing is resolved from the chain: no
   transaction gains a mined height (all are stored as unmined until the next
