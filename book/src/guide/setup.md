@@ -3,6 +3,11 @@
 > WARNING: This process is currently unstable, very manual, and subject to change as we
 > make Zallet easier to use.
 
+> **Migrating from `zcashd`?** Follow [Migrating from `zcashd`](../zcashd/README.md)
+> instead of this page. It covers the same setup in the right order for an existing
+> wallet; in particular, do **not** generate a new mnemonic (below) for a wallet you
+> intend to import.
+
 ## Create a config file
 
 Zallet by default uses `$HOME/.zallet` as its data directory. You can override
@@ -177,6 +182,11 @@ $ zallet -d /path/to/zallet/datadir init-wallet-encryption
 > [Reference](../cli/init-wallet-encryption.md)
 
 ## Generate a mnemonic phrase
+
+Skip this step if you are importing a `zcashd` wallet:
+[`zallet migrate-zcashd-wallet`](../cli/migrate-zcashd-wallet.md) brings the wallet's
+own mnemonic across, and generating one here would add an unrelated second root of
+spend authority.
 
 ```
 $ zallet -d /path/to/zallet/datadir generate-mnemonic
