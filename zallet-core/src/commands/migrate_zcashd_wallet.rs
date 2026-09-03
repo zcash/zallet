@@ -403,13 +403,14 @@ impl MigrateZcashdWalletCmd {
             }
         }
 
-        // Determine the wallet's birthday. With a chain backend, resolve the block
-        // hashes recorded on the document's transactions to main-chain heights, take
-        // the earliest as the birthday, and fetch the chain state (including the note
-        // commitment tree frontiers) as of the prior block; the importer then
-        // constructs precise account birthdays with no further chain access. In
-        // no-scan mode, estimate a conservative birthday from transaction expiry
-        // heights; the importer will schedule a rescan from there.
+        // Determine the wallet's birthday from the earliest evidence of wallet
+        // activity among the document's transactions, un-mined ones included. With
+        // a chain backend, resolve the block hashes recorded on the document's
+        // transactions to main-chain heights first, and fetch the chain state
+        // (including the note commitment tree frontiers) as of the block prior to
+        // the birthday; the importer then constructs precise account birthdays
+        // with no further chain access. In no-scan mode the estimate stands alone;
+        // the importer will schedule a rescan from there.
         let (birthday_chain_state, recover_until) = if let Some(chain_view) = chain_view.as_ref() {
             let mut block_heights = HashMap::new();
             for tx in document.transactions().values() {
@@ -429,11 +430,12 @@ impl MigrateZcashdWalletCmd {
                 block_heights.len(),
             );
 
-            let birthday_height = block_heights
-                .values()
+            // The estimate never exceeds the tip, which also stands in for it when
+            // the wallet records no transactions at all.
+            let birthday_height = earliest_activity_estimate(&document)
+                .into_iter()
+                .chain(chain_tip)
                 .min()
-                .copied()
-                .or(chain_tip)
                 .map_or(sapling_activation, |h| std::cmp::max(h, sapling_activation));
 
             // Fetch the tree state corresponding to the last block prior to the
@@ -452,20 +454,9 @@ impl MigrateZcashdWalletCmd {
             (None, None)
         };
         let no_scan_birthday_estimate = if chain_view.is_none() {
-            // Expiry heights are typically creation_height + 40 (the default
-            // TX_EXPIRY_DELTA in zcashd). Subtracting 1000 gives a conservative lower
-            // bound on the earliest mined height.
             Some(
-                document
-                    .transactions()
-                    .values()
-                    .filter_map(|tx| tx.expiry_height())
-                    .map(u32::from)
-                    .filter(|&h| h > 0)
-                    .min()
-                    .map(|h| BlockHeight::from_u32(h.saturating_sub(1000)))
-                    .map(|h| std::cmp::max(h, sapling_activation))
-                    .unwrap_or(sapling_activation),
+                earliest_activity_estimate(&document)
+                    .map_or(sapling_activation, |h| std::cmp::max(h, sapling_activation)),
             )
         } else {
             None
@@ -1025,6 +1016,42 @@ fn to_zewif_frontier<H, const DEPTH: u8>(
 /// transaction has neither, and would abort the import with "Consensus branch
 /// ID not known". Transactions recorded against blocks absent from
 /// `block_heights` (blocks not in the main chain) are left untouched.
+/// Margin subtracted from an un-mined transaction's expiry height to bound the
+/// height of the wallet activity it evidences. Expiry heights are typically
+/// `creation_height + 40` (zcashd's default `TX_EXPIRY_DELTA`); 1000 blocks is a
+/// deliberately generous margin.
+const EXPIRY_HEIGHT_MARGIN: u32 = 1000;
+
+/// A conservative lower bound on the height of the wallet's earliest activity,
+/// drawn from the document's transactions: recorded mined heights where present,
+/// and expiry heights otherwise. A transaction that never reached the main chain
+/// still marks its addresses as exposed around the time it was created, so
+/// un-mined transactions bound the birthday too, via their expiry heights less
+/// [`EXPIRY_HEIGHT_MARGIN`].
+fn earliest_activity_estimate(document: &zewif::Zewif) -> Option<BlockHeight> {
+    let mined = document
+        .transactions()
+        .values()
+        .filter_map(|tx| tx.mined_height())
+        .map(u32::from)
+        .min();
+    // An expiry height of zero means the transaction does not expire.
+    let unmined = document
+        .transactions()
+        .values()
+        .filter(|tx| tx.mined_height().is_none())
+        .filter_map(|tx| tx.expiry_height())
+        .map(u32::from)
+        .filter(|&h| h > 0)
+        .min()
+        .map(|h| h.saturating_sub(EXPIRY_HEIGHT_MARGIN));
+    [mined, unmined]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(BlockHeight::from_u32)
+}
+
 fn backfill_mined_heights(
     document: &mut zewif::Zewif,
     block_heights: &HashMap<BlockHash, BlockHeight>,
@@ -1439,10 +1466,11 @@ mod tests {
     use zcash_protocol::consensus::{BlockHeight, NetworkType};
 
     use super::{
-        BlockHash, HashMap, MigrateError, MigrateZcashdWalletCmd, ZCASHD_LEGACY_ACCOUNT_INDEX,
-        ZCASHD_LEGACY_SOURCE, backfill_mined_heights, check_import_report,
-        derive_regtest_activations, describe_skipped_items, enriched_document,
-        has_seedless_legacy_account, mint_legacy_mnemonic, to_zewif_frontier,
+        BlockHash, EXPIRY_HEIGHT_MARGIN, HashMap, MigrateError, MigrateZcashdWalletCmd,
+        ZCASHD_LEGACY_ACCOUNT_INDEX, ZCASHD_LEGACY_SOURCE, backfill_mined_heights,
+        check_import_report, derive_regtest_activations, describe_skipped_items,
+        earliest_activity_estimate, enriched_document, has_seedless_legacy_account,
+        mint_legacy_mnemonic, to_zewif_frontier,
     };
 
     fn node(byte: u8) -> MerkleHashOrchard {
@@ -2003,5 +2031,58 @@ mod tests {
         // Transactions in unresolved blocks or never mined stay height-less.
         assert_eq!(txs[&orphan_txid].mined_height(), None);
         assert_eq!(txs[&unmined_txid].mined_height(), None);
+    }
+
+    #[test]
+    fn activity_estimate_covers_mined_and_unmined_transactions() {
+        let mut document = zewif::Zewif::new(
+            zewif::BlockHeight::from_u32(2_000_000),
+            zewif::BlockHash::from_bytes([9u8; 32]),
+        );
+        assert_eq!(earliest_activity_estimate(&document), None);
+
+        // A non-expiring un-mined transaction (expiry zero) contributes nothing.
+        let no_expiry_txid = zewif::TxId::from_bytes([1u8; 32]);
+        let mut tx = zewif::Transaction::new(no_expiry_txid);
+        tx.set_expiry_height(zewif::BlockHeight::from_u32(0));
+        document.add_transaction(no_expiry_txid, tx);
+        assert_eq!(earliest_activity_estimate(&document), None);
+
+        // An un-mined transaction bounds activity by its expiry, less the margin.
+        let unmined_txid = zewif::TxId::from_bytes([2u8; 32]);
+        let mut tx = zewif::Transaction::new(unmined_txid);
+        tx.set_expiry_height(zewif::BlockHeight::from_u32(700_000));
+        document.add_transaction(unmined_txid, tx);
+        assert_eq!(
+            earliest_activity_estimate(&document),
+            Some(BlockHeight::from_u32(700_000 - EXPIRY_HEIGHT_MARGIN))
+        );
+
+        // An earlier mined height wins; its own expiry height is irrelevant.
+        let mined_txid = zewif::TxId::from_bytes([3u8; 32]);
+        let mut tx = zewif::Transaction::new(mined_txid);
+        tx.set_mined_height(zewif::BlockHeight::from_u32(500_000));
+        tx.set_expiry_height(zewif::BlockHeight::from_u32(500_040));
+        document.add_transaction(mined_txid, tx);
+        assert_eq!(
+            earliest_activity_estimate(&document),
+            Some(BlockHeight::from_u32(500_000))
+        );
+    }
+
+    #[test]
+    fn activity_estimate_saturates_at_zero() {
+        let mut document = zewif::Zewif::new(
+            zewif::BlockHeight::from_u32(50),
+            zewif::BlockHash::from_bytes([9u8; 32]),
+        );
+        let txid = zewif::TxId::from_bytes([1u8; 32]);
+        let mut tx = zewif::Transaction::new(txid);
+        tx.set_expiry_height(zewif::BlockHeight::from_u32(40));
+        document.add_transaction(txid, tx);
+        assert_eq!(
+            earliest_activity_estimate(&document),
+            Some(BlockHeight::from_u32(0))
+        );
     }
 }
