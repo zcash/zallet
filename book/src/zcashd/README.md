@@ -70,7 +70,27 @@ you need.
 
    > [Reference](../cli/migrate-zcashd-wallet.md)
 
-6. **Start Zallet and let it sync:**
+6. **Confirm the backup of each migrated mnemonic.** Zallet will not derive new
+   accounts or addresses from a mnemonic until you have confirmed that you hold a copy
+   of it: while `keystore.require_backup` is in effect (the default on mainnet and
+   testnet), `z_getnewaccount`, `z_getaddressforaccount` and `z_recoveraccounts` return
+   error `-18` for an unconfirmed mnemonic. A mnemonic brought in by the migration
+   always starts out unconfirmed, whatever `zcashd` had recorded, so a migrated wallet
+   cannot hand out new deposit addresses until this step is done. For each mnemonic
+   (the migration printed its fingerprint):
+
+   ```
+   $ zallet export-mnemonic --seedfp <fingerprint> >mnemonic.age
+   $ zallet confirm-backup --seedfp <fingerprint>
+   ```
+
+   Decrypt the export with your age identity, write the phrase down, and answer the
+   three words `confirm-backup` asks for from that written copy. If you deliberately do
+   not want this gate, set `keystore.require_backup = false` in `zallet.toml` instead.
+
+   > [Reference](../cli/confirm-backup.md)
+
+7. **Start Zallet and let it sync:**
 
    ```
    $ zallet start
@@ -84,7 +104,7 @@ you need.
    not spendable until it has done so. Use `zallet rpc getwalletstatus` to observe sync
    progress, then verify your balances against `zcashd` before decommissioning it.
 
-7. **Update your RPC clients.** Zallet implements a subset of the `zcashd` wallet
+8. **Update your RPC clients.** Zallet implements a subset of the `zcashd` wallet
    JSON-RPC methods, some with [altered semantics](json_rpc.md), and some `zcashd`
    methods are [intentionally omitted](json_rpc.md#omitted-rpc-methods). Check
    every method you use against the [method status matrix](rpc_status.md). The
