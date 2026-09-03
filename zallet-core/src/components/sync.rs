@@ -1713,17 +1713,29 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "mock chain rejects wallet sync startup");
-        // `reload_keys` returns `None` only when the decryptor handle has no engine to
-        // reload, which itself indicates the engine was dropped during the failed
-        // startup. Either outcome proves the batch decryptor is not left running;
-        // assert the `Some` case explicitly, and accept `None` as equivalent shutdown.
-        if let Some(reload_finished) = decryptor_observer.reload_keys().await {
-            assert!(
-                reload_finished.await.is_err(),
-                "failed wallet sync startup must not leave its batch decryptor running",
-            );
-        }
-        // `None` means there is no engine to reload — the decryptor is already down.
+        // The failed startup aborts the batch decryptor task, but the abort only lands
+        // at the task's next yield point, so the engine may still answer requests that
+        // race ahead of it (zallet#766). Poll until shutdown is observed: `None` from
+        // `reload_keys` means the engine (the queue receiver) is gone, and an errored
+        // receiver means the engine dropped the request unserved. A served reload
+        // (`Ok`) only proves the abort has not landed yet, so retry. Bound the wait so
+        // a decryptor that really is left running fails the test here instead of
+        // hanging until the CI job timeout.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match decryptor_observer.reload_keys().await {
+                    None => break,
+                    Some(reload_finished) => {
+                        if reload_finished.await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("failed wallet sync startup must not leave its batch decryptor running");
     }
 
     // Regression for zallet#136: when a sibling task fails and `steady_state` is
