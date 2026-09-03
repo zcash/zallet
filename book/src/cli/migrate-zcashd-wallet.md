@@ -60,6 +60,17 @@ Additional CLI arguments:
   accessible only via the original `wallet.dat` file. Without this flag, such
   a migration fails with an error enumerating what was left behind. A
   migration that imports nothing at all is an error regardless of this flag.
+- `--no-scan`: Do not connect to the chain backend. Keys, accounts and
+  transactions are still imported, but nothing is resolved from the chain:
+  only the mined heights `zcashd` itself recorded are kept (it recorded one
+  only for transactions that added Orchard notes), and every other
+  transaction is stored as unmined until the next scan re-encounters it. Each
+  account's birthday is estimated from the wallet's own records alone: the
+  lowest of those recorded mined heights and of the un-mined transactions'
+  expiry heights minus 1000 blocks, or genesis if the wallet records neither.
+  The next `zallet start` rescans from that estimate. Use it when the chain
+  backend is not reachable yet; the cost is a conservative birthday and
+  therefore a longer first sync.
 
 > For the Zallet beta releases, the command also currently takes another required flag
 > `--this-is-beta-code-and-you-will-need-to-redo-the-migration-later`.
