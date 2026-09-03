@@ -32,11 +32,12 @@ normally do not need to provide one yourself. If that vendored utility is unavai
 Zallet falls back to a `db_dump` found on the system `$PATH`; you can also point Zallet
 at a specific `zcashd` installation's `db_dump` with `--zcashd-install-dir` (see below).
 
-The command requires at least one of the following two flag:
+The wallet file is located with two flags, neither of which is required:
 
-- `--path`: A path to a `zcashd` wallet file.
-- `--zcashd-datadir`: A path to a `zcashd` datadir. If this is provided, then `--path` can
-  be relative (or omitted, in which case the default filename `wallet.dat` will be used).
+- `--path`: A path to a `zcashd` wallet file. Defaults to `wallet.dat`.
+- `--zcashd-datadir`: A path to a `zcashd` datadir, against which a relative `--path` is
+  resolved. If omitted, the platform's default `zcashd` datadir is used (`~/.zcash` on
+  Linux, the XDG data home's `Zcash` directory on macOS, `%APPDATA%\Zcash` on Windows).
 
 Additional CLI arguments:
 - `--zcashd-install-dir`: A path to a local `zcashd` installation directory, for
