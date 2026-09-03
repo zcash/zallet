@@ -73,8 +73,12 @@ you need.
    $ zallet start
    ```
 
-   Transaction history is recovered by scanning the chain, so the wallet needs to sync
-   before balances are complete. Use `zallet rpc getwalletstatus` to observe sync
+   Your transaction history is already present: the migration imports every transaction
+   from `wallet.dat` directly, including sends that were never mined and transactions
+   that ended up on a non-main-chain block, which a chain scan alone could not recover.
+   What the scan adds is the note commitment tree positions of your notes (and the
+   mined heights of any transactions the migration could not place), and balances are
+   not spendable until it has done so. Use `zallet rpc getwalletstatus` to observe sync
    progress, then verify your balances against `zcashd` before decommissioning it.
 
 7. **Update your RPC clients.** Zallet implements a subset of the `zcashd` wallet
