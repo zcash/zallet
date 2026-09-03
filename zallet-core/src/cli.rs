@@ -197,11 +197,12 @@ pub(crate) struct MigrateZcashdWalletCmd {
     #[arg(long)]
     pub(crate) allow_multiple_wallet_imports: bool,
 
-    /// Specify the path to the zcashd installation directory.
+    /// Specify the path to a local `zcashd` installation directory.
     ///
-    /// This is required for locating the `db_dump` command used to extract data from the
-    /// `wallet.dat` file. Wallet migration without a local `zcashd` installation is not yet
-    /// supported.
+    /// When set, the `db_dump` utility from that installation's `zcutil/bin` directory is
+    /// used to extract data from the `wallet.dat` file. By default the Berkeley DB 6.2
+    /// `db_dump` vendored with Zallet is used, falling back to one on the system `PATH`,
+    /// so a local `zcashd` installation is not required.
     #[arg(long)]
     pub(crate) zcashd_install_dir: Option<PathBuf>,
 
