@@ -462,10 +462,6 @@ err-migrate-wallet-db-dump-not-found =
     is available on the system `$PATH`.
 err-migrate-wallet-db-dump =
     An error occurred in extracting wallet data from '{$path}': '{$err}'
-err-migrate-wallet-seed-absent =
-    The {-zcashd} wallet file did not contain HD seed information. Wallets from
-    prior to the Sapling network upgrade are not supported by this migration
-    tool.
 err-migrate-wallet-invalid-mnemonic =
     The {-zcashd} wallet file contained invalid mnemonic seed phrase data and
     may be corrupt: '{$err}'
