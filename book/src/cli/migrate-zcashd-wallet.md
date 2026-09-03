@@ -101,6 +101,24 @@ recommended choice; a `zcashd`-provided `db_dump` from the `zcutil/bin`
 directory of a source installation (via `--zcashd-install-dir`), or one on the
 system `$PATH`, are used otherwise.
 
+## Encrypted wallets
+
+A `wallet.dat` whose key material was encrypted with `zcashd`'s `encryptwallet`
+can be migrated as-is; nothing needs to be done in `zcashd` first. When the
+command finds encrypted key material it prompts on the terminal:
+
+```
+Enter the passphrase for the encrypted zcashd wallet:
+```
+
+This is the `zcashd` wallet passphrase (the one `walletpassphrase` took), not
+the passphrase of your age encryption identity. A wrong passphrase is reported
+and the prompt repeats; after three wrong attempts the command fails without
+having written anything. Because the prompt is interactive, run this step in a
+terminal rather than under a service manager. The decrypted keys are used only
+for the duration of the migration and are stored in Zallet's keystore
+encrypted to your age identity.
+
 ## How the wallet birthday is chosen
 
 Every imported account gets the same birthday, and the post-migration scan
