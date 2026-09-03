@@ -55,6 +55,9 @@ you need.
    This imports the wallet's key material and creates corresponding Zallet accounts. If
    you have several `wallet.dat` files, run it once per file (subsequent runs need
    `--allow-multiple-wallet-imports`); each wallet becomes a distinct set of accounts.
+   If the wallet's key material is encrypted, the command prompts for the `zcashd`
+   wallet passphrase; see
+   [Encrypted wallets](../cli/migrate-zcashd-wallet.md#encrypted-wallets).
 
    **Decide before the first run whether to pass `--allow-partial-import`.** Without it,
    the migration fails if any account or transparent spending key could not be imported,
