@@ -172,3 +172,23 @@ in the wallet database. Keep secure copies of the wallet database (`wallet.db`),
 encryption identity file, *and* your mnemonic phrase(s) — and keep the original
 `wallet.dat`. See the warning in the
 [`migrate-zcashd-wallet` reference](../cli/migrate-zcashd-wallet.md) for details.
+
+Two kinds of `wallet.dat` also leave you holding a mnemonic phrase you have never seen.
+The migration's output tells you which, if either, applies:
+
+- **A minted mnemonic.** If the wallet had no HD seed at all (one created before
+  `zcashd` had HD key derivation, holding only standalone keys and watch-only
+  addresses), the migration generates a fresh 24-word BIP 39 mnemonic and makes it the
+  derivation root of the account that holds those keys. It prints a warning saying so,
+  with the mnemonic's fingerprint. **This phrase never existed in `zcashd`: no backup of
+  `wallet.dat` covers it, nor any address Zallet later derives from it.** Export it
+  (`zallet export-mnemonic --seedfp <fingerprint>`), decrypt the export with your age
+  identity, and record the phrase as you would any other.
+- **A reconstructed mnemonic.** If the wallet was last used with a `zcashd` older than
+  4.7.0, it has a legacy HD seed but no mnemonic. The migration derives the mnemonic
+  that `zcashd` itself would have created on upgrading, exactly as `zcashd` did, so this
+  one *is* recoverable from `wallet.dat`. You have still never held the phrase, though,
+  so export and record it now rather than relying on the `zcashd` file.
+
+In both cases the phrase must also be confirmed with `zallet confirm-backup` (step 6)
+before Zallet will derive new accounts or addresses from it.
