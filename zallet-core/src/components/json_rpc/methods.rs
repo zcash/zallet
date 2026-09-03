@@ -101,6 +101,8 @@ mod z_export_viewing_key;
 #[cfg(zallet_build = "wallet")]
 mod z_get_balance_for_account;
 #[cfg(zallet_build = "wallet")]
+mod z_get_multisig_key_info;
+#[cfg(zallet_build = "wallet")]
 mod z_get_total_balance;
 #[cfg(zallet_build = "wallet")]
 pub(crate) mod z_import_address;
@@ -887,6 +889,32 @@ pub(crate) trait WalletRpc {
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response;
 
+    /// Exports this wallet's ZIP 48 cosigner key for the given account, as a
+    /// BIP 388 `KEY_INFO` expression.
+    ///
+    /// A ZIP 48 multisig account is defined by the set of its cosigners' extended
+    /// public keys. Each participant exports their own with this method and shares it
+    /// with the others; the account can be registered once every key has been
+    /// collected. Nothing is recorded by this call, and the wallet learns nothing about
+    /// the other cosigners from it.
+    ///
+    /// The key is public material, but the multisig address every cosigner derives
+    /// depends on all of the keys, so a substituted one silently redirects funds.
+    /// Verify the collected keys with their owners over a second channel before
+    /// registering an account, and confirm that every cosigner derives the same first
+    /// address.
+    ///
+    /// # Arguments
+    /// - `account` (string or numeric, required): Either the UUID or ZIP 32 account
+    ///   index of the account to derive the cosigner key from. The legacy account
+    ///   number is only supported for wallets containing a single seed phrase.
+    ///
+    /// # Returns
+    /// An object with the account's UUID, the ZIP 48 derivation path
+    /// (`m/48'/<coin_type>'/<account>'/133000'`), and the `KEY_INFO` expression.
+    #[method(name = "z_getmultisigkeyinfo")]
+    async fn get_multisig_key_info(&self, account: JsonValue) -> z_get_multisig_key_info::Response;
+
     /// Creates a PCZT from a transaction proposal.
     ///
     /// Selects inputs and computes change for the given recipients, producing a
@@ -1475,6 +1503,10 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response {
         z_export_viewing_key::call(self.wallet().await?.as_ref(), &self.keystore, zaddr, ivk).await
+    }
+
+    async fn get_multisig_key_info(&self, account: JsonValue) -> z_get_multisig_key_info::Response {
+        z_get_multisig_key_info::call(self.wallet().await?.as_ref(), &self.keystore, account).await
     }
 
     async fn pczt_create(

@@ -26,6 +26,12 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `z_getmultisigkeyinfo` returns this wallet's ZIP 48 cosigner key for an
+  account, as a BIP 388 `KEY_INFO` expression. Registering a ZIP 48 account and
+  deriving its addresses is not implemented yet.
+
 ### Removed
 
 - The `zaino` chain backend and its `zallet-zaino` binary. The release
