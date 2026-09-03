@@ -95,10 +95,15 @@ directory of a source installation (via `--zcashd-install-dir`), or one on the
 system `$PATH`, are used otherwise.
 
 Some `zcashd` wallet contents cannot be represented in a Zallet wallet, and are
-reported (with counts) rather than migrated: Sprout spending keys (move any
-Sprout funds using `zcashd` before migrating), address book entries, watch-only
-entries recorded without their public keys or redeem scripts, and entries with
-uncompressed public keys.
+logged with a count rather than migrated: Sprout spending keys (move any Sprout
+funds using `zcashd` before migrating), address book entries, watch-only
+entries recorded without their public keys or redeem scripts, watch-only public
+keys that are uncompressed or malformed, watch-only redeem scripts other than
+multisig within the P2SH size limit, standalone copies of unified spending keys,
+and transactions that carry no raw data. Records the wallet parser does not
+recognise are discarded without any message. See
+[What is not migrated](../zcashd/README.md#what-is-not-migrated) for what each
+of these means for you.
 
 [ZeWIF]: https://github.com/zcash/zewif
 
