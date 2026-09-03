@@ -90,7 +90,25 @@ you need.
 
    > [Reference](../cli/confirm-backup.md)
 
-7. **Start Zallet and let it sync:**
+7. **Decide whether to enable the legacy transparent pool.** The migration printed the
+   seed fingerprint of the account holding your `zcashd` wallet's legacy material (the
+   account at the special ZIP 32 index `zcashd` used for `getnewaddress` and
+   `z_getnewaddress`). If your tooling relied on `zcashd`'s single-pool transparent
+   semantics (spending from any transparent address, wallet-wide transparent balances),
+   or if you will use [`zallet import-address`](../cli/import-address.md) without
+   naming an account, set that fingerprint in `zallet.toml` before starting:
+
+   ```toml
+   [features]
+   legacy_pool_seed_fingerprint = "<fingerprint>"
+   ```
+
+   Only one migrated wallet can be the legacy pool, and what it re-enables is a
+   migration bridge rather than a destination; see
+   [The legacy transparent pool](../concepts/legacy-pool.md) for what changes and why
+   to move off it. Leave the option unset otherwise.
+
+8. **Start Zallet and let it sync:**
 
    ```
    $ zallet start
@@ -104,7 +122,7 @@ you need.
    not spendable until it has done so. Use `zallet rpc getwalletstatus` to observe sync
    progress, then verify your balances against `zcashd` before decommissioning it.
 
-8. **Update your RPC clients.** Zallet implements a subset of the `zcashd` wallet
+9. **Update your RPC clients.** Zallet implements a subset of the `zcashd` wallet
    JSON-RPC methods, some with [altered semantics](json_rpc.md), and some `zcashd`
    methods are [intentionally omitted](json_rpc.md#omitted-rpc-methods). Check
    every method you use against the [method status matrix](rpc_status.md). The
