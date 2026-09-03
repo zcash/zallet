@@ -25,7 +25,7 @@ use zcash_client_backend::{
     wallet::TransparentAddressSource,
     zip321::{Payment, TransactionRequest},
 };
-use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, wallet::Account};
+use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, error::SqliteClientError, wallet::Account};
 use zcash_keys::{
     address::Address,
     keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
@@ -168,11 +168,18 @@ pub(super) fn confirmations_policy_for_minconf(
 /// that gap by checking the recorded viewing key against the one this seed derives, and
 /// fails closed.
 ///
-/// `validate_seed` returns `Ok(false)` for a seed that does not derive the recorded key,
-/// and `Err(CorruptedData)` when the seed fingerprint matches but the viewing key does
-/// not (the real substitution attack: same seed, swapped ufvk row). Both are treated as
-/// corruption or tampering: the operation is refused with `err-account-seed-mismatch`
-/// and no spending key is derived.
+/// `validate_seed` reports a mismatch in two different ways and both must be caught.
+/// `Ok(false)` is neither the recorded seed fingerprint nor the recorded viewing key
+/// matching this seed; `Err(CorruptedData)` is exactly one of them matching. The
+/// substitution attack lands in the latter: `derivation` is read from the same account
+/// row being checked, so the seed is decrypted under that row's own fingerprint and the
+/// fingerprint always agrees, leaving a swapped `ufvk` as the sole disagreement. Both
+/// refuse the operation with `err-account-seed-mismatch`.
+///
+/// Any other error means the check could not be performed — a busy or unreadable
+/// database, a seed of unusable length — which is not evidence of tampering and is not
+/// reported as such. It still fails closed: a spending key is derived only if the check
+/// affirmatively passed.
 ///
 /// The check is free at every call site: the seed is decrypted here anyway, so no
 /// operation loads a secret it did not already load, and a locked wallet still fails at
@@ -197,11 +204,22 @@ pub(super) async fn spending_key_for_account(
 
     match wallet.validate_seed(account_id, &seed) {
         Ok(true) => {}
-        Ok(false) | Err(_) => {
+        Ok(false) | Err(SqliteClientError::CorruptedData(_)) => {
             return Err(LegacyCode::Wallet.with_message(fl!(
                 "err-account-seed-mismatch",
                 account = account_id.expose_uuid().to_string(),
             )));
+        }
+        Err(e) => {
+            // The seed could not be checked against the account. Report it as what it is
+            // rather than as tampering, but still refuse to sign: `CorruptedData` is the
+            // only error that means "the recorded key disagrees", so every other error
+            // leaves the binding unverified.
+            tracing::error!(
+                "Could not validate the seed for account {}: {e}",
+                account_id.expose_uuid(),
+            );
+            return Err(LegacyCode::Database.with_message(e.to_string()));
         }
     }
 
