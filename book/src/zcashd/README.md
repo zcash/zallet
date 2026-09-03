@@ -14,9 +14,16 @@ you need.
 
 ## Migration steps
 
-1. **Run a `zebrad` node.** Zallet reads chain data from `zebrad` via one of its two
+1. **Run a `zebrad` node, and let it sync to the chain tip.** Zallet reads chain data
+   from `zebrad` via one of its two
    [chain backends](../guide/installation/README.md#choosing-a-chain-backend); the
    backend you choose determines how `zebrad` needs to be built and configured.
+
+   Do not run the wallet migration (step 5) until `zebrad` has caught up: the migration
+   sets each account's birthday from the blocks the node can already resolve, so an
+   unsynced node silently produces a birthday later than your wallet's history, and
+   the scan then never finds the earlier funds. See
+   [How the wallet birthday is chosen](../cli/migrate-zcashd-wallet.md#how-the-wallet-birthday-is-chosen).
 
 2. **Install Zallet.** See [Installation](../guide/installation/README.md).
 
