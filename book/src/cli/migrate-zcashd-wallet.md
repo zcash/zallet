@@ -94,6 +94,35 @@ recommended choice; a `zcashd`-provided `db_dump` from the `zcutil/bin`
 directory of a source installation (via `--zcashd-install-dir`), or one on the
 system `$PATH`, are used otherwise.
 
+## How the wallet birthday is chosen
+
+Every imported account gets the same birthday, and the post-migration scan
+starts there, so a birthday later than the wallet's real history means funds
+the scan never finds.
+
+- **With a chain backend** (the default), the migration looks up every block
+  hash recorded on the wallet's transactions and takes the lowest main-chain
+  height it finds, never below Sapling activation. Hashes the backend does not
+  know are ignored. If none resolve, the birthday falls back to the current
+  chain tip, and so does the height up to which the wallet considers itself
+  recovered. The note commitment tree state as of the block before the
+  birthday is then fetched from the backend and stored with the accounts.
+- **With `--no-scan`**, no lookups happen: the birthday is the lowest
+  transaction expiry height in the wallet minus 1000 blocks, never below
+  Sapling activation, and the wallet rescans from there on the next start.
+
+Two failure modes follow from the first case, and both are avoided by letting
+`zebrad` sync to the chain tip before migrating. If `zebrad` has not yet
+reached the blocks the wallet's transactions are in, those hashes do not
+resolve and the birthday lands too late, with nothing in the output to say so.
+If it has reached some of them but the backend cannot supply the tree state
+for the block before the earliest, the migration fails with
+`missing tree state for height N`. (A wallet with no transactions at all also
+gets the chain tip as its birthday, which is correct for it.) The
+Sapling-activation floor is tracked in [#574].
+
+[#574]: https://github.com/zcash/zallet/issues/574
+
 Some `zcashd` wallet contents cannot be represented in a Zallet wallet, and are
 logged with a count rather than migrated: Sprout spending keys (move any Sprout
 funds using `zcashd` before migrating), address book entries, watch-only
