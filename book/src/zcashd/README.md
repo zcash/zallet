@@ -49,6 +49,15 @@ you need.
    you have several `wallet.dat` files, run it once per file (subsequent runs need
    `--allow-multiple-wallet-imports`); each wallet becomes a distinct set of accounts.
 
+   **Decide before the first run whether to pass `--allow-partial-import`.** Without it,
+   the migration fails if any account or transparent spending key could not be imported,
+   listing what was left behind. That failure happens *after* the importable accounts
+   have been written, and a second run against the same wallet database is refused as a
+   duplicate import, so recovering from it means starting over: delete `wallet.db`,
+   re-run `zallet init-wallet-encryption` (the identity file can stay), and migrate
+   again with the flag. Anything the flag lets the migration skip remains accessible
+   only through the original `wallet.dat`.
+
    > [Reference](../cli/migrate-zcashd-wallet.md)
 
 6. **Start Zallet and let it sync:**
@@ -85,6 +94,11 @@ The migration reports these (with counts) instead of importing them:
 - Address book entries.
 - Watch-only entries recorded without their public key or redeem script, and entries
   with uncompressed public keys.
+
+Not every skip is merely reported. A transparent *spending* key that cannot be imported
+(one whose public key is uncompressed, or whose address appears under none of the
+imported accounts) fails the migration unless `--allow-partial-import` is passed; see
+step 5 above for why that decision has to be made before the first run.
 
 ## Back up the migrated wallet
 
