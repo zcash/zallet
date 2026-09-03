@@ -32,6 +32,11 @@ be considered breaking changes.
   the wallet's addresses were in use around its expiry height, so history near
   such a transaction is no longer at risk of being skipped by the post-import
   scan.
+- `migrate-zcashd-wallet` no longer raises the wallet birthday to the Sapling
+  activation height. A zcashd wallet may predate Sapling, so evidence of
+  earlier activity now sets the birthday directly, and a wallet with no usable
+  evidence at all falls back to the genesis height instead of Sapling
+  activation.
 - Fixed a race that could leave wallet data requests unprocessed. The sync task
   now signals data-request processing after new blocks are stored. It also
   signals after each mempool transaction is stored.
