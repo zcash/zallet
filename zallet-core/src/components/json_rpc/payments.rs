@@ -2493,21 +2493,25 @@ mod spending_key_tests {
     use crate::config::ZalletConfig;
     use tempfile::tempdir;
     use zcash_client_backend::data_api::{
-        Account as _, WalletRead, WalletWrite, chain::ChainState,
+        Account as _, AccountBirthday, WalletRead, WalletWrite, chain::ChainState,
     };
+    use zcash_client_sqlite::error::SqliteClientError;
+    use zcash_keys::keys::UnifiedSpendingKey;
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::consensus::{BlockHeight, NetworkType};
 
-    /// The real attack this check exists to catch: an attacker who can write to `wallet.db`
-    /// swaps the `ufvk` column of an account row to a different key's ufvk, while leaving the
-    /// `hd_seed_fingerprint` unchanged. Input selection reads the substituted ufvk and
-    /// selects notes the attacker chose; signing derives the USK from the real seed. Without
-    /// the check the wallet would spend the victim's notes under a key the attacker controls.
+    /// The attack this check exists to catch: someone who can write to `wallet.db` replaces
+    /// the `ufvk` column of an account row with a key they control, leaving
+    /// `hd_seed_fingerprint` untouched. Input selection then runs against the substituted
+    /// key while signing derives the USK from the real seed, so the wallet would spend under
+    /// a key the account does not name.
     ///
-    /// Upstream `validate_seed` returns `Err(CorruptedData)` for this case (seed fingerprint
-    /// matches but the derived viewing key does not match the recorded one), not `Ok(false)`.
-    /// This test proves the helper surfaces that as `err-account-seed-mismatch` rather than
-    /// a generic database error, and that no spending key is derived.
+    /// Leaving the fingerprint intact is what makes this the interesting case.
+    /// `spending_key_for_account` decrypts the seed under that same fingerprint, so the
+    /// fingerprint always agrees and the viewing key is the only disagreement — which
+    /// upstream `validate_seed` reports as `Err(CorruptedData)`, never `Ok(false)`. Both
+    /// halves are pinned here: that upstream still answers this way, and that the helper
+    /// turns that answer into `err-account-seed-mismatch` rather than a database error.
     #[test]
     fn spending_key_for_account_rejects_tampered_uivk() {
         crate::i18n::load_languages(&[]);
@@ -2517,21 +2521,12 @@ mod spending_key_tests {
         ks_testing::run_async(|| async {
             let keystore = ks_testing::keystore(&datadir).await;
 
-            // Account 1: seed derived from mnemonic A.
-            let seed_fp_a = keystore
+            let seed_fp = keystore
                 .encrypt_and_store_mnemonic(ks_testing::phrase([0x5a; 32]), BackupStatus::Confirmed)
                 .await
                 .unwrap();
-            let seed_a = keystore.decrypt_seed(&seed_fp_a).await.unwrap();
+            let seed = keystore.decrypt_seed(&seed_fp).await.unwrap();
 
-            // Account 2: seed derived from mnemonic B.
-            let seed_fp_b = keystore
-                .encrypt_and_store_mnemonic(ks_testing::phrase([0xa5; 32]), BackupStatus::Confirmed)
-                .await
-                .unwrap();
-            let seed_b = keystore.decrypt_seed(&seed_fp_b).await.unwrap();
-
-            // Open a separate connection to the same wallet DB for the spend-path call.
             let config = ZalletConfig {
                 datadir: Some(datadir.path().to_path_buf()),
                 consensus: crate::config::ConsensusSection {
@@ -2549,95 +2544,65 @@ mod spending_key_tests {
                 .unwrap();
             let mut handle = db.handle().await.unwrap();
 
-            let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(
+            // Genesis birthday, as in `database::tests`: no block precedes it.
+            let birthday = AccountBirthday::from_parts(
                 ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
                 None,
             );
+            let (account_id, _) = handle
+                .create_account("account", &seed, &birthday, None)
+                .expect("creates a seed-derived account");
 
-            let (account_id_a, _) = handle
-                .create_account("account_a", &seed_a, &birthday, None)
-                .expect("creates account A");
-            let (account_id_b, _) = handle
-                .create_account("account_b", &seed_b, &birthday, None)
-                .expect("creates account B");
-
-            // Derivation for account A (the real seed fingerprint + account index).
-            let account_a = handle.get_account(account_id_a).unwrap().unwrap();
-            let derivation = account_a
+            let account = handle.get_account(account_id).unwrap().unwrap();
+            let derivation = account
                 .source()
                 .key_derivation()
-                .expect("account A is seed-derived")
+                .expect("the account is seed-derived")
                 .clone();
 
-            // Positive case: the intact account validates and returns a spending key.
-            let usk =
-                spending_key_for_account(handle.as_ref(), &keystore, account_id_a, &derivation)
-                    .await;
-            assert!(usk.is_ok(), "an intact account must yield a spending key");
+            // Intact: the account validates and the spend path yields a key.
+            spending_key_for_account(handle.as_ref(), &keystore, account_id, &derivation)
+                .await
+                .expect("an intact account must yield a spending key");
 
-            // Tamper: replace account A's ufvk with account B's, leaving the seed
-            // fingerprint unchanged. This is the real attack: same seed, swapped viewing
-            // key row. `parse_account_row` reads `ufvk` first (falling back to `uivk` only
-            // when `ufvk` is NULL), so the UFVK is the column that drives the comparison in
-            // `validate_seed`. Account B is deleted first to avoid the ufvk UNIQUE
-            // constraint.
-            //
-            // Drop the handle first so the pool connection is released, then tamper on
-            // a fresh connection and re-acquire a handle so the pool sees the change.
-            drop(handle);
+            // Tamper, on the pooled connection the spend path itself reads through: overwrite
+            // `ufvk` with a key derived from an unrelated seed at the same account index, and
+            // leave `hd_seed_fingerprint` alone. `parse_account_row` prefers `ufvk` and falls
+            // back to `uivk` only when `ufvk` is NULL, so this is the column that drives the
+            // comparison in `validate_seed`.
+            handle.as_ref().with_raw_mut(|conn, params| {
+                let foreign_ufvk =
+                    UnifiedSpendingKey::from_seed(params, &[0xa5; 32], derivation.account_index())
+                        .expect("derives a key from an unrelated seed")
+                        .to_unified_full_viewing_key()
+                        .encode(params);
 
-            let db_path = config.wallet_db_path();
-            let tamper_conn = rusqlite::Connection::open(&db_path).unwrap();
-
-            let ufvk_b: String = tamper_conn
-                .query_row(
-                    "SELECT ufvk FROM accounts WHERE uuid = ?",
-                    [&account_id_b.expose_uuid()],
-                    |row| row.get(0),
-                )
-                .unwrap();
-
-            tamper_conn
-                .execute(
-                    "DELETE FROM accounts WHERE uuid = ?",
-                    [&account_id_b.expose_uuid()],
-                )
-                .unwrap();
-            tamper_conn
-                .execute(
+                conn.execute(
                     "UPDATE accounts SET ufvk = ? WHERE uuid = ?",
-                    rusqlite::params![ufvk_b, account_id_a.expose_uuid()],
+                    rusqlite::params![foreign_ufvk, account_id.expose_uuid()],
                 )
-                .unwrap();
-            drop(tamper_conn);
-
-            let handle = db.handle().await.unwrap();
-
-            // Verify the tamper is visible to the pool connection.
-            let visible_ufvk: String = handle.as_ref().with_raw(|conn, _| {
-                conn.query_row(
-                    "SELECT ufvk FROM accounts WHERE uuid = ?",
-                    [&account_id_a.expose_uuid()],
-                    |row| row.get(0),
-                )
-                .unwrap()
+                .expect("substitutes the account's recorded viewing key");
             });
+
+            // Upstream must still classify this as corruption rather than `Ok(false)`; the
+            // helper's mapping is written against that classification.
             assert!(
-                visible_ufvk == ufvk_b,
-                "tamper not visible: expected account A's ufvk to be B's, got {visible_ufvk}",
+                matches!(
+                    handle.as_ref().validate_seed(account_id, &seed),
+                    Err(SqliteClientError::CorruptedData(_)),
+                ),
+                "a swapped ufvk over an intact seed fingerprint must report corruption",
             );
 
-            // The tampered account must be rejected with the tamper message, not a generic
-            // database error.
-            let err =
-                spending_key_for_account(handle.as_ref(), &keystore, account_id_a, &derivation)
-                    .await
-                    .expect_err("a tampered ufvk must be rejected");
+            // And the spend path must surface it as tampering, not as a database error.
+            let err = spending_key_for_account(handle.as_ref(), &keystore, account_id, &derivation)
+                .await
+                .expect_err("a tampered ufvk must be rejected");
 
-            let msg = err.message();
             assert!(
-                msg.contains("does not derive the viewing key"),
-                "expected the tamper message, got: {msg}",
+                err.message().contains("does not derive the viewing key"),
+                "expected the tamper message, got: {}",
+                err.message(),
             );
         });
     }
