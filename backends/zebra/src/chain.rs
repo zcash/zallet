@@ -436,7 +436,9 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
         self.stream_blocks_inner(range.start, range.end - 1)
     }
 
-    async fn get_mempool_stream(&self) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+    async fn get_mempool_stream(
+        &self,
+    ) -> Result<Option<BoxStream<'_, Result<Transaction, ChainError>>>, ChainError> {
         // If the tip already moved past the captured view, signal "tip changed" (no stream).
         let current_tip = self.reader.tip().await?;
         if current_tip.map(|t| t.hash()) != Some(self.tip.hash()) {
@@ -452,7 +454,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
             tip_hash: BlockHash,
             branch_id: BranchId,
             seen: HashSet<String>,
-            pending: VecDeque<Transaction>,
+            pending: VecDeque<Result<Transaction, ChainError>>,
             interval: tokio::time::Interval,
         }
 
@@ -508,7 +510,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
                         }
                     };
                     match Transaction::read(&bytes[..], s.branch_id) {
-                        Ok(tx) => s.pending.push_back(tx),
+                        Ok(tx) => s.pending.push_back(Ok(tx)),
                         Err(e) => warn!("invalid mempool transaction: {e}"),
                     }
                 }

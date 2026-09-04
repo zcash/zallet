@@ -577,7 +577,9 @@ impl ChainView for ZainoChainView {
         self.stream_blocks_inner(range.start, Some(range.end - 1))
     }
 
-    async fn get_mempool_stream(&self) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+    async fn get_mempool_stream(
+        &self,
+    ) -> Result<Option<BoxStream<'_, Result<Transaction, ChainError>>>, ChainError> {
         let mempool_height = self.tip().await?.height() + 1;
         let consensus_branch_id = consensus::BranchId::for_height(&self.params, mempool_height);
 
@@ -598,6 +600,7 @@ impl ChainView for ZainoChainView {
                                     .ok()
                             })
                     })
+                    .map(Ok)
                     .boxed()
             }))
     }
