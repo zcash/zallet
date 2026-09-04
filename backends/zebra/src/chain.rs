@@ -276,7 +276,7 @@ impl<R: ChainReader> ZebraChainView<R> {
                 .block_header_by_hash(cur_hash)
                 .await?
                 .ok_or_else(|| {
-                    ChainError::unavailable("pinned block reorged away during resolve")
+                    ChainError::view_expired("pinned block reorged away during resolve")
                 })?;
             cur_hash = header.previous_block_hash;
             cur_height = BlockHeight::from_u32(u32::from(cur_height) - 1);
@@ -346,7 +346,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
                      after that pool's activation; refusing to substitute an empty frontier"
                 ))
             } else {
-                ChainError::unavailable(format!("pinned {pool} treestate reorged away"))
+                ChainError::view_expired(format!("pinned {pool} treestate reorged away"))
             }
         };
         let absent_tree_is_empty = |pool: TreePool| {
@@ -913,8 +913,8 @@ mod tests {
 
     #[tokio::test]
     async fn tree_state_as_of_still_reports_reorged_away_non_finalized_trees() {
-        // Above the finalized floor the pre-existing behaviour is unchanged: a missing tree
-        // means the pinned hash left the best chain, regardless of activation.
+        // Above the finalized floor a missing tree means the pinned hash left the best chain,
+        // so the fixed view has expired regardless of activation.
         let calls = Arc::new(AtomicU32::new(0));
         let view = test_view_with_params(10, 2, calls, regtest_with_all_pools_at(9));
 
@@ -923,6 +923,6 @@ mod tests {
             .await
             .expect_err("a non-finalized height with no tree bytes is unavailable");
 
-        assert!(matches!(err, ChainError::Unavailable(_)));
+        assert!(matches!(err, ChainError::ViewExpired(_)));
     }
 }
