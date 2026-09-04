@@ -285,6 +285,62 @@ fn db_connection_forwards_ironwood_reads_and_tree_ops() {
         });
 }
 
+/// The spend paths bind the signing key to the account record by calling
+/// `validate_seed` between decrypting the seed and deriving the spending key (see
+/// `payments::spending_key_for_account`). That check is only meaningful if
+/// `validate_seed` answers "does this seed derive the key this account records" — so pin
+/// the semantics here rather than assuming them of the upstream crate.
+#[test]
+fn validate_seed_accepts_only_the_accounts_own_seed() {
+    crate::i18n::load_languages(&[]);
+
+    let datadir = tempdir().unwrap();
+    let config = test_config(datadir.path(), NetworkType::Test);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            use secrecy::SecretVec;
+            use zcash_client_backend::data_api::{AccountBirthday, WalletWrite, chain::ChainState};
+            use zcash_primitives::block::BlockHash;
+            use zcash_protocol::consensus::BlockHeight;
+
+            let db = database::Database::open(&config).await.unwrap();
+            let mut handle = db.handle().await.unwrap();
+
+            let seed = SecretVec::new(vec![0x5a; 32]);
+            let other_seed = SecretVec::new(vec![0xa5; 32]);
+
+            // Genesis birthday: no block precedes it, so an empty chain state anchored at
+            // the conventional all-zeros parent hash is correct (see
+            // `json_rpc::utils::fetch_account_birthday`).
+            let birthday = AccountBirthday::from_parts(
+                ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
+                None,
+            );
+            let (account_id, _) = handle
+                .create_account("test", &seed, &birthday, None)
+                .expect("creates a seed-derived account");
+
+            assert!(
+                handle.validate_seed(account_id, &seed).unwrap(),
+                "the seed the account was derived from must validate",
+            );
+
+            // A different seed derives a different key, so it must not validate against
+            // this account. This pins that `validate_seed` returns `Ok(false)` for an
+            // unrelated seed, which is the semantics the spend path depends on. The
+            // actual substitution attack (same seed, swapped ufvk row) is exercised in
+            // `payments::spending_key_tests::spending_key_for_account_rejects_tampered_uivk`.
+            assert!(
+                !handle.validate_seed(account_id, &other_seed).unwrap(),
+                "a seed that does not derive the account's key must be rejected",
+            );
+        });
+}
+
 fn test_config(datadir: &std::path::Path, network_type: NetworkType) -> ZalletConfig {
     ZalletConfig {
         datadir: Some(datadir.to_path_buf()),

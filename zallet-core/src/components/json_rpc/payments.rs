@@ -4,12 +4,13 @@ use abscissa_core::Application;
 use jsonrpsee::core::JsonValue;
 use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
 use schemars::JsonSchema;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use transparent::{address::TransparentAddress, keys::AccountPubKey};
 use zcash_address::{ZcashAddress, unified};
 use zcash_client_backend::{
     data_api::{
-        Account as _, WalletRead,
+        Account as _, WalletRead, Zip32Derivation,
         wallet::{
             ConfirmationsPolicy,
             input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy},
@@ -24,8 +25,11 @@ use zcash_client_backend::{
     wallet::TransparentAddressSource,
     zip321::{Payment, TransactionRequest},
 };
-use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, wallet::Account};
-use zcash_keys::{address::Address, keys::UnifiedFullViewingKey};
+use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, error::SqliteClientError, wallet::Account};
+use zcash_keys::{
+    address::Address,
+    keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
+};
 use zcash_protocol::{
     PoolType, ShieldedPool, TxId,
     memo::MemoBytes,
@@ -34,7 +38,7 @@ use zcash_protocol::{
 use zip32::{AccountId, fingerprint::SeedFingerprint};
 
 use crate::{
-    components::{chain::Chain, database::DbConnection},
+    components::{chain::Chain, database::DbConnection, keystore::KeyStore},
     fl,
     network::Network,
     prelude::APP,
@@ -152,6 +156,79 @@ pub(super) fn confirmations_policy_for_minconf(
             })
         }
     }
+}
+
+/// Decrypts the seed behind `derivation` and derives the spending key for `account_id`,
+/// requiring that the seed actually corresponds to the account it was fetched for.
+///
+/// Input selection runs against the account record in the wallet database, but signing
+/// uses a key derived from the seed. Those are the same key only if that record is intact,
+/// and it is not integrity-protected: a substituted `accounts.ufvk` would have the wallet
+/// select one key's notes and sign with another's. [`WalletRead::validate_seed`] closes
+/// that gap by checking the recorded viewing key against the one this seed derives, and
+/// fails closed.
+///
+/// `validate_seed` reports a mismatch in two different ways and both must be caught.
+/// `Ok(false)` is neither the recorded seed fingerprint nor the recorded viewing key
+/// matching this seed; `Err(CorruptedData)` is exactly one of them matching. The
+/// substitution attack lands in the latter: `derivation` is read from the same account
+/// row being checked, so the seed is decrypted under that row's own fingerprint and the
+/// fingerprint always agrees, leaving a swapped `ufvk` as the sole disagreement. Both
+/// refuse the operation with `err-account-seed-mismatch`.
+///
+/// Any other error means the check could not be performed — a busy or unreadable
+/// database, a seed of unusable length — which is not evidence of tampering and is not
+/// reported as such. It still fails closed: a spending key is derived only if the check
+/// affirmatively passed.
+///
+/// The check is free at every call site: the seed is decrypted here anyway, so no
+/// operation loads a secret it did not already load, and a locked wallet still fails at
+/// the decryption step rather than at this one.
+pub(super) async fn spending_key_for_account(
+    wallet: &DbConnection,
+    keystore: &KeyStore,
+    account_id: AccountUuid,
+    derivation: &Zip32Derivation,
+) -> RpcResult<UnifiedSpendingKey> {
+    let seed = keystore
+        .decrypt_seed(derivation.seed_fingerprint())
+        .await
+        .map_err(|e| match e.kind() {
+            // TODO: Improve internal error types.
+            //       https://github.com/zcash/zallet/issues/256
+            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
+                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
+            }
+            _ => LegacyCode::Database.with_message(e.to_string()),
+        })?;
+
+    match wallet.validate_seed(account_id, &seed) {
+        Ok(true) => {}
+        Ok(false) | Err(SqliteClientError::CorruptedData(_)) => {
+            return Err(LegacyCode::Wallet.with_message(fl!(
+                "err-account-seed-mismatch",
+                account = account_id.expose_uuid().to_string(),
+            )));
+        }
+        Err(e) => {
+            // The seed could not be checked against the account. Report it as what it is
+            // rather than as tampering, but still refuse to sign: `CorruptedData` is the
+            // only error that means "the recorded key disagrees", so every other error
+            // leaves the binding unverified.
+            tracing::error!(
+                "Could not validate the seed for account {}: {e}",
+                account_id.expose_uuid(),
+            );
+            return Err(LegacyCode::Database.with_message(e.to_string()));
+        }
+    }
+
+    UnifiedSpendingKey::from_seed(
+        wallet.params(),
+        seed.expose_secret(),
+        derivation.account_index(),
+    )
+    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))
 }
 
 /// The sources of funds a transfer from `source` may draw upon.
@@ -2406,5 +2483,127 @@ mod proposal_policy_tests {
             vec![],
         );
         assert_eq!(check_shielded_action_limits(&proposal, 2), Ok(()));
+    }
+}
+
+#[cfg(all(test, zallet_build = "wallet"))]
+mod spending_key_tests {
+    use super::spending_key_for_account;
+    use crate::components::keystore::{BackupStatus, testing as ks_testing};
+    use crate::config::ZalletConfig;
+    use tempfile::tempdir;
+    use zcash_client_backend::data_api::{
+        Account as _, AccountBirthday, WalletRead, WalletWrite, chain::ChainState,
+    };
+    use zcash_client_sqlite::error::SqliteClientError;
+    use zcash_keys::keys::UnifiedSpendingKey;
+    use zcash_primitives::block::BlockHash;
+    use zcash_protocol::consensus::{BlockHeight, NetworkType};
+
+    /// The attack this check exists to catch: someone who can write to `wallet.db` replaces
+    /// the `ufvk` column of an account row with a key they control, leaving
+    /// `hd_seed_fingerprint` untouched. Input selection then runs against the substituted
+    /// key while signing derives the USK from the real seed, so the wallet would spend under
+    /// a key the account does not name.
+    ///
+    /// Leaving the fingerprint intact is what makes this the interesting case.
+    /// `spending_key_for_account` decrypts the seed under that same fingerprint, so the
+    /// fingerprint always agrees and the viewing key is the only disagreement — which
+    /// upstream `validate_seed` reports as `Err(CorruptedData)`, never `Ok(false)`. Both
+    /// halves are pinned here: that upstream still answers this way, and that the helper
+    /// turns that answer into `err-account-seed-mismatch` rather than a database error.
+    #[test]
+    fn spending_key_for_account_rejects_tampered_uivk() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempdir().unwrap();
+
+        ks_testing::run_async(|| async {
+            let keystore = ks_testing::keystore(&datadir).await;
+
+            let seed_fp = keystore
+                .encrypt_and_store_mnemonic(ks_testing::phrase([0x5a; 32]), BackupStatus::Confirmed)
+                .await
+                .unwrap();
+            let seed = keystore.decrypt_seed(&seed_fp).await.unwrap();
+
+            let config = ZalletConfig {
+                datadir: Some(datadir.path().to_path_buf()),
+                consensus: crate::config::ConsensusSection {
+                    network: NetworkType::Test,
+                    ..Default::default()
+                },
+                keystore: crate::config::KeyStoreSection {
+                    encryption_identity: Some(datadir.path().join("encryption-identity.txt")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let db = crate::components::database::Database::open(&config)
+                .await
+                .unwrap();
+            let mut handle = db.handle().await.unwrap();
+
+            // Genesis birthday, as in `database::tests`: no block precedes it.
+            let birthday = AccountBirthday::from_parts(
+                ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
+                None,
+            );
+            let (account_id, _) = handle
+                .create_account("account", &seed, &birthday, None)
+                .expect("creates a seed-derived account");
+
+            let account = handle.get_account(account_id).unwrap().unwrap();
+            let derivation = account
+                .source()
+                .key_derivation()
+                .expect("the account is seed-derived")
+                .clone();
+
+            // Intact: the account validates and the spend path yields a key.
+            spending_key_for_account(handle.as_ref(), &keystore, account_id, &derivation)
+                .await
+                .expect("an intact account must yield a spending key");
+
+            // Tamper, on the pooled connection the spend path itself reads through: overwrite
+            // `ufvk` with a key derived from an unrelated seed at the same account index, and
+            // leave `hd_seed_fingerprint` alone. `parse_account_row` prefers `ufvk` and falls
+            // back to `uivk` only when `ufvk` is NULL, so this is the column that drives the
+            // comparison in `validate_seed`.
+            handle.as_ref().with_raw_mut(|conn, params| {
+                let foreign_ufvk =
+                    UnifiedSpendingKey::from_seed(params, &[0xa5; 32], derivation.account_index())
+                        .expect("derives a key from an unrelated seed")
+                        .to_unified_full_viewing_key()
+                        .encode(params);
+
+                conn.execute(
+                    "UPDATE accounts SET ufvk = ? WHERE uuid = ?",
+                    rusqlite::params![foreign_ufvk, account_id.expose_uuid()],
+                )
+                .expect("substitutes the account's recorded viewing key");
+            });
+
+            // Upstream must still classify this as corruption rather than `Ok(false)`; the
+            // helper's mapping is written against that classification.
+            assert!(
+                matches!(
+                    handle.as_ref().validate_seed(account_id, &seed),
+                    Err(SqliteClientError::CorruptedData(_)),
+                ),
+                "a swapped ufvk over an intact seed fingerprint must report corruption",
+            );
+
+            // And the spend path must surface it as tampering, not as a database error.
+            let err = spending_key_for_account(handle.as_ref(), &keystore, account_id, &derivation)
+                .await
+                .expect_err("a tampered ufvk must be rejected");
+
+            assert!(
+                err.message().contains("does not derive the viewing key"),
+                "expected the tamper message, got: {}",
+                err.message(),
+            );
+        });
     }
 }
