@@ -622,10 +622,12 @@ err-rpc-convert-tex-not-p2pkh = Address is not a transparent p2pkh address
 ## RPC CLI errors
 
 err-rpc-cli-conn-failed = Failed to connect to the Zallet wallet's JSON-RPC port.
-err-rpc-cli-invalid-param = Invalid parameter '{$parameter}'
+err-rpc-cli-invalid-param = Parameter {$position} must be valid JSON.
+err-rpc-cli-invalid-named-param = Parameter {$position} ({$name}) must be valid JSON.
 err-rpc-cli-param-read-failed = Failed to read parameter from {$path}: {$error}
 err-rpc-cli-no-server = No JSON-RPC port is available.
 err-rpc-cli-request-failed = JSON-RPC request failed: {$error}
+err-rpc-cli-wrong-param-count = Wrong number of parameters for '{$method}': expected {$minimum} to {$maximum}, received {$provided}.
 
 ## zallet manpage
 
