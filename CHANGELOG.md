@@ -264,6 +264,43 @@ be considered breaking changes.
   by them as well. Unix platforms already created the cookie with mode `0600`
   and are unaffected.
 
+- `z_sendmany` and `pczt_create` now check a request's recipients against the
+  account's real per-pool balances, rather than assuming every pool holds the
+  entire money supply. A payment that no single shielded pool can cover has to
+  cross between pools, which reveals the crossing amount, so under the default
+  `privacyPolicy` of `FullPrivacy` it is now rejected up front, naming the
+  policy that would permit it. Previously the conflict was only noticed after
+  input selection had run, and was reported either as a different privacy error
+  or as a generic proposal failure that did not mention the privacy policy at
+  all.
+
+  Which pool pays an Orchard receiver depends on the height the transaction
+  targets. From NU6.3 the Orchard turnstile is one-way — value may leave the
+  Orchard pool but never enter it — so a payment to an Orchard receiver is
+  delivered in the Ironwood pool, and only Ironwood funds can cover it without
+  crossing. The recipient's address is unchanged; there is no Ironwood receiver
+  type, and an Ironwood note is received at an Orchard receiver.
+
+  A consequence worth planning for: once NU6.3 activates, an account whose
+  shielded funds are all in the legacy Orchard pool cannot pay anyone under the
+  default `FullPrivacy` policy, because every external payment moves that value
+  across the turnstile and reveals its amount. Such sends need `privacyPolicy`
+  set to `AllowRevealedAmounts` or weaker, or the funds migrated to Ironwood
+  first. This is NU6.3 behaviour rather than a change of policy — Zallet now
+  reports it up front instead of after input selection has run.
+
+  These methods now require the wallet to have completed enough sync to report
+  balances and to name the height its transaction would target, and return the
+  same "Wallet sync required" error as `z_getbalanceforaccount` if it has not.
+
+- `z_sendmany`, `z_sendfromaccount` and `pczt_create` now reject a recipient
+  address that belongs to another network alongside their other address
+  validation, before the wallet is consulted at all, and name the offending
+  address: `Invalid parameter, address not valid on this network: <address>`.
+  Previously such an address was reported later, from the privacy check, as a
+  bare "Address is for Main but we expected Test" with nothing to identify which
+  recipient was at fault.
+
 - A note commitment tree conflict during sync no longer shuts the wallet down
   permanently. Zallet now rolls the wallet back to a progressively older point
   and rescans, up to a bounded number of attempts and never below the wallet's
