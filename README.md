@@ -27,6 +27,8 @@ contacting us in the `#wallet-dev` channel of the
 ## Usage
 
 See the [user guide](https://zcash.github.io/zallet/) for information on how to set up a Zallet wallet.
+If you are migrating from `zcashd`, start with the
+[migration guide](https://zcash.github.io/zallet/zcashd/index.html).
 
 ## Reproducible Builds
 

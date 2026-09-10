@@ -4,6 +4,10 @@ This tutorial continues from [Wallet setup](setup.md): it assumes `zallet
 start` is running and you have generated a mnemonic. You will create an
 account, receive funds, and send them onward.
 
+If your wallet came from a [`zcashd` migration](../zcashd/README.md), it
+already has accounts: skip step 2 and pick one from the output of
+`zallet rpc z_listaccounts` instead.
+
 All commands below use [`zallet rpc`](../cli/rpc.md). Remember its quoting
 rule: parameters must be valid JSON, so strings need shell-quoted double
 quotes (`'"like this"'`).
