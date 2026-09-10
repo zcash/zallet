@@ -61,6 +61,13 @@ GitHub Releases page ships one signed tarball per platform,
 `zallet-zebra`, `zallet-zaino`) side by side — extract it and run whichever one you need
 directly, or run `zallet` for config-driven dispatch.
 
+All of these artifacts (the release tarballs, the Docker image, and the Debian package)
+are built with the `rpc-cli` and `zcashd-import` features, so they include the
+[`zallet rpc`](../../cli/rpc.md) client and the `zcashd` migration commands
+[`migrate-zcash-conf`](../../cli/migrate-zcash-conf.md) and
+[`migrate-zcashd-wallet`](../../cli/migrate-zcashd-wallet.md). If you are migrating
+from `zcashd`, any of them will do.
+
 ### Building from source with a chosen backend
 
 Each backend is its own package in its own cargo workspace, so you install the one you
@@ -68,17 +75,21 @@ want by name (plus the launcher, if you want config-driven dispatch):
 
 ```
 # The zebra backend (Linux only, reads zebrad's state database)
-cargo install --locked --git https://github.com/zcash/zallet.git zallet-zebra
+cargo install --locked --git https://github.com/zcash/zallet.git zallet-zebra --features rpc-cli,zcashd-import
 
 # The zaino backend
-cargo install --locked --git https://github.com/zcash/zallet.git zallet-zaino
+cargo install --locked --git https://github.com/zcash/zallet.git zallet-zaino --features rpc-cli,zcashd-import
 
 # The launcher (optional; dispatches to whichever backend the config names)
 cargo install --locked --git https://github.com/zcash/zallet.git zallet
 ```
 
-Backend-independent features such as `rpc-cli` and `zcashd-import` are enabled per
-backend package with `--features` as usual.
+Backend-independent features are enabled per backend package with `--features`, and
+neither of the two you are likely to want is on by default: `rpc-cli` provides the
+[`zallet rpc`](../../cli/rpc.md) client, and `zcashd-import` provides the `zcashd`
+migration commands [`migrate-zcash-conf`](../../cli/migrate-zcash-conf.md) and
+[`migrate-zcashd-wallet`](../../cli/migrate-zcashd-wallet.md). A build without
+`zcashd-import` has no way to import a `wallet.dat`.
 
 ## Pre-compiled binaries
 
