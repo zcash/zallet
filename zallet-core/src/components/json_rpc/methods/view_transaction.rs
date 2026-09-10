@@ -709,8 +709,16 @@ pub(crate) async fn call<C: Chain>(
                                 output.value(),
                             )
                         }
-                        Ok(None) => unreachable!(),
-                        Err(_) => todo!(),
+                        Ok(None) => {
+                            return Err(LegacyCode::InvalidAddressOrKey.with_message(format!(
+                                "Prevout transaction {txid_prev} not available from the chain backend"
+                            )));
+                        }
+                        Err(e) => {
+                            return Err(LegacyCode::Database.with_message(format!(
+                                "Failed to fetch prevout transaction {txid_prev}: {e}"
+                            )));
+                        }
                     };
 
                 transparent_input_values.insert(input.prevout(), value);

@@ -40,6 +40,11 @@ be considered breaking changes.
 - Fixed a race that could leave wallet data requests unprocessed. The sync task
   now signals data-request processing after new blocks are stored. It also
   signals after each mempool transaction is stored.
+- `z_viewtransaction` no longer panics when the chain backend fails to return a
+  transparent input's prevout transaction. A backend error or a missing prevout
+  now surfaces as a JSON-RPC error (`Database` / `InvalidAddressOrKey`),
+  consistent with the method's other backend-failure paths, instead of hitting
+  an unfinished `todo!()`/`unreachable!()` arm.
 
 ## [0.1.0-beta.3] - 2026-08-24
 
