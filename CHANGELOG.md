@@ -40,6 +40,14 @@ be considered breaking changes.
 - Fixed a race that could leave wallet data requests unprocessed. The sync task
   now signals data-request processing after new blocks are stored. It also
   signals after each mempool transaction is stored.
+- `z_listunspent` no longer fails the entire request when a note's memo cannot
+  be read — because the stored memo cannot be decoded (for example a text memo
+  containing invalid UTF-8), or because the database layer does not support
+  memo lookups for the note's pool. The note is reported with its `memo` and
+  `memoStr` fields omitted, and a warning identifying the note is logged. A
+  note whose memo the wallet has not yet fetched likewise omits the memo
+  fields, instead of reporting the placeholder text `TODO: Always enhance
+  every note` in the `memo` field (which is documented as hexadecimal).
 
 ## [0.1.0-beta.3] - 2026-08-24
 
