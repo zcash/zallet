@@ -5,11 +5,12 @@
 `zallet migrate-zcash-conf` migrates a [`zcashd`] configuration file (`zcash.conf`) to an
 equivalent Zallet [configuration file] (`zallet.toml`).
 
-The command requires at least one of the following two flag:
+The configuration file is located with two flags, neither of which is required:
 
-- `--path`: A path to a `zcashd` configuration file.
-- `--zcashd-datadir`: A path to a `zcashd` datadir. If this is provided, then `--path` can
-  be relative (or omitted, in which case the default filename `zcash.conf` will be used).
+- `--conf`: A path to a `zcashd` configuration file. Defaults to `zcash.conf`.
+- `--zcashd-datadir`: A path to a `zcashd` datadir, against which a relative `--conf` is
+  resolved. If omitted, the platform's default `zcashd` datadir is used (`~/.zcash` on
+  Linux, the XDG data home's `Zcash` directory on macOS, `%APPDATA%\Zcash` on Windows).
 
 > For the Zallet beta releases, the command also currently takes another required flag
 > `--this-is-beta-code-and-you-will-need-to-redo-the-migration-later`.
