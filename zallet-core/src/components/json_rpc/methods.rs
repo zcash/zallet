@@ -101,6 +101,8 @@ mod z_export_viewing_key;
 #[cfg(zallet_build = "wallet")]
 mod z_get_balance_for_account;
 #[cfg(zallet_build = "wallet")]
+mod z_get_multisig_account_info;
+#[cfg(zallet_build = "wallet")]
 mod z_get_multisig_key_info;
 #[cfg(zallet_build = "wallet")]
 mod z_get_total_balance;
@@ -889,6 +891,42 @@ pub(crate) trait WalletRpc {
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response;
 
+    /// Reports what a collected set of ZIP 48 cosigner keys describes, without
+    /// registering anything.
+    ///
+    /// Each participant exports their own key with `z_getmultisigkeyinfo` and shares it
+    /// out of band; once every key has been collected, this method reports the account
+    /// that set defines. Nothing is recorded, and the wallet is not modified.
+    ///
+    /// Use it to verify agreement before an account is used to receive. Every address
+    /// the account derives depends on every cosigner key, so a single substituted key
+    /// silently redirects funds — but it also changes `first_address`. Confirm with the
+    /// other cosigners, over a channel separate from the one the keys arrived on, that
+    /// everyone derives the same first address.
+    ///
+    /// Both reported values are independent of the order the keys are supplied in, so
+    /// cosigners who collected the same set in different orders still agree.
+    ///
+    /// # Arguments
+    /// - `key_info` (array of strings, required): The BIP 388 `KEY_INFO` expressions of
+    ///   every cosigner, including this wallet's own, as returned by
+    ///   `z_getmultisigkeyinfo`. Every key must have been derived at the same ZIP 48
+    ///   path, and no key may be repeated.
+    /// - `threshold` (numeric, required): The number of cosigners that must sign to
+    ///   spend. Must be at least 1 and at most the number of cosigners.
+    ///
+    /// # Returns
+    /// An object with the account's BIP 388 wallet descriptor template, its threshold
+    /// and cosigner count, the first address it derives, and which cosigner this wallet
+    /// is — or `null` for that last field if none of this wallet's seeds derives any key
+    /// in the set.
+    #[method(name = "z_getmultisigaccountinfo")]
+    async fn get_multisig_account_info(
+        &self,
+        key_info: Vec<String>,
+        threshold: u8,
+    ) -> z_get_multisig_account_info::Response;
+
     /// Exports this wallet's ZIP 48 cosigner key for the given account, as a
     /// BIP 388 `KEY_INFO` expression.
     ///
@@ -1503,6 +1541,20 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response {
         z_export_viewing_key::call(self.wallet().await?.as_ref(), &self.keystore, zaddr, ivk).await
+    }
+
+    async fn get_multisig_account_info(
+        &self,
+        key_info: Vec<String>,
+        threshold: u8,
+    ) -> z_get_multisig_account_info::Response {
+        z_get_multisig_account_info::call(
+            self.wallet().await?.as_ref(),
+            &self.keystore,
+            key_info,
+            threshold,
+        )
+        .await
     }
 
     async fn get_multisig_key_info(&self, account: JsonValue) -> z_get_multisig_key_info::Response {

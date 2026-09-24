@@ -28,8 +28,15 @@ be considered breaking changes.
 ### Added
 
 - `z_getmultisigkeyinfo` returns this wallet's ZIP 48 cosigner key for an
-  account, as a BIP 388 `KEY_INFO` expression. Registering a ZIP 48 account and
-  deriving its addresses is not implemented yet.
+  account, as a BIP 388 `KEY_INFO` expression.
+- `z_getmultisigaccountinfo` takes a set of cosigner `KEY_INFO` expressions and
+  a threshold, and returns the account they describe: descriptor template,
+  cosigner count, first address, and this wallet's index among the cosigners
+  (`null` if none of its seeds derives one of the keys).
+
+  Registering such an account and deriving its addresses is not implemented
+  yet, so these two methods currently only support the out-of-band key
+  exchange.
 
 ### Fixed
 
