@@ -85,7 +85,7 @@ fn derivation_path<P: Parameters>(params: &P, account_index: zip32::AccountId) -
 ///
 /// The ZIP 48 account index is the Zallet account's own ZIP 32 index, so the key a given
 /// account contributes is stable and re-exporting reproduces it.
-fn cosigner_key_info<P: Parameters>(
+pub(super) fn cosigner_key_info<P: Parameters>(
     params: &P,
     seed: &[u8],
     account_index: zip32::AccountId,

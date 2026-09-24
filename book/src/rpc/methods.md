@@ -391,6 +391,40 @@ pool of funds.
 - `minconf` (numeric, optional, default=1) Only include unspent outputs in
   transactions confirmed at least this many times.
 
+## `z_getmultisigaccountinfo`
+
+*Only available in wallet builds of Zallet.*
+
+Reports what a collected set of ZIP 48 cosigner keys describes, without
+registering anything.
+
+Each participant exports their own key with `z_getmultisigkeyinfo` and shares it
+out of band; once every key has been collected, this method reports the account
+that set defines. Nothing is recorded, and the wallet is not modified.
+
+Use it to verify agreement before an account is used to receive. Every address
+the account derives depends on every cosigner key, so a single substituted key
+silently redirects funds — but it also changes `first_address`. Confirm with the
+other cosigners, over a channel separate from the one the keys arrived on, that
+everyone derives the same first address.
+
+Both reported values are independent of the order the keys are supplied in, so
+cosigners who collected the same set in different orders still agree.
+
+#### Arguments
+- `key_info` (array of strings, required): The BIP 388 `KEY_INFO` expressions of
+  every cosigner, including this wallet's own, as returned by
+  `z_getmultisigkeyinfo`. Every key must have been derived at the same ZIP 48
+  path, and no key may be repeated.
+- `threshold` (numeric, required): The number of cosigners that must sign to
+  spend. Must be at least 1 and at most the number of cosigners.
+
+#### Returns
+An object with the account's BIP 388 wallet descriptor template, its threshold
+and cosigner count, the first address it derives, and which cosigner this wallet
+is — or `null` for that last field if none of this wallet's seeds derives any key
+in the set.
+
 ## `z_getmultisigkeyinfo`
 
 *Only available in wallet builds of Zallet.*
