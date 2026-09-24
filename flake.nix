@@ -220,5 +220,19 @@
         packages.zallet-launcher = zallet-launcher;
         packages.zallet-zebra = zallet-zebra;
         packages.zallet-zaino = zallet-zaino;
+        # The package's musl cross settings are omitted because inheriting those
+        # would make every `cargo test` a static musl build. Release artifacts
+        # want that; an edit-compile-test loop does not.
+        devShells.default = craneLib.devShell {
+          packages = with pkgs; [
+            protobuf
+            pkg-config
+            git
+          ];
+          # bindgen (via the `-sys` crates) and prost/tonic locate these by
+          # environment rather than by PATH.
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          PROTOC = "${pkgs.protobuf}/bin/protoc";
+        };
       });
 }
