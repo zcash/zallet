@@ -186,6 +186,16 @@ jobs:
         shell: bash
         env:
           RUST_TOOLCHAIN: ${{steps.toolchain.outputs.name}}
+      - name: Install libclang
+        # `librocksdb-sys` generates its bindings with bindgen, which loads libclang at
+        # build time. The runner image ships clang but not the `-dev` package that
+        # provides the unversioned `libclang.so`, and the version of `clang-sys` this job
+        # resolves to does not find the versioned library on its own. The lockfile-pinned
+        # jobs are unaffected because they resolve an older `clang-sys` that does.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libclang-dev
       - name: Remove lockfiles to build with latest dependencies
         # Multi-path rm requires bash: the Windows default shell (pwsh) aliases
         # `rm` to Remove-Item, which rejects multiple positional paths.
