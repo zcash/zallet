@@ -14,8 +14,17 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Documentation-only pull requests skip the build and test jobs below; see
+  # changes.yml for what counts as documentation and how the gate stays green.
+  changes:
+    uses: $/.github/workflows/changes.yml
+    permissions:
+      contents: read
+
   test-msrv-required:
     name: Test ${{ matrix.state }} on ${{ matrix.target }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -115,6 +124,8 @@ jobs:
 
   test-msrv:
     name: Test ${{ matrix.state }} on ${{ matrix.target }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     strategy:
@@ -172,6 +183,8 @@ jobs:
 
   build-latest:
     name: Latest build on ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -219,13 +232,17 @@ jobs:
   required-checks:
     name: Required status checks have passed
     needs:
+      - changes
       - test-msrv-required
       - build-latest
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Determine whether all required-pass steps succeeded
+      # A job skipped by the change-detection gate counts as passed; `changes`
+      # is itself a dependency so that its failure cannot be mistaken for a
+      # documentation-only pull request.
+      - name: Determine whether all required-pass steps succeeded or were skipped
         run: |
-          echo "${NEEDS}" | jq -e '[ .[] | .result == "success" ] | all'
+          echo "${NEEDS}" | jq -e '[ .[] | .result == "success" or .result == "skipped" ] | all'
         env:
           NEEDS: ${{ toJSON(needs) }}
