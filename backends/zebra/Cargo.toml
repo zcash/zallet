@@ -36,6 +36,13 @@ hex = "0.4"
 i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
 incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
 orchard = "0.15.0"
+# Not used directly. Re-enables rocksdb's `bindgen-runtime` default, which
+# zebra-state 12 turns off. Without it `librocksdb-sys` builds bindgen without
+# `runtime`, and its build script panics ("a `libclang` shared library is not
+# loaded on this thread") as soon as another bindgen in the graph enables
+# `runtime` (bindgen 0.73 via libzcash_script, in a fresh resolution). Fixed in
+# zebra-state 14 (ZcashFoundation/zebra#11443); drop once zebra-state moves.
+rocksdb = { version = "0.24", default-features = false, features = ["bindgen-runtime"] }
 sapling = { package = "sapling-crypto", version = "0.7" }
 serde = { version = "1", features = ["serde_derive"] }
 jsonrpsee = { version = "0.24", features = ["async-client"] }

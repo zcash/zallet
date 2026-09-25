@@ -6617,6 +6617,7 @@ dependencies = [
  "once_cell",
  "orchard",
  "regex",
+ "rocksdb",
  "sapling-crypto",
  "serde",
  "tempfile",
