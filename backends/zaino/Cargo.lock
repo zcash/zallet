@@ -7004,6 +7004,7 @@ dependencies = [
  "jsonrpsee",
  "once_cell",
  "orchard",
+ "rocksdb",
  "sapling-crypto",
  "tempfile",
  "tokio",
