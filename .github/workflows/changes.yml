@@ -1,0 +1,92 @@
+name: Change detection
+
+# Reusable workflow that classifies the files a pull request touches, so that
+# the calling workflows can skip Rust builds and tests on pull requests that
+# only change documentation, while still reporting the status-check contexts
+# that the merge ruleset requires.
+#
+# Two outputs are produced:
+#
+# - `code`: anything that is not documentation changed. Every CI job that
+#   builds or tests the crates should be gated on this being `'true'`.
+# - `docs`: the book, a Markdown file, or a licence file changed. Jobs that
+#   validate the documentation should be gated on this being `'true'`.
+#
+# On any event other than `pull_request` (pushes to `main`, merge queues) there
+# is no diff to classify, so both outputs are `'true'` and everything runs.
+#
+# The gate jobs in the calling workflows treat a skipped job as passing, so a
+# job that is skipped because `code` is `'false'` does not block the merge.
+# Those gates also list the `changes` job itself in their `needs`, so a failure
+# here still fails the gate rather than letting every job be skipped.
+
+on:
+  workflow_call:
+    outputs:
+      code:
+        description: "'true' when any non-documentation file changed"
+        value: ${{ jobs.changes.outputs.code }}
+      docs:
+        description: "'true' when any documentation file changed"
+        value: ${{ jobs.changes.outputs.docs }}
+
+permissions: {}
+
+jobs:
+  changes:
+    name: Classify changed files
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+      docs: ${{ steps.classify.outputs.docs }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          # The diff below needs the base branch tip to be present.
+          fetch-depth: 0
+      - name: Classify changed files
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          code=true
+          docs=true
+
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            # On `pull_request`, HEAD is the pull request's merge commit, so the
+            # diff against the base branch tip is exactly what the pull request
+            # changes. (If the pull request cannot be merged, HEAD is its head
+            # commit instead and the diff also covers the base's divergence,
+            # which errs towards running everything.)
+            changed="$(git diff --name-only "${BASE_SHA}" HEAD)"
+
+            code=false
+            docs=false
+            while IFS= read -r path; do
+              [ -n "${path}" ] || continue
+              case "${path}" in
+                # The mdBook sources, every Markdown file (README, CHANGELOG,
+                # CONTRIBUTING, AGENTS, ...), and the licence texts.
+                book/*|*.md|LICENSE-*) docs=true ;;
+                # Everything else, including the workflows themselves.
+                *) code=true ;;
+              esac
+            done <<< "${changed}"
+
+            # An empty diff carries no evidence either way; run everything.
+            if [ "${code}" = false ] && [ "${docs}" = false ]; then
+              code=true
+              docs=true
+            fi
+          fi
+
+          echo "code=${code}"
+          echo "docs=${docs}"
+          echo "code=${code}" >> "${GITHUB_OUTPUT}"
+          echo "docs=${docs}" >> "${GITHUB_OUTPUT}"
