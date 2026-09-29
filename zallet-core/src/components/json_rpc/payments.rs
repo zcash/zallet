@@ -207,24 +207,71 @@ pub(super) async fn spending_key_for_account(
         .get_account(account_id)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
-    // Each direction of `subsumes_ufvk` rules out a component the other side lacks or holds
-    // differently, so together they are equality. A missing record, or one holding no UFVK,
-    // cannot vouch for the key either.
+    // A missing record, or one holding no UFVK, cannot vouch for the key either.
     let derived = usk.to_unified_full_viewing_key();
-    let bound = account
-        .as_ref()
-        .and_then(|a| a.ufvk())
-        .is_some_and(|recorded| {
-            recorded.subsumes_ufvk(&derived) && derived.subsumes_ufvk(recorded)
-        });
-    if !bound {
-        return Err(LegacyCode::Wallet.with_message(fl!(
-            "err-account-seed-mismatch",
-            account = account_id.expose_uuid().to_string(),
-        )));
+    if !records_exactly(account.as_ref().and_then(|a| a.ufvk()), &derived) {
+        return Err(account_seed_mismatch(account_id));
     }
 
     Ok(usk)
+}
+
+/// Requires every account whose derivation names `seed_fp` at `account_index` to record
+/// exactly the UFVK that `usk` derives.
+///
+/// This is the binding [`spending_key_for_account`] applies, for a signer that is handed the
+/// seed and account index rather than an account, as `pczt_sign` is by a PCZT's hints. Any
+/// local account naming that derivation is the record a PCZT built in this wallet was
+/// built from, so it must be intact before `usk` signs. Accounts are matched on the seed
+/// fingerprint and account index alone, as the hints carry nothing else.
+///
+/// No matching account is not an error: the PCZT was then not built from a record in this
+/// wallet, as when an offline signer holds only the seed.
+pub(super) fn check_derived_accounts_record(
+    wallet: &DbConnection,
+    seed_fp: &SeedFingerprint,
+    account_index: AccountId,
+    usk: &UnifiedSpendingKey,
+) -> RpcResult<()> {
+    let derived = usk.to_unified_full_viewing_key();
+
+    for account_id in wallet
+        .get_account_ids()
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+    {
+        let Some(account) = wallet
+            .get_account(account_id)
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+        else {
+            continue;
+        };
+        let names_derivation = account
+            .source()
+            .key_derivation()
+            .is_some_and(|d| d.seed_fingerprint() == seed_fp && d.account_index() == account_index);
+        if names_derivation && !records_exactly(account.ufvk(), &derived) {
+            return Err(account_seed_mismatch(account_id));
+        }
+    }
+
+    Ok(())
+}
+
+/// Whether `recorded` is exactly `derived`: each direction of `subsumes_ufvk` rules out a
+/// component the other side lacks or holds differently, so together they are equality.
+fn records_exactly(
+    recorded: Option<&UnifiedFullViewingKey>,
+    derived: &UnifiedFullViewingKey,
+) -> bool {
+    recorded
+        .is_some_and(|recorded| recorded.subsumes_ufvk(derived) && derived.subsumes_ufvk(recorded))
+}
+
+fn account_seed_mismatch(account_id: AccountUuid) -> ErrorObjectOwned {
+    LegacyCode::Wallet.with_message(fl!(
+        "err-account-seed-mismatch",
+        account = account_id.expose_uuid().to_string(),
+    ))
 }
 
 /// The sources of funds a transfer from `source` may draw upon.
@@ -2484,18 +2531,21 @@ mod proposal_policy_tests {
 
 #[cfg(all(test, zallet_build = "wallet"))]
 mod spending_key_tests {
-    use super::spending_key_for_account;
-    use crate::components::keystore::{BackupStatus, testing as ks_testing};
+    use super::{check_derived_accounts_record, spending_key_for_account};
+    use crate::components::database::{Database, DbHandle};
+    use crate::components::keystore::{BackupStatus, KeyStore, testing as ks_testing};
     use crate::config::ZalletConfig;
-    use secrecy::ExposeSecret;
-    use tempfile::tempdir;
+    use secrecy::{ExposeSecret, SecretVec};
+    use tempfile::{TempDir, tempdir};
     use zcash_address::unified::{self, Encoding};
     use zcash_client_backend::data_api::{
-        Account as _, AccountBirthday, WalletRead, WalletWrite, chain::ChainState,
+        Account as _, AccountBirthday, WalletRead, WalletWrite, Zip32Derivation, chain::ChainState,
     };
+    use zcash_client_sqlite::AccountUuid;
     use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::consensus::{BlockHeight, NetworkType, Parameters};
+    use zip32::AccountId;
 
     /// Where a tampered UFVK takes one of its components from.
     #[derive(Clone, Copy)]
@@ -2566,6 +2616,110 @@ mod spending_key_tests {
             .encode(&params.network_type())
     }
 
+    /// A wallet holding one seed and one account derived from it.
+    struct Fixture {
+        keystore: KeyStore,
+        db: Database,
+        seed: SecretVec<u8>,
+        account_id: AccountUuid,
+        derivation: Zip32Derivation,
+    }
+
+    async fn wallet_with_account(datadir: &TempDir) -> Fixture {
+        let keystore = ks_testing::keystore(datadir).await;
+
+        let seed_fp = keystore
+            .encrypt_and_store_mnemonic(ks_testing::phrase([0x5a; 32]), BackupStatus::Confirmed)
+            .await
+            .unwrap();
+        let seed = keystore.decrypt_seed(&seed_fp).await.unwrap();
+
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            consensus: crate::config::ConsensusSection {
+                network: NetworkType::Test,
+                ..Default::default()
+            },
+            keystore: crate::config::KeyStoreSection {
+                encryption_identity: Some(datadir.path().join("encryption-identity.txt")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db = Database::open(&config).await.unwrap();
+        let mut handle = db.handle().await.unwrap();
+
+        // Genesis birthday: no block precedes it, so an empty chain state anchored at the
+        // conventional all-zeros parent hash is correct (see
+        // `json_rpc::utils::fetch_account_birthday`).
+        let birthday = AccountBirthday::from_parts(
+            ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
+            None,
+        );
+        let (account_id, _) = handle
+            .create_account("account", &seed, &birthday, None)
+            .expect("creates a seed-derived account");
+
+        let derivation = handle
+            .get_account(account_id)
+            .unwrap()
+            .unwrap()
+            .source()
+            .key_derivation()
+            .expect("the account is seed-derived")
+            .clone();
+
+        Fixture {
+            keystore,
+            db,
+            seed,
+            account_id,
+            derivation,
+        }
+    }
+
+    /// Rewrites the account's `ufvk` column as `components` says, leaving
+    /// `hd_seed_fingerprint` untouched, on the pooled connection the wallet reads through.
+    /// `parse_account_row` prefers `ufvk` and falls back to `uivk` only when `ufvk` is NULL,
+    /// so this is the column the recorded key is read from.
+    fn substitute_ufvk(
+        handle: &DbHandle,
+        fixture: &Fixture,
+        components: (Component, Component, Component),
+    ) {
+        handle.as_ref().with_raw_mut(|conn, params| {
+            let key_for = |seed: &[u8]| {
+                UnifiedSpendingKey::from_seed(params, seed, fixture.derivation.account_index())
+                    .unwrap()
+                    .to_unified_full_viewing_key()
+            };
+            let tampered = encode_ufvk(
+                params,
+                &key_for(fixture.seed.expose_secret()),
+                &key_for(&[0xa5; 32]),
+                components,
+            );
+
+            conn.execute(
+                "UPDATE accounts SET ufvk = ? WHERE uuid = ?",
+                rusqlite::params![tampered, fixture.account_id.expose_uuid()],
+            )
+            .unwrap();
+        });
+    }
+
+    fn usk_at(handle: &DbHandle, seed: &SecretVec<u8>, index: AccountId) -> UnifiedSpendingKey {
+        UnifiedSpendingKey::from_seed(handle.params(), seed.expose_secret(), index).unwrap()
+    }
+
+    fn assert_tamper_message(case: &str, err: jsonrpsee::types::ErrorObjectOwned) {
+        assert!(
+            err.message().contains("does not derive the viewing key"),
+            "{case}: expected the tamper message, got: {}",
+            err.message(),
+        );
+    }
+
     /// Someone who can write to `wallet.db` but does not hold the seed rewrites an account's
     /// `ufvk` column. Whatever they substitute, the spend path must refuse to hand out the
     /// spending key, and must say why rather than report a database error.
@@ -2577,90 +2731,83 @@ mod spending_key_tests {
             let datadir = tempdir().unwrap();
 
             ks_testing::run_async(|| async {
-                let keystore = ks_testing::keystore(&datadir).await;
-
-                let seed_fp = keystore
-                    .encrypt_and_store_mnemonic(
-                        ks_testing::phrase([0x5a; 32]),
-                        BackupStatus::Confirmed,
+                let fixture = wallet_with_account(&datadir).await;
+                let handle = fixture.db.handle().await.unwrap();
+                let spend = || {
+                    spending_key_for_account(
+                        handle.as_ref(),
+                        &fixture.keystore,
+                        fixture.account_id,
+                        &fixture.derivation,
                     )
-                    .await
-                    .unwrap();
-                let seed = keystore.decrypt_seed(&seed_fp).await.unwrap();
-
-                let config = ZalletConfig {
-                    datadir: Some(datadir.path().to_path_buf()),
-                    consensus: crate::config::ConsensusSection {
-                        network: NetworkType::Test,
-                        ..Default::default()
-                    },
-                    keystore: crate::config::KeyStoreSection {
-                        encryption_identity: Some(datadir.path().join("encryption-identity.txt")),
-                        ..Default::default()
-                    },
-                    ..Default::default()
                 };
-                let db = crate::components::database::Database::open(&config)
-                    .await
-                    .unwrap();
-                let mut handle = db.handle().await.unwrap();
 
-                // Genesis birthday: no block precedes it, so an empty chain state anchored
-                // at the conventional all-zeros parent hash is correct (see
-                // `json_rpc::utils::fetch_account_birthday`).
-                let birthday = AccountBirthday::from_parts(
-                    ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
-                    None,
-                );
-                let (account_id, _) = handle
-                    .create_account("account", &seed, &birthday, None)
-                    .expect("creates a seed-derived account");
-
-                let account = handle.get_account(account_id).unwrap().unwrap();
-                let derivation = account
-                    .source()
-                    .key_derivation()
-                    .expect("the account is seed-derived")
-                    .clone();
-
-                // Intact: the account validates and the spend path yields a key.
-                spending_key_for_account(handle.as_ref(), &keystore, account_id, &derivation)
+                spend()
                     .await
                     .expect("an intact account must yield a spending key");
 
-                // Tamper on the pooled connection the spend path itself reads through.
-                // `parse_account_row` prefers `ufvk` and falls back to `uivk` only when
-                // `ufvk` is NULL, so this is the column the recorded key is read from.
-                handle.as_ref().with_raw_mut(|conn, params| {
-                    let key_for = |seed: &[u8]| {
-                        UnifiedSpendingKey::from_seed(params, seed, derivation.account_index())
-                            .unwrap()
-                            .to_unified_full_viewing_key()
-                    };
-                    let tampered = encode_ufvk(
-                        params,
-                        &key_for(seed.expose_secret()),
-                        &key_for(&[0xa5; 32]),
-                        (orchard, sapling, transparent),
-                    );
+                substitute_ufvk(&handle, &fixture, (orchard, sapling, transparent));
 
-                    conn.execute(
-                        "UPDATE accounts SET ufvk = ? WHERE uuid = ?",
-                        rusqlite::params![tampered, account_id.expose_uuid()],
-                    )
-                    .unwrap();
-                });
-
-                let err =
-                    spending_key_for_account(handle.as_ref(), &keystore, account_id, &derivation)
-                        .await
-                        .expect_err(case);
-                assert!(
-                    err.message().contains("does not derive the viewing key"),
-                    "{case}: expected the tamper message, got: {}",
-                    err.message(),
-                );
+                assert_tamper_message(case, spend().await.expect_err(case));
             });
         }
+    }
+
+    /// The same substitutions, seen by a signer that is handed a seed fingerprint and account
+    /// index rather than an account, as `pczt_sign` is: the local account naming that
+    /// derivation must be intact before the key signs.
+    #[test]
+    fn check_derived_accounts_record_rejects_a_substituted_ufvk() {
+        crate::i18n::load_languages(&[]);
+
+        for &(case, orchard, sapling, transparent) in SUBSTITUTIONS {
+            let datadir = tempdir().unwrap();
+
+            ks_testing::run_async(|| async {
+                let fixture = wallet_with_account(&datadir).await;
+                let handle = fixture.db.handle().await.unwrap();
+                let usk = usk_at(&handle, &fixture.seed, fixture.derivation.account_index());
+                let check = || {
+                    check_derived_accounts_record(
+                        handle.as_ref(),
+                        fixture.derivation.seed_fingerprint(),
+                        fixture.derivation.account_index(),
+                        &usk,
+                    )
+                };
+
+                check().expect("an intact account must pass");
+
+                substitute_ufvk(&handle, &fixture, (orchard, sapling, transparent));
+
+                assert_tamper_message(case, check().expect_err(case));
+            });
+        }
+    }
+
+    /// A wallet may hold a seed with no account at the index a PCZT names, as an offline
+    /// signer holding only the seed does. There is then no local record the PCZT could have
+    /// been built from, so the check must not stand in the way of signing.
+    #[test]
+    fn check_derived_accounts_record_allows_a_seed_without_a_local_account() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempdir().unwrap();
+
+        ks_testing::run_async(|| async {
+            let fixture = wallet_with_account(&datadir).await;
+            let handle = fixture.db.handle().await.unwrap();
+
+            let unused_index = AccountId::try_from(7).unwrap();
+            assert_ne!(unused_index, fixture.derivation.account_index());
+
+            check_derived_accounts_record(
+                handle.as_ref(),
+                fixture.derivation.seed_fingerprint(),
+                unused_index,
+                &usk_at(&handle, &fixture.seed, unused_index),
+            )
+            .expect("no local account names this derivation, so there is nothing to bind");
+        });
     }
 }
