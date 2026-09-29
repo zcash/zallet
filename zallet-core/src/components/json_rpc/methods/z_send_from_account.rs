@@ -125,7 +125,7 @@ pub(crate) async fn call<C: Chain>(
     // multi-party hand-off. The caller's policy doubles as the acknowledgement
     // that signing requires.
     let signed = pczt_sign::call(
-        wallet.params(),
+        &wallet,
         keystore.clone(),
         &proved.pczt,
         Some(privacy_policy.to_string()),

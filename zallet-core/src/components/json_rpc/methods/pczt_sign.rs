@@ -20,14 +20,14 @@ use super::pczt_common::{
 use super::pczt_error::PcztError;
 use crate::{
     components::{
+        database::Database,
         json_rpc::{
-            payments::{PrivacyPolicy, parse_privacy_policy},
+            payments::{PrivacyPolicy, check_derived_accounts_record, parse_privacy_policy},
             server::LegacyCode,
         },
         keystore::KeyStore,
     },
     fl,
-    network::Network,
 };
 
 pub(crate) type Response = RpcResult<ResultType>;
@@ -133,7 +133,7 @@ fn check_privacy_policy(pczt: &Pczt, acknowledged: PrivacyPolicy) -> RpcResult<(
 /// is every input of a PCZT that carries no hints (one created by a different
 /// wallet).
 pub(crate) async fn call(
-    params: &Network,
+    wallet: &Database,
     keystore: KeyStore,
     pczt_base64: &str,
     privacy_policy: Option<String>,
@@ -230,22 +230,26 @@ pub(crate) async fn call(
     // it — the multi-party case — and is treated like an absent hint rather
     // than a server fault.
     //
-    // The seed is not bound to an account record here, as it is on the account-based
-    // spend paths (see `payments::spending_key_for_account`): the key is named by the
-    // PCZT's hints rather than by an account, so there is no record to bind it to.
-    // `z_sendfromaccount` binds before it drives this method over its own PCZT.
+    // When the seed is held, any local account the hints name must record exactly
+    // the UFVK it derives (see `payments::check_derived_accounts_record`): a PCZT
+    // built in this wallet was built from that record.
     let usk = match &hints {
         None => None,
         Some(hints) => match keystore.decrypt_seed(&hints.seed_fp).await {
-            Ok(seed) => Some(
-                UnifiedSpendingKey::from_seed(params, seed.expose_secret(), hints.account_idx)
-                    .map_err(|e| {
-                        LegacyCode::InvalidAddressOrKey.with_message(fl!(
-                            "err-pczt-derive-spending-key",
-                            error = e.to_string()
-                        ))
-                    })?,
-            ),
+            Ok(seed) => {
+                let usk = UnifiedSpendingKey::from_seed(
+                    wallet.params(),
+                    seed.expose_secret(),
+                    hints.account_idx,
+                )
+                .map_err(|e| {
+                    LegacyCode::InvalidAddressOrKey
+                        .with_message(fl!("err-pczt-derive-spending-key", error = e.to_string()))
+                })?;
+                check_derived_accounts_record(wallet, &hints.seed_fp, hints.account_idx, &usk)
+                    .await?;
+                Some(usk)
+            }
             Err(e)
                 if matches!(e.kind(), crate::error::ErrorKind::Generic)
                     && e.to_string() == "Wallet is locked" =>
