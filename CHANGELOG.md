@@ -25,6 +25,17 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- `z_sendmany`, `z_shieldcoinbase` and `z_sendfromaccount` now refuse to sign
+  unless the viewing key the wallet has recorded for the spending account is
+  exactly the one the account's seed derives, component for component.
+  Transactions are built against the account record while signing uses a
+  seed-derived key, so a modified record could previously have the wallet select
+  one key's notes and sign with another's, or direct shielded change to a key
+  the seed does not control. A mismatch is reported as wallet database
+  corruption or tampering, and no transaction is created.
+
 ### Fixed
 
 - `migrate-zcashd-wallet` now includes un-mined transactions when estimating
@@ -178,16 +189,6 @@ be considered breaking changes.
   Note that Zallet reports the fingerprint in its ZIP 32 bech32m encoding
   (`zip32seedfp1…`), as `z_listaccounts` already does, whereas `zcashd` reported
   the `uint256` hex form.
-
-### Changed
-
-- `z_sendmany`, `z_shieldcoinbase` and `z_sendfromaccount` now verify, after
-  decrypting the account's seed and before deriving the key they sign with, that
-  the seed actually derives the viewing key the wallet has recorded for that
-  account. Input selection runs against the account record while signing uses a
-  seed-derived key; a modified record could previously have the wallet select
-  one key's notes and sign with another's. A mismatch is reported as wallet
-  database corruption or tampering, and no transaction is created.
 
 ### Fixed
 
