@@ -106,6 +106,20 @@ be considered breaking changes.
   pre-Sapling wallet that has no HD seed. The minted seed never existed in
   zcashd, so backups of `wallet.dat` do not cover it; the migration prints a
   warning to that effect.
+- `createmultisig`, which builds an m-of-n multisignature redeem script and
+  reports its P2SH address. Each key may be given as a hex-encoded public key or
+  as a transparent address this wallet holds the public key for. A key given in
+  hex is placed in the script in the encoding it was given, so an address
+  created by `zcashd` from uncompressed keys can be reproduced exactly.
+  Note that Zallet cannot yet spend from a multisig address, as it has no way to
+  assemble a P2SH `scriptSig`; funds sent to one can be tracked but not moved.
+- `addmultisigaddress`, which creates the same address and redeem script as
+  `createmultisig` and additionally records the script, so that the wallet
+  detects funds sent to the address. Its third argument is the UUID of the
+  account to track the address in, where `zcashd` took an account label; omitted,
+  it defaults to the legacy `zcashd` pool of funds, which requires
+  `features.legacy_pool_seed_fingerprint` to be set. Unlike `z_importaddress`
+  there is no `rescan` argument, as a newly created address has no history.
 
 ### Changed
 
@@ -357,6 +371,13 @@ be considered breaking changes.
   `walletpassphrase` unlocks a running server’s identities rather than this
   process’s, which cannot run concurrently with it in any case. The regtest
   account command is fixed the same way.
+- `listaddresses` now reports transparent addresses imported as a standalone
+  public key or redeem script, such as those created by `addmultisigaddress` or
+  imported by `z_importaddress`. Previously such an address was not listed at
+  all until funds arrived at it, and was then listed among the account’s derived
+  addresses. It is now reported from the moment it is imported, in the
+  `transparent` object rather than `derived_transparent`, as it has no
+  derivation information of its own even when the account holding it does.
 
 - Wallet sync now loads a complete block range from one fixed-history view
   before queueing decryption or database work. If the view expires partway
