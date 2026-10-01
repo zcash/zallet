@@ -228,6 +228,11 @@ pub(crate) async fn call(
     // seed (other than the wallet being locked) means this wallet does not hold
     // it — the multi-party case — and is treated like an absent hint rather
     // than a server fault.
+    //
+    // The seed is not bound to an account record here, as it is on the account-based
+    // spend paths (see `payments::spending_key_for_account`): the key is named by the
+    // PCZT's hints rather than by an account, so there is no record to bind it to.
+    // `z_sendfromaccount` binds before it drives this method over its own PCZT.
     let usk = match &hints {
         None => None,
         Some(hints) => match keystore.decrypt_seed(&hints.seed_fp).await {

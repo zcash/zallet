@@ -25,6 +25,17 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- `z_sendmany`, `z_shieldcoinbase` and `z_sendfromaccount` now refuse to sign
+  unless the viewing key the wallet has recorded for the spending account is
+  exactly the one the account's seed derives, component for component.
+  Transactions are built against the account record while signing uses a
+  seed-derived key, so a modified record could previously have the wallet select
+  one key's notes and sign with another's, or direct shielded change to a key
+  the seed does not control. A mismatch is reported as wallet database
+  corruption or tampering, and no transaction is created.
+
 ### Fixed
 
 - `migrate-zcashd-wallet` now includes un-mined transactions when estimating
