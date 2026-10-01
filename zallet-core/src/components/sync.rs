@@ -1444,6 +1444,22 @@ mod tests {
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
 
+    /// Upper bound on how long a failed wallet sync startup may take to stop its batch
+    /// decryptor. The abort lands at the engine's next yield point, so this only has to
+    /// absorb scheduling noise on a slow CI runner; a decryptor that is genuinely left
+    /// running fails the test here instead of hanging until the CI job timeout.
+    const DECRYPTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// How long one `reload_keys` reply may take before the probe gives up on it. A live
+    /// engine answers immediately, so this only has to outlast scheduling noise; it
+    /// exists for the request that is queued just as the engine drops and would
+    /// otherwise never resolve.
+    const DECRYPTOR_REPLY_TIMEOUT: Duration = Duration::from_millis(100);
+
+    /// Pause between shutdown probes, so a loop waiting for the abort to land does not
+    /// spin.
+    const DECRYPTOR_PROBE_INTERVAL: Duration = Duration::from_millis(10);
+
     struct TaskCancellationProbe(mpsc::Sender<()>);
 
     impl Drop for TaskCancellationProbe {
@@ -1707,23 +1723,37 @@ mod tests {
         assert!(result.is_err(), "mock chain rejects wallet sync startup");
         // The failed startup aborts the batch decryptor task, but the abort only lands
         // at the task's next yield point, so the engine may still answer requests that
-        // race ahead of it (zallet#766). Poll until shutdown is observed: `None` from
-        // `reload_keys` means the engine (the queue receiver) is gone, and an errored
-        // receiver means the engine dropped the request unserved. A served reload
-        // (`Ok`) only proves the abort has not landed yet, so retry. Bound the wait so
-        // a decryptor that really is left running fails the test here instead of
-        // hanging until the CI job timeout.
-        tokio::time::timeout(Duration::from_secs(30), async {
+        // race ahead of it (zallet#766). Poll until shutdown is observed, treating a
+        // served reload (`Ok`) as "the abort has not landed yet" and retrying.
+        //
+        // Only `None` is a conclusive witness. A `send` that races the engine's drop
+        // can still win its permit and queue the request; nothing then drains that
+        // message, and `decryptor_observer` keeps the channel alive, so the queued
+        // `on_complete` is never dropped and its receiver never resolves — neither
+        // `Ok` nor `Err`. Bound each reply wait so that case re-probes rather than
+        // parking forever, and bound the whole loop so a decryptor that really is
+        // left running fails here instead of hanging until the CI job timeout.
+        //
+        // TODO: replace this with `decryptor_observer.closed()` once the
+        // `zcash_client_backend` pin includes zcash/librustzcash#3077, which makes
+        // engine liveness directly observable and removes the need to poll at all.
+        tokio::time::timeout(DECRYPTOR_SHUTDOWN_TIMEOUT, async {
             loop {
                 match decryptor_observer.reload_keys().await {
                     None => break,
                     Some(reload_finished) => {
-                        if reload_finished.await.is_err() {
+                        // `Ok(Err(_))` is the engine dropping the request unserved.
+                        // Anything else — served, or stranded in a queue nobody will
+                        // read — means re-probe. A live engine answers immediately, so
+                        // the bound only has to outlast scheduling noise.
+                        if let Ok(Err(_)) =
+                            tokio::time::timeout(DECRYPTOR_REPLY_TIMEOUT, reload_finished).await
+                        {
                             break;
                         }
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(DECRYPTOR_PROBE_INTERVAL).await;
             }
         })
         .await
