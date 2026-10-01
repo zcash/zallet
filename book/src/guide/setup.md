@@ -135,7 +135,7 @@ Notes:
 
 If you have an existing `zcash.conf`, you can use it as a starting point:
 ```
-$ zallet migrate-zcash-conf --datadir /path/to/zcashd/datadir -o /path/to/zallet/datadir/zallet.toml
+$ zallet migrate-zcash-conf --zcashd-datadir /path/to/zcashd/datadir -o /path/to/zallet/datadir/zallet.toml
 ```
 
 > [Reference](../cli/migrate-zcash-conf.md)

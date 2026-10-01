@@ -85,7 +85,6 @@ The migration reports these (with counts) instead of importing them:
 - Address book entries.
 - Watch-only entries recorded without their public key or redeem script, and entries
   with uncompressed public keys.
-- Regtest wallets (not currently supported).
 
 ## Back up the migrated wallet
 
