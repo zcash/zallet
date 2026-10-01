@@ -45,14 +45,14 @@ Statuses:
 | `listtransactions` | Not yet implemented | Provided today in modified, account-scoped form as `z_listtransactions` ([#63](https://github.com/zcash/zallet/issues/63)) |
 | `listunspent` | Not planned | Subsumed by `z_listunspent`, which now includes transparent outputs ([changes](json_rpc.md#z_listunspent), [#64](https://github.com/zcash/zallet/issues/64)) |
 | `lockunspent` | Not yet implemented | Planned with modified semantics ([#65](https://github.com/zcash/zallet/issues/65)) |
-| `sendmany` | Not planned | Use `z_sendmany`, or `z_sendfromaccount` once implemented ([#66](https://github.com/zcash/zallet/issues/66), [#217](https://github.com/zcash/zallet/issues/217)) |
-| `sendtoaddress` | Not planned | Use `z_sendfromaccount` once implemented ([#217](https://github.com/zcash/zallet/issues/217)); `z_sendmany` covers most uses today ([#67](https://github.com/zcash/zallet/issues/67)) |
+| `sendmany` | Not planned | Use `z_sendmany` or `z_sendfromaccount` ([#66](https://github.com/zcash/zallet/issues/66); remaining `z_sendfromaccount` design work is tracked in [#217](https://github.com/zcash/zallet/issues/217)) |
+| `sendtoaddress` | Not planned | Use `z_sendfromaccount` (remaining design work is tracked in [#217](https://github.com/zcash/zallet/issues/217)) or `z_sendmany` ([#67](https://github.com/zcash/zallet/issues/67)) |
 | `settxfee` | Omitted | [ZIP 317](https://zips.z.cash/zip-0317) fees are always used |
-| `signmessage` | Not yet implemented | [#68](https://github.com/zcash/zallet/issues/68) |
+| `signmessage` | Implemented | |
 | `walletconfirmbackup` | Not planned | Internal `zcashd` method not intended to be called directly; use the [`zallet confirm-backup`](../cli/confirm-backup.md) command instead |
 | `z_converttex` | Implemented | |
 | `z_exportkey` | Implemented | |
-| `z_exportviewingkey` | Not yet implemented | Planned as UFVK/UIVK export ([#70](https://github.com/zcash/zallet/issues/70)) |
+| `z_exportviewingkey` | Implemented (altered) | [Changes](json_rpc.md#z_exportviewingkey) |
 | `z_exportwallet` | Not yet implemented | Planned as a [ZeWIF](https://github.com/zcash/zewif) export, likely a CLI operation rather than an RPC ([#71](https://github.com/zcash/zallet/issues/71)) |
 | `z_getaddressforaccount` | Implemented (altered) | [Changes](json_rpc.md#z_getaddressforaccount) |
 | `z_getbalance` | Omitted | Use `z_getbalanceforaccount` |
@@ -66,7 +66,7 @@ Statuses:
 | `z_getoperationstatus` | Implemented | |
 | `z_gettotalbalance` | Implemented (deprecated) | `include_watchonly = false` is not yet honored; use the account-scoped `z_getbalanceforaccount` / `z_getbalances` instead ([#324](https://github.com/zcash/zallet/issues/324)) |
 | `z_importkey` | Implemented (altered) | Sapling extended spending keys only |
-| `z_importviewingkey` | Not yet implemented | Planned for Sapling keys, UFVKs, and UIVKs ([#80](https://github.com/zcash/zallet/issues/80)) |
+| `z_importviewingkey` | Implemented (altered) | Sapling extended full viewing keys only |
 | `z_importwallet` | Omitted | Use `z_importkey` per key, or [`zallet migrate-zcashd-wallet`](../cli/migrate-zcashd-wallet.md); reconsideration tracked in [#81](https://github.com/zcash/zallet/issues/81) |
 | `z_listaccounts` | Implemented (altered) | [Changes](json_rpc.md#z_listaccounts) |
 | `z_listaddresses` | Omitted | Use `listaddresses` |
@@ -87,12 +87,18 @@ Statuses:
 Zallet also provides methods that `zcashd`'s wallet did not have:
 
 - `getwalletstatus` — wallet and sync status.
+- `pczt_create`, `pczt_prove`, `pczt_sign`, `pczt_combine`, `pczt_inspect`,
+  `pczt_extract` — [PCZT](https://crates.io/crates/pczt)-based transaction
+  construction and signing, replacing the
+  `createrawtransaction`/`fundrawtransaction`/`signrawtransaction` flow.
 - `z_getaccount` — details for a single account.
 - `z_getbalances` — balances for all accounts.
 - `z_importaddress` — import a transparent P2PKH public key or P2SH redeem
   script into an account.
 - `z_listtransactions` — account-scoped transaction listing.
 - `z_recoveraccounts` — re-create accounts from existing seeds.
+- `z_sendfromaccount` — send from an account, drawing on an explicit fund
+  source and with a required privacy policy.
 - `rpc.discover` — an [OpenRPC](https://open-rpc.org/) description of the full
   interface.
 
