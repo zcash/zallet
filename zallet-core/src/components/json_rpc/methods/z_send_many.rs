@@ -104,7 +104,7 @@ pub(crate) async fn call<C: Chain>(
             .with_static("Zallet always calculates fees internally; the fee field must be null."));
     }
 
-    let request = build_request(&amounts)?;
+    let request = build_request(wallet.params(), &amounts)?;
 
     let (account, spend_policy) = match fromaddress.as_str() {
         // Select from the legacy transparent address pool, which this wallet holds in a

@@ -69,7 +69,7 @@ pub(crate) async fn call<C: Chain>(
 ) -> Response {
     let mut handle = wallet_handle(&wallet).await?;
 
-    let request = build_request(&recipients)?;
+    let request = build_request(handle.params(), &recipients)?;
 
     let account_id = parse_account_parameter(handle.as_ref(), &keystore, &account).await?;
 
