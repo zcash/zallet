@@ -39,5 +39,7 @@ as_of_version = "0.1.0-beta.3"
 
 [sync]
 
+[zinder]
+
 """
 stderr = "..."

@@ -1,0 +1,67 @@
+[package]
+name = "zallet-zinder"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Zallet backend for the Zinder wallet runtime"
+repository = "https://github.com/zcash/zallet"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# This package is deliberately an independent workspace, matching Zallet's
+# backend dependency boundary. The sibling binary is available for source-built
+# certification; release packaging remains deferred.
+[workspace]
+
+# Keep the independent backend workspace on the same wallet-critical
+# librustzcash source cohort as the launcher and the other native backends.
+[patch.crates-io]
+equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+zcash_pool_migration = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
+
+[dependencies]
+zallet-core = { path = "../../zallet-core" }
+
+futures = "0.3"
+hex = "0.4"
+i18n-embed = { version = "0.16", features = ["desktop-requester", "fluent-system"] }
+incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
+orchard = "0.15.0"
+sapling = { package = "sapling-crypto", version = "0.7" }
+serde_json = "1"
+tempfile = { version = "3", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing = "0.1"
+transparent = { package = "zcash_transparent", version = "0.10.0" }
+zcash_client_backend = "=0.24.0-rc.7"
+zcash_primitives = "0.30.0"
+zcash_protocol = "0.10.0"
+zcash_script = "0.4.3"
+zinder-client = "=0.6.0"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["time"] }
+toml = "0.8"
+zinder-core = { version = "=0.6.0", default-features = false }
+
+[features]
+default = []
+bounded-scan-certification = ["dep:tempfile", "zallet-core/bounded-scan-certification"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(tokio_unstable)',
+    'cfg(zallet_build, values("merchant_terminal", "wallet"))',
+    'cfg(zcash_unstable, values("nu7"))',
+] }

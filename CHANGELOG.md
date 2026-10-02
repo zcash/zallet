@@ -25,6 +25,14 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- Source builds can select `backend = "zinder"` and configure
+  `[zinder].wallet_query_endpoint` to run the native `zallet-zinder` sibling.
+  Release packaging remains unchanged.
+- The Zinder backend now submits wallet transactions through its configured
+  native wallet-query endpoint.
+
 ### Fixed
 
 - `migrate-zcashd-wallet` now includes un-mined transactions when estimating
@@ -40,6 +48,9 @@ be considered breaking changes.
 - Fixed a race that could leave wallet data requests unprocessed. The sync task
   now signals data-request processing after new blocks are stored. It also
   signals after each mempool transaction is stored.
+- `z_getnewaccount`, `z_recoveraccounts`, and `z_importviewingkey` now wake
+  synchronization after adding account keys, so newly created or recovered
+  accounts are scanned without requiring a wallet restart.
 
 ## [0.1.0-beta.3] - 2026-08-24
 

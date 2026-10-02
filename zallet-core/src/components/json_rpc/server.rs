@@ -19,7 +19,10 @@ use super::methods::{RpcImpl, RpcServer as _};
 #[cfg(zallet_build = "wallet")]
 use {
     super::methods::{WalletRpcImpl, WalletRpcServer},
-    crate::components::{keystore::KeyStore, sync::WalletDecryptorHandle},
+    crate::components::{
+        keystore::KeyStore,
+        sync::{WalletDecryptorHandle, WalletSyncWakeup},
+    },
 };
 
 mod error;
@@ -33,6 +36,7 @@ mod rpc_call_compatibility;
 
 type ServerTask = JoinHandle<Result<(), Error>>;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn<C: Chain>(
     config: RpcSection,
     datadir: PathBuf,
@@ -40,6 +44,7 @@ pub(crate) async fn spawn<C: Chain>(
     #[cfg(zallet_build = "wallet")] keystore: KeyStore,
     chain: C,
     #[cfg(zallet_build = "wallet")] decryptor: WalletDecryptorHandle,
+    #[cfg(zallet_build = "wallet")] sync_wakeup: WalletSyncWakeup,
     sync_status: SyncStatusReader,
 ) -> Result<ServerTask, Error> {
     // Caller should make sure `bind` only contains a single address (for now).
@@ -58,6 +63,7 @@ pub(crate) async fn spawn<C: Chain>(
         keystore.clone(),
         chain.clone(),
         decryptor,
+        sync_wakeup,
         sync_status.clone(),
         config.async_operation_limit(),
     );

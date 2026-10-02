@@ -13,6 +13,7 @@ use crate::components::{
     chain::Chain,
     database::DbConnection,
     json_rpc::{server::LegacyCode, utils::fetch_account_birthday},
+    sync::{WalletDecryptorHandle, WalletSyncWakeup},
 };
 
 /// Response to a `z_importviewingkey` RPC request.
@@ -80,6 +81,8 @@ fn decode_vkey_and_address(
 pub(crate) async fn call<C: Chain>(
     wallet: &mut DbConnection,
     chain: C,
+    decryptor: &WalletDecryptorHandle,
+    sync_wakeup: &WalletSyncWakeup,
     vkey: &str,
     rescan: Option<&str>,
     start_height: Option<u64>,
@@ -160,6 +163,15 @@ pub(crate) async fn call<C: Chain>(
         }
     }
 
+    // Reload viewing keys so the imported key is scanned without a restart. Run this
+    // unconditionally: a re-import must be able to repair an account the sync engine never
+    // loaded. Don't wait for the reload to be processed; the marker is queued behind any blocks
+    // already in the decryptor, so awaiting it could block this call for a long time during sync.
+    if decryptor.reload_keys().await.is_none() {
+        tracing::warn!("sync engine has shut down; imported key won't be scanned until restart");
+    }
+    sync_wakeup.wake();
+
     Ok(ResultType {
         address_type: "sapling".to_string(),
         address,
@@ -168,7 +180,15 @@ pub(crate) async fn call<C: Chain>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
     use super::*;
+    use crate::{
+        components::{chain::MockChain, database::Database, sync::WalletSync},
+        config::ZalletConfig,
+    };
+    use zcash_client_backend::{data_api::WalletRead, scanning::ScanningKeys};
     use zcash_keys::encoding::encode_extended_full_viewing_key;
     use zcash_protocol::constants;
 
@@ -345,5 +365,108 @@ mod tests {
             &spending_key_encoded,
         );
         assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_viewing_key_reloads_decryptor_and_wakes_history_sync() {
+        crate::i18n::load_languages(&[]);
+
+        let datadir = tempfile::tempdir().expect("creates temporary data directory");
+        let config = ZalletConfig {
+            datadir: Some(datadir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let database = Database::open(&config)
+            .await
+            .expect("creates a wallet database");
+        let mut wallet = database.handle().await.expect("opens the wallet database");
+        let mut sync_database = database.handle().await.expect("opens the sync database");
+        let (decryptor, decryptor_engine) = WalletSync::build_decryptor();
+        let sync_wakeup = WalletSync::build_wakeup();
+        let sync_wakeup_observer = sync_wakeup.clone();
+        let reload_key_counts = Arc::new(Mutex::new(Vec::new()));
+        let reload_key_counts_task = reload_key_counts.clone();
+        let params = config.consensus.network();
+        let decryptor_task = tokio::spawn(async move {
+            decryptor_engine
+                .run(params, move || {
+                    let account_ufvks = sync_database.as_mut().get_unified_full_viewing_keys()?;
+                    let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
+                    reload_key_counts_task
+                        .lock()
+                        .expect("reload observations are not poisoned")
+                        .push(scanning_keys.sapling().len());
+                    Ok::<_, zcash_client_sqlite::error::SqliteClientError>(scanning_keys)
+                })
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if reload_key_counts
+                    .lock()
+                    .expect("reload observations are not poisoned")
+                    .as_slice()
+                    == [0]
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("decryptor loads its initial empty key set");
+        assert!(
+            wallet
+                .get_account_ids()
+                .expect("reads the initial account set")
+                .is_empty()
+        );
+
+        let result = call(
+            wallet.as_mut(),
+            MockChain::reporting(Vec::new(), 0),
+            &decryptor,
+            &sync_wakeup,
+            &encoded_mainnet_extfvk(),
+            Some("yes"),
+            Some(0),
+        )
+        .await;
+        assert!(result.is_ok(), "viewing-key import succeeds: {result:?}");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if reload_key_counts
+                    .lock()
+                    .expect("reload observations are not poisoned")
+                    .len()
+                    >= 2
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("imported viewing key is loaded by the decryptor");
+        let reload_key_counts = reload_key_counts
+            .lock()
+            .expect("reload observations are not poisoned")
+            .clone();
+        assert_eq!(reload_key_counts.first(), Some(&0));
+        assert!(
+            reload_key_counts.get(1).copied().unwrap_or(0) > 0,
+            "the imported viewing key must be present after reload: {reload_key_counts:?}"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), sync_wakeup_observer.notified())
+            .await
+            .expect("imported account wakes history synchronization");
+
+        decryptor_task.abort();
+        decryptor_task
+            .await
+            .expect_err("test stops the decryptor after observing the reload");
     }
 }
