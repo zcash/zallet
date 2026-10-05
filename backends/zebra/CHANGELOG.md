@@ -35,6 +35,13 @@ should be considered breaking changes.
   before, `zebrad` must be built with the `indexer` feature and configured with
   an `indexer_listen_addr`; see the [setup guide](../../book/src/guide/setup.md).
 
+### Fixed
+
+- On regtest, an NU7 activation height configured in `regtest_nuparams` is now
+  passed to the state reader. It was previously dropped, so the wallet treated
+  NU7 as active while the reader interpreted the `zebrad` state as if NU7 never
+  activated.
+
 ## [0.1.0-beta.3] - 2026-08-24
 
 ### Fixed
