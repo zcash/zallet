@@ -80,9 +80,9 @@ tokio-console = ["zallet-core/tokio-console"]
 librocksdb-sys = { git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev = "0442de85de82234643b5ba0a8f66a13ecf31b17d" }
 
 # TEMPORARY: take zewif-zcashd on the NU7 librustzcash cohort
-# (zcash/zewif-zcashd#38) until it is released. Every workspace must carry
+# (zcash/zewif-zcashd#38, merged) until it is released. Every workspace must carry
 # the same revision.
-zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "f4b680a3e4f58b6f5a93037c03fa32f901a3217a" }
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "15df1e1f372538a90e3045a2e313ffeafdfeb0f7" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
