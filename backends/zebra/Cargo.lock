@@ -637,8 +637,9 @@ dependencies = [
 
 [[package]]
 name = "bridgetree"
-version = "0.7.1"
-source = "git+https://github.com/zcash/incrementalmerkletree.git?rev=83218cae0041bccc1968a3cf98dd6b72b774be08#83218cae0041bccc1968a3cf98dd6b72b774be08"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1080abb1c19c25ea06e2bfa0f1c85393dcf5f01a14fc9736d4150f2b1ce3c06"
 dependencies = [
  "incrementalmerkletree",
 ]
@@ -7448,7 +7449,7 @@ dependencies = [
 [[package]]
 name = "zewif-zcashd"
 version = "0.1.0-rc.5"
-source = "git+https://github.com/zcash/zewif-zcashd.git?rev=eece86e4bde8d12fee3a0550e20d5b8ce2bf9394#eece86e4bde8d12fee3a0550e20d5b8ce2bf9394"
+source = "git+https://github.com/zcash/zewif-zcashd.git?rev=f4b680a3e4f58b6f5a93037c03fa32f901a3217a#f4b680a3e4f58b6f5a93037c03fa32f901a3217a"
 dependencies = [
  "aes 0.8.4",
  "bech32 0.12.0",

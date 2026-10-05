@@ -179,8 +179,7 @@ debug = "line-tables-only"
 
 
 [patch.crates-io]
-# TEMPORARY: take zewif-zcashd and bridgetree on the NU7 librustzcash cohort
-# (zcash/zewif-zcashd#38; bridgetree from zcash/incrementalmerkletree#215, merged)
-# until both are released. Every workspace must carry the same revisions.
-zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "eece86e4bde8d12fee3a0550e20d5b8ce2bf9394" }
-bridgetree = { git = "https://github.com/zcash/incrementalmerkletree.git", rev = "83218cae0041bccc1968a3cf98dd6b72b774be08" }
+# TEMPORARY: take zewif-zcashd on the NU7 librustzcash cohort
+# (zcash/zewif-zcashd#38) until it is released. Every workspace must carry
+# the same revision.
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "f4b680a3e4f58b6f5a93037c03fa32f901a3217a" }
