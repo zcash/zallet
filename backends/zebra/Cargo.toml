@@ -34,30 +34,21 @@ base64 = "0.22"
 futures = "0.3"
 hex = "0.4"
 i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
-incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
-orchard = "0.15.0"
-# Not used directly. Re-enables rocksdb's `bindgen-runtime` default, which
-# zebra-state 12 turns off. Without it `librocksdb-sys` builds bindgen without
-# `runtime`, and its build script panics ("a `libclang` shared library is not
-# loaded on this thread") as soon as another bindgen in the graph enables
-# `runtime` (bindgen 0.73 via libzcash_script, in a fresh resolution). The root
-# cause is that bindgen's linking features are not additive
-# (rust-lang/rust-bindgen#2030). zebra-state 14 carries this same workaround
-# (ZcashFoundation/zebra#11443); drop it here once zebra-state moves.
-rocksdb = { version = "0.24", default-features = false, features = ["bindgen-runtime"] }
-sapling = { package = "sapling-crypto", version = "0.7" }
+incrementalmerkletree = { version = "0.9", features = ["legacy-api"] }
+orchard = "0.16"
+sapling = { package = "sapling-crypto", version = "0.9" }
 serde = { version = "1", features = ["serde_derive"] }
 jsonrpsee = { version = "0.24", features = ["async-client"] }
 jsonrpsee-http-client = { version = "0.24", default-features = false }
 tokio = { version = "1", features = ["net", "rt-multi-thread"] }
 tower = { version = "0.4", features = ["timeout"] }
-transparent = { package = "zcash_transparent", version = "0.10.0" }
-zcash_client_backend = "=0.24.0"
-zcash_primitives = "0.30.0"
-zcash_protocol = "0.10.0"
-zebra-chain = "11"
-zebra-rpc = "15"
-zebra-state = { version = "12", features = ["indexer"] }
+transparent = { package = "zcash_transparent", version = "=0.11.0-pre.0" }
+zcash_client_backend = "=0.25.0-pre.0"
+zcash_primitives = "=0.31.0-pre.0"
+zcash_protocol = "=0.11.0-pre.0"
+zebra-chain = "14"
+zebra-rpc = "18"
+zebra-state = { version = "15", features = ["indexer"] }
 
 [dev-dependencies]
 abscissa_core = { version = "0.9", features = ["testing"] }
@@ -88,27 +79,12 @@ tokio-console = ["zallet-core/tokio-console"]
 # after rocksdb 0.24.0 and can return to crates.io with the next release.
 librocksdb-sys = { git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev = "0442de85de82234643b5ba0a8f66a13ecf31b17d" }
 
-# TEMPORARY: pin the wallet-critical librustzcash crates to a `main` rev carrying
-# the fix for reading back a stored unmined transaction with a zero expiry height
-# (zcash/librustzcash#2975, fixed by zcash/librustzcash#2983), which
-# `zallet migrate-zcashd-wallet` needs in order to re-read the transactions it
-# imports from a zcashd wallet before any chain scan. The full in-repo dependency
-# closure of the two client crates is patched to the same rev so the whole cohort
-# resolves from a single source. Repoint at crates.io once the fix lands in a
-# release.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_pool_migration = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+# TEMPORARY: take zewif-zcashd and bridgetree on the NU7 librustzcash cohort
+# (zcash/zewif-zcashd#38; bridgetree from zcash/incrementalmerkletree#215, merged)
+# until both are released. Every workspace must carry the same revisions.
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "eece86e4bde8d12fee3a0550e20d5b8ce2bf9394" }
+bridgetree = { git = "https://github.com/zcash/incrementalmerkletree.git", rev = "83218cae0041bccc1968a3cf98dd6b72b774be08" }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(tokio_unstable)',

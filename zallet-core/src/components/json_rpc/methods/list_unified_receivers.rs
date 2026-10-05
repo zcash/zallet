@@ -60,7 +60,8 @@ pub(crate) fn call(wallet: &DbConnection, unified_address: &str) -> Response {
     let sapling = address.sapling().map(|s| s.encode(wallet.params()));
 
     let orchard = address.orchard().and_then(|orch| {
-        UnifiedAddress::from_receivers(Some(*orch), None, None).map(|ua| ua.encode(wallet.params()))
+        UnifiedAddress::from_receivers(Some(*orch), None, None, None, None)
+            .map(|ua| ua.encode(wallet.params()))
     });
 
     Ok(ListUnifiedReceivers {

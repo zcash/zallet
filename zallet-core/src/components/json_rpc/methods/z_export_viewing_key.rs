@@ -167,7 +167,8 @@ mod tests {
 
     /// Constructs a UFVK (with only a Sapling component) from seed `[0; 32]`.
     fn test_ufvk() -> UnifiedFullViewingKey {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
@@ -177,7 +178,8 @@ mod tests {
     /// Derives a Sapling extended spending key from seed [0; 32] and returns
     /// the encoded EFVK and the default payment address.
     fn test_efvk_and_address(hrp_fvk: &str, hrp_addr: &str) -> (String, String) {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let encoded_fvk = encode_extended_full_viewing_key(hrp_fvk, &extfvk);
@@ -247,11 +249,13 @@ mod tests {
     fn different_seeds_produce_different_efvks() {
         let hrp = constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
 
-        let extsk_a = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk_a = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let efvk_a = encode_extended_full_viewing_key(hrp, &extsk_a.to_extended_full_viewing_key());
 
-        let extsk_b = sapling::zip32::ExtendedSpendingKey::master(&[1; 32]);
+        let extsk_b = sapling::zip32::ExtendedSpendingKey::master(&[1; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let efvk_b = encode_extended_full_viewing_key(hrp, &extsk_b.to_extended_full_viewing_key());
 
@@ -259,10 +263,16 @@ mod tests {
     }
 
     #[test]
-    fn ufvk_encodes_with_uview_hrp() {
+    fn ufvk_encodes_with_revision_2_hrp() {
         let ufvk = test_ufvk();
-        assert!(ufvk.encode(&MAIN_NETWORK).starts_with("uview1"));
-        assert!(ufvk.encode(&TEST_NETWORK).starts_with("uviewtest1"));
+        assert!(
+            ufvk.encode(&MAIN_NETWORK)
+                .starts_with(&format!("{}1", constants::mainnet::HRP_UNIFIED_FVK_R2))
+        );
+        assert!(
+            ufvk.encode(&TEST_NETWORK)
+                .starts_with(&format!("{}1", constants::testnet::HRP_UNIFIED_FVK_R2))
+        );
     }
 
     #[test]
@@ -274,10 +284,16 @@ mod tests {
     }
 
     #[test]
-    fn uivk_encodes_with_uivk_hrp() {
+    fn uivk_encodes_with_revision_2_hrp() {
         let uivk = test_ufvk().to_unified_incoming_viewing_key();
-        assert!(uivk.encode(&MAIN_NETWORK).starts_with("uivk1"));
-        assert!(uivk.encode(&TEST_NETWORK).starts_with("uivktest1"));
+        assert!(
+            uivk.encode(&MAIN_NETWORK)
+                .starts_with(&format!("{}1", constants::mainnet::HRP_UNIFIED_IVK_R2))
+        );
+        assert!(
+            uivk.encode(&TEST_NETWORK)
+                .starts_with(&format!("{}1", constants::testnet::HRP_UNIFIED_IVK_R2))
+        );
     }
 
     #[test]

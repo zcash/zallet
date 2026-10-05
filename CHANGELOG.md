@@ -26,6 +26,30 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- NU7 support in ordinary builds. Zallet follows the NU7 activation on
+  Testnet (height 4,465,026), and `regtest_nuparams` accepts the NU7 consensus
+  branch ID without building with `--cfg zcash_unstable="nu7"`. NU7 has no
+  Mainnet activation height yet.
+
+### Changed
+
+- Unified addresses in JSON-RPC responses are now ZIP 316 Revision 2
+  encodings: shielded-only `zu…` addresses (`zutest…` on Testnet) in place of
+  `u1…`. `z_getaddressforaccount` and `listaddresses` return the
+  transparent-including `tu…` form whenever the address has a transparent
+  receiver, so the address always contains every receiver listed in its
+  `receiver_types`. Revision 0 addresses are still accepted as input.
+- `z_exportviewingkey` returns unified viewing keys as ZIP 316 Revision 2
+  encodings: `uvf…` for full viewing keys and `uvi…` for incoming viewing keys
+  (`uvftest…` and `uvitest…` on Testnet), in place of `uview…` and `uivk…`.
+  Software that only understands Revision 0 cannot parse them.
+
+### Deprecated
+
+- `indexer.db_path`. It has no effect, and Zallet logs a warning when it is set.
+
 ### Removed
 
 - The `zaino` chain backend and its `zallet-zaino` binary. The release
@@ -38,9 +62,6 @@ be considered breaking changes.
 - No chain backend currently runs on macOS or Windows, because the `zebra`
   backend is Linux-only.
 
-### Deprecated
-
-- `indexer.db_path`. It has no effect, and Zallet logs a warning when it is set.
 
 ### Fixed
 

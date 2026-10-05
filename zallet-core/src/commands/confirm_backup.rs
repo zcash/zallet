@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, Write};
 
 use abscissa_core::Runnable;
-use rand::{rngs::OsRng, seq::index};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, seq::index};
 use secrecy::ExposeSecret;
 
 use crate::{
@@ -76,7 +76,7 @@ impl AsyncRunnable for ConfirmBackupCmd {
 fn quiz(words: &[&str]) -> Result<(), Error> {
     let stdin = io::stdin();
 
-    for position in choose_quiz_positions(words.len(), &mut OsRng) {
+    for position in choose_quiz_positions(words.len(), &mut UnwrapErr(SysRng)) {
         print!(
             "{}",
             fl!(
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn quiz_positions_are_distinct_sorted_and_in_range() {
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(SysRng);
 
         for _ in 0..100 {
             let positions = choose_quiz_positions(GENERATED_PHRASE_WORDS, &mut rng);
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn quiz_covers_whole_phrase_when_shorter_than_quiz_length() {
         let short = QUIZ_WORDS - 1;
-        let positions = choose_quiz_positions(short, &mut OsRng);
+        let positions = choose_quiz_positions(short, &mut UnwrapErr(SysRng));
 
         assert_eq!(
             positions,

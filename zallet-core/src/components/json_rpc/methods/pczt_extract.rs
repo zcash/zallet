@@ -20,10 +20,11 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee::types::ErrorObjectOwned;
 use pczt::roles::spend_finalizer::SpendFinalizer;
 use pczt::roles::tx_extractor::TransactionExtractor;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use schemars::JsonSchema;
 use serde::Serialize;
 use zcash_client_backend::data_api::{WalletRead, wallet::extract_and_store_transaction_from_pczt};
-use zcash_client_sqlite::ReceivedNoteId;
+use zcash_client_sqlite::{ReceivedNoteId, util::SystemClock};
 use zcash_primitives::transaction::Transaction;
 
 use super::pczt_common::{
@@ -111,6 +112,8 @@ pub(crate) async fn call(mut wallet: DbHandle, pczt_base64: &str) -> Response {
                 // wallet database, and returns its ID.
                 let txid = extract_and_store_transaction_from_pczt::<_, ReceivedNoteId>(
                     wallet.as_mut(),
+                    &SystemClock,
+                    &mut UnwrapErr(SysRng),
                     pczt,
                     Some((spend_vk, output_vk)),
                     orchard_vk,
@@ -141,7 +144,9 @@ pub(crate) async fn call(mut wallet: DbHandle, pczt_base64: &str) -> Response {
                 if let Some(vk) = orchard_vk {
                     extractor = extractor.with_orchard(vk);
                 }
-                let tx = extractor.extract().map_err(PcztError::Extract)?;
+                let tx = extractor
+                    .extract(UnwrapErr(SysRng))
+                    .map_err(PcztError::Extract)?;
 
                 Ok((serialize_transaction(&tx)?, tx.txid().to_string(), false))
             }

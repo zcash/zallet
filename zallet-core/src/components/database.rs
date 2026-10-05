@@ -19,7 +19,7 @@ use crate::{
 use super::keystore;
 
 mod connection;
-pub(crate) use connection::DbConnection;
+pub(crate) use connection::{DbConnection, WalletRng};
 
 mod ext;
 

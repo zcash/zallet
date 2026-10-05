@@ -75,10 +75,10 @@ serde = { version = "1", features = ["serde_derive"] }
 semver = "1"
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
 toml = "0.8"
-zcash_address = "0.13.0"
+zcash_address = "=0.14.0-pre.0"
 
 # Randomness
-rand = "0.8"
+rand = "0.10"
 
 # Secret management
 secrecy = { version = "0.8", features = ["serde"] }
@@ -117,11 +117,11 @@ tracing-log = "0.2"
 tracing-subscriber = "0.3"
 
 # Zcash consensus
-zcash_protocol = "0.10.0"
+zcash_protocol = "=0.11.0-pre.0"
 
 # Zcash payment protocols
-orchard = "0.15.0"
-pczt = { version = "0.9.1", features = [
+orchard = "0.16"
+pczt = { version = "=0.10.0-pre.0", features = [
     "orchard",
     "sapling",
     "transparent",
@@ -130,20 +130,20 @@ pczt = { version = "0.9.1", features = [
     "spend-finalizer",
     "tx-extractor",
 ] }
-sapling = { package = "sapling-crypto", version = "0.7" }
-transparent = { package = "zcash_transparent", version = "0.10.0" }
-zcash_encoding = "0.4"
-zcash_keys = { version = "0.16.0", features = [
+sapling = { package = "sapling-crypto", version = "0.9" }
+transparent = { package = "zcash_transparent", version = "=0.11.0-pre.0" }
+zcash_encoding = "0.5"
+zcash_keys = { version = "=0.17.0-pre.0", features = [
     "transparent-inputs",
     "sapling",
     "orchard",
     "transparent-key-encoding",
 ] }
-zcash_primitives = "0.30.0"
-zcash_proofs = "0.30.0"
-zcash_script = "0.4.3"
+zcash_primitives = "=0.31.0-pre.0"
+zcash_proofs = "=0.31.0-pre.0"
+zcash_script = "0.6"
 zcash_spec = "0.2"
-secp256k1 = { version = "0.29", features = ["global-context", "recovery"] }
+secp256k1 = { version = "0.33", features = ["global-context", "recovery"] }
 
 # Zcash chain state
 
@@ -152,17 +152,17 @@ secp256k1 = { version = "0.29", features = ["global-context", "recovery"] }
 deadpool = "0.12"
 deadpool-sqlite = "0.12"
 deadpool-sync = "0.1"
-incrementalmerkletree = "0.8.2"
+incrementalmerkletree = "0.9"
 rusqlite = { version = "0.37", features = ["time"] }
 schemerz = "0.2"
 schemerz-rusqlite = "0.370.0"
-shardtree = "0.7"
+shardtree = "0.8"
 time = "0.3"
 uuid = "1"
-zcash_client_backend = "=0.24.0"
-zcash_client_sqlite = "=0.22.0"
-zcash_note_encryption = "0.4"
-zip32 = "0.2"
+zcash_client_backend = "=0.25.0-pre.0"
+zcash_client_sqlite = "=0.23.0-pre.0"
+zcash_note_encryption = "0.5.1"
+zip32 = "0.3"
 bip32 = "0.2"
 
 # Zcashd wallet migration
@@ -177,25 +177,10 @@ tonic = "0.14"
 [profile.release]
 debug = "line-tables-only"
 
+
 [patch.crates-io]
-# TEMPORARY: pin the wallet-critical librustzcash crates to a `main` rev carrying
-# the fix for reading back a stored unmined transaction with a zero expiry height
-# (zcash/librustzcash#2975, fixed by zcash/librustzcash#2983), which
-# `zallet migrate-zcashd-wallet` needs in order to re-read the transactions it
-# imports from a zcashd wallet before any chain scan. The full in-repo dependency
-# closure of the two client crates is patched to the same rev so the whole cohort
-# resolves from a single source. Repoint at crates.io once the fix lands in a
-# release.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_pool_migration = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
-zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "1f6bb2072e7fcb142b0d90ff7b267a8699a84818" }
+# TEMPORARY: take zewif-zcashd and bridgetree on the NU7 librustzcash cohort
+# (zcash/zewif-zcashd#38; bridgetree from zcash/incrementalmerkletree#215, merged)
+# until both are released. Every workspace must carry the same revisions.
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "eece86e4bde8d12fee3a0550e20d5b8ce2bf9394" }
+bridgetree = { git = "https://github.com/zcash/incrementalmerkletree.git", rev = "83218cae0041bccc1968a3cf98dd6b72b774be08" }

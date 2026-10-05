@@ -181,7 +181,9 @@ pub(crate) fn call(wallet: &DbConnection) -> Response {
                 }
                 Address::Sapling(_) => sapling_addresses.push(addr.encode(wallet.params())),
                 Address::Unified(addr) => {
-                    let address = addr.encode(wallet.params());
+                    // Keep every receiver reported in `receiver_types`: the default encoding
+                    // of a ZIP 316 Revision 2 address strips the transparent receiver.
+                    let address = addr.encode_receiver_preserving(wallet.params());
                     unified_addresses.push(UnifiedAddress {
                         diversifier_index: match address_info.source() {
                             zcash_client_backend::data_api::AddressSource::Derived {
@@ -201,13 +203,11 @@ pub(crate) fn call(wallet: &DbConnection) -> Response {
                             .receiver_types()
                             .into_iter()
                             .map(|r| match r {
-                                unified::Typecode::P2pkh => "p2pkh".into(),
-                                unified::Typecode::P2sh => "p2sh".into(),
-                                unified::Typecode::Sapling => "sapling".into(),
-                                unified::Typecode::Orchard => "orchard".into(),
-                                unified::Typecode::Unknown(typecode) => {
-                                    format!("unknown({typecode})")
-                                }
+                                unified::Typecode::P2PKH => "p2pkh".into(),
+                                unified::Typecode::P2SH => "p2sh".into(),
+                                unified::Typecode::SAPLING => "sapling".into(),
+                                unified::Typecode::ORCHARD => "orchard".into(),
+                                other => format!("unknown({})", u32::from(other)),
                             })
                             .collect(),
                         address,

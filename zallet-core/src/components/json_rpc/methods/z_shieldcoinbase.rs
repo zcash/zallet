@@ -5,6 +5,7 @@ use std::future::Future;
 
 use documented::Documented;
 use jsonrpsee::core::{JsonValue, RpcResult};
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use schemars::JsonSchema;
 use secrecy::ExposeSecret;
 use serde::Serialize;
@@ -24,7 +25,7 @@ use zcash_client_backend::{
     proposal::Proposal,
     wallet::OvkPolicy,
 };
-use zcash_client_sqlite::AccountUuid;
+use zcash_client_sqlite::{AccountUuid, util::SystemClock};
 use zcash_keys::{
     address::Address,
     keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
@@ -551,6 +552,8 @@ async fn run<C: Chain>(
         create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             wallet.as_mut(),
             &params,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             &prover,
             &prover,
             &spending_keys,

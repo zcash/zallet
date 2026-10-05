@@ -1,6 +1,5 @@
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
-use rand::rngs::OsRng;
 use schemars::JsonSchema;
 use serde::Serialize;
 use zcash_client_backend::data_api::{
@@ -11,7 +10,7 @@ use zcash_client_sqlite::{AccountUuid, WalletDb, error::SqliteClientError, util:
 use crate::{
     components::{
         chain::{Chain, ChainView},
-        database::DbConnection,
+        database::{DbConnection, WalletRng},
         json_rpc::server::LegacyCode,
         sync::{SyncStatus, SyncStatusReader},
     },
@@ -130,7 +129,7 @@ pub(crate) async fn call<C: Chain>(
 
 /// Fetches status data from the wallet.
 fn status_data(
-    wallet: WalletDb<&rusqlite::Connection, Network, SystemClock, OsRng>,
+    wallet: WalletDb<&rusqlite::Connection, Network, SystemClock, WalletRng>,
 ) -> Result<Option<WalletData>, SqliteClientError> {
     let tip_height = wallet.chain_height()?;
     let tip_metadata = if let Some(block_height) = tip_height {

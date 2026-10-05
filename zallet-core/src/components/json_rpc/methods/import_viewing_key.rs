@@ -174,7 +174,8 @@ mod tests {
 
     /// Derives a test extended full viewing key from seed [0; 32] and encodes it.
     fn encoded_mainnet_extfvk() -> String {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         encode_extended_full_viewing_key(
@@ -185,7 +186,8 @@ mod tests {
 
     /// Derives a test extended full viewing key from seed [0; 32] and encodes it for testnet.
     fn encoded_testnet_extfvk() -> String {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         encode_extended_full_viewing_key(
@@ -333,7 +335,8 @@ mod tests {
     fn decode_spending_key_rejected_as_viewing_key() {
         // A spending key string should be rejected when decoded as a viewing key,
         // since the HRP will not match.
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         let spending_key_encoded = zcash_keys::encoding::encode_extended_spending_key(
             constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
             &extsk,

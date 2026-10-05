@@ -430,9 +430,15 @@ pub(crate) fn call(
                 account_uuid: account_id.expose_uuid().to_string(),
                 // TODO: Ensure we generate the same kind of shielded address as `zcashd`.
                 address: (!wallet_internal).then(|| {
-                    UnifiedAddress::from_receivers(Some(note.note().recipient()), None, None)
-                        .expect("valid")
-                        .encode(wallet.params())
+                    UnifiedAddress::from_receivers(
+                        Some(note.note().recipient()),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .expect("valid")
+                    .encode(wallet.params())
                 }),
                 value: value_from_zatoshis(note.value()),
                 value_zat: u64::from(note.value()),
@@ -482,9 +488,15 @@ pub(crate) fn call(
                 account_uuid: account_id.expose_uuid().to_string(),
                 // TODO: Ensure we generate the same kind of shielded address as `zcashd`.
                 address: (!wallet_internal).then(|| {
-                    UnifiedAddress::from_receivers(Some(note.note().recipient()), None, None)
-                        .expect("valid")
-                        .encode(wallet.params())
+                    UnifiedAddress::from_receivers(
+                        Some(note.note().recipient()),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .expect("valid")
+                    .encode(wallet.params())
                 }),
                 value: value_from_zatoshis(note.value()),
                 value_zat: u64::from(note.value()),

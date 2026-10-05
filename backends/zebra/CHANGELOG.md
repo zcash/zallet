@@ -20,6 +20,21 @@ should be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- Now built against the Zebra 7 crates — `zebra-state` 15 (with the `indexer`
+  feature), `zebra-rpc` 18 and `zebra-chain` 14 — up from `zebra-state` 12 and
+  `zebra-rpc` 15, matching the Zebra cohort that builds against
+  `zcash_primitives` 0.31.0-pre.0.
+
+  This backend now requires the on-disk state format **v29.0.0**, so the
+  `zebrad` writing the cache must be Zebra 7.0.0 or later. Upgrade `zebrad` and
+  `zallet-zebra` together: `zebrad` 7 moves an existing v28 cache to v29
+  automatically on first start, without a resync, and this backend cannot read
+  a v28 cache. Keep a backup of the v28 cache if you may need to roll back. As
+  before, `zebrad` must be built with the `indexer` feature and configured with
+  an `indexer_listen_addr`; see the [setup guide](../../book/src/guide/setup.md).
+
 ## [0.1.0-beta.3] - 2026-08-24
 
 ### Fixed
