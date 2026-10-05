@@ -49,13 +49,11 @@ bind = ["127.0.0.1:SOMEPORT"]
 > HTTP. The HTTP Basic authentication it uses does not encrypt anything: an
 > observer on the network path can read the RPC credentials, as well as any
 > wallet passphrase sent to `walletpassphrase`, and replay them — including
-> against fund-moving methods such as `z_sendmany`. Always keep `rpc.bind` on a
-> loopback address (as in the example above). For remote access, use an
-> authenticated, encrypted tunnel to the wallet host, such as SSH port
-> forwarding (`ssh -L 28232:127.0.0.1:28232 wallet-host`) or a VPN. Zallet
-> refuses to start with a non-loopback `rpc.bind` unless you explicitly opt in
-> with `rpc.allow_insecure_remote_bind = true`, which is unsafe on any network
-> path you do not fully trust.
+> against fund-moving methods such as `z_sendmany`. Zallet therefore refuses to
+> start with a non-loopback `rpc.bind`; keep it on a loopback address (as in
+> the example above). For remote access, use an authenticated, encrypted tunnel
+> to the wallet host, such as SSH port forwarding
+> (`ssh -L 28232:127.0.0.1:28232 wallet-host`) or a VPN.
 
 In particular, you currently need to configure the `[indexer]` section to point
 at your full node's JSON-RPC endpoint. The relevant config options in that

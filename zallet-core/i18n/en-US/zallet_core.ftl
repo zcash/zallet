@@ -34,7 +34,6 @@
 -zallet_toml = zallet.toml
 
 -cfg-keystore-require-backup = keystore.require_backup
--cfg-rpc-allow-insecure-remote-bind = rpc.allow_insecure_remote_bind
 -cfg-rpc-auth = rpc.auth
 -cfg-rpc-auth-password = rpc.auth.password
 -cfg-rpc-auth-pwhash = rpc.auth.pwhash
@@ -208,14 +207,7 @@ err-init-rpc-bind-not-loopback =
     interface is served over plaintext HTTP, so RPC credentials and wallet
     passphrases would be readable by anyone on the network path. Bind to a loopback
     address and use an authenticated, encrypted tunnel (such as SSH port forwarding
-    or a VPN) for remote access, or set '{-cfg-rpc-allow-insecure-remote-bind} = true'
-    to accept the risk.
-warn-init-rpc-bind-insecure-remote =
-    SECURITY WARNING: serving plaintext JSON-RPC on non-loopback address {$addr}
-    because '{-cfg-rpc-allow-insecure-remote-bind}' is enabled. RPC credentials and
-    wallet passphrases sent to this endpoint can be read and replayed by anyone on
-    the network path. Prefer a loopback bind plus an authenticated, encrypted tunnel
-    (such as SSH port forwarding or a VPN).
+    or a VPN) for remote access.
 err-config-file-not-found = Configuration file at {$path} does not exist.
 err-config-output-exists =
     Refusing to overwrite the existing config file at {$path}. To replace it, name

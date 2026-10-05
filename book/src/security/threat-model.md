@@ -55,9 +55,15 @@ the wallet is running. Zallet defends the channel itself:
   provisioned with `zallet add-rpc-user`. The cookie file grants full wallet
   access and must be protected by datadir permissions. See
   [Operating Zallet](../operations/README.md#securing-the-json-rpc-interface).
-- **Loopback binding by default.** The RPC server is disabled unless the config
-  sets `rpc.bind`. Non-loopback binding is discouraged; see the operations
-  guide for the secure remote-access pattern (SSH tunnel or VPN).
+- **Loopback binding, enforced.** The RPC server is disabled unless the config
+  sets `rpc.bind`, and Zallet refuses to start if `rpc.bind` is set to a
+  non-loopback address: the JSON-RPC interface is served over plaintext HTTP,
+  so credentials and request bodies must never cross a network path. Remote
+  access requires an authenticated, encrypted tunnel to the wallet host (SSH
+  port forwarding or a VPN); see the operations guide. Plaintext on loopback
+  is within the threat model: loopback traffic does not cross a network path,
+  and an attacker who can observe it already has local access to the wallet
+  host, which this threat model places out of scope (see below).
 
 ### Supply chain integrity
 

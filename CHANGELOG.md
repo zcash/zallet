@@ -25,6 +25,17 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Removed
+
+- The `rpc.allow_insecure_remote_bind` config option. `zallet start` now always
+  refuses to open the JSON-RPC endpoint on a non-loopback `rpc.bind` address:
+  the RPC interface is served over plaintext HTTP, so serving it beyond
+  loopback exposes RPC credentials and wallet passphrases to the network path,
+  which no opt-in warning can make safe. A config file that still sets the
+  option fails to parse; remove it, keep `rpc.bind` on a loopback address, and
+  use an authenticated, encrypted tunnel (such as SSH port forwarding or a VPN)
+  for remote access.
+
 ### Fixed
 
 - `migrate-zcashd-wallet` now includes un-mined transactions when estimating

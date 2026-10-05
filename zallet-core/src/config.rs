@@ -789,29 +789,12 @@ pub struct RpcSection {
     /// The JSON-RPC interface is served over plaintext HTTP: neither the HTTP Basic
     /// authentication credentials nor request bodies (which can contain wallet
     /// passphrases and spending keys) are encrypted in transit. Zallet therefore
-    /// refuses to start if this is set to a non-loopback address, unless
-    /// `allow_insecure_remote_bind` is also set.
+    /// refuses to start if this is set to a non-loopback address.
     ///
     /// For remote access, keep this bound to a loopback address and use an
     /// authenticated, encrypted tunnel such as SSH port forwarding or a VPN.
-    ///
-    /// If you bind Zallet's RPC port to a public IP address, anyone on the internet can
-    /// view your transactions and spend your funds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bind: Vec<SocketAddr>,
-
-    /// Whether to allow `bind` to contain non-loopback addresses, exposing the
-    /// JSON-RPC interface to the network.
-    ///
-    /// # Security
-    ///
-    /// This is unsafe: the JSON-RPC interface is served over plaintext HTTP, so
-    /// anyone on the network path can read the RPC credentials and any wallet
-    /// passphrase sent to `walletpassphrase`, and can replay them. Only enable this
-    /// if the network path is fully trusted or separately protected, and prefer a
-    /// loopback `bind` plus an authenticated, encrypted tunnel (SSH or VPN)
-    /// instead. Zallet logs a prominent warning at startup while this is enabled.
-    pub allow_insecure_remote_bind: Option<bool>,
 
     /// Timeout (in seconds) during HTTP requests.
     pub timeout: Option<u64>,
@@ -827,14 +810,6 @@ impl RpcSection {
     /// Default is 1000.
     pub fn async_operation_limit(&self) -> usize {
         self.async_operation_limit.unwrap_or(1000)
-    }
-
-    /// Whether to allow `bind` to contain non-loopback addresses, exposing the
-    /// JSON-RPC interface to the network.
-    ///
-    /// Default is `false`.
-    pub fn allow_insecure_remote_bind(&self) -> bool {
-        self.allow_insecure_remote_bind.unwrap_or(false)
     }
 
     /// Timeout during HTTP requests.
@@ -978,10 +953,6 @@ impl ZalletConfig {
                 conf.note_management.target_note_count(),
             ),
             rpc("async_operation_limit", conf.rpc.async_operation_limit()),
-            rpc(
-                "allow_insecure_remote_bind",
-                conf.rpc.allow_insecure_remote_bind(),
-            ),
             rpc("bind", &conf.rpc.bind),
             rpc("timeout", conf.rpc.timeout().as_secs()),
             sync("recover_batch_size", conf.sync.recover_batch_size()),

@@ -91,10 +91,10 @@ changes may require recreating the wallet.
 
 - The RPC server is **disabled by default**; it only listens if the config
   sets `rpc.bind`.
-- **Never bind to a public IP address.** Anyone who can reach the RPC port can
-  view your transactions and spend your funds. Bind to `127.0.0.1` (or another
-  loopback/internal address) and use network-level controls if remote access
-  is required.
+- **Only loopback addresses can be bound.** The RPC interface is served over
+  plaintext HTTP, so Zallet refuses to start if `rpc.bind` is set to a
+  non-loopback address. For remote access, use an authenticated, encrypted
+  tunnel to the wallet host, such as SSH port forwarding or a VPN.
 - Authentication is required on every request: Zallet writes a random cookie
   credential to `{datadir}/.cookie` at startup (used automatically by
   [`zallet rpc`](../cli/rpc.md)), and password users can be provisioned with
