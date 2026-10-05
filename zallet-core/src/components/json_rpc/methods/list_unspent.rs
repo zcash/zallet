@@ -33,6 +33,7 @@ use crate::components::{
     database::DbConnection,
     json_rpc::{
         server::LegacyCode,
+        unified_encoding::encode_unified_address,
         utils::{JsonZec, parse_as_of_height, parse_minconf, value_from_zatoshis},
     },
 };
@@ -437,8 +438,8 @@ pub(crate) fn call(
                         None,
                         None,
                     )
+                    .map(|ua| encode_unified_address(&ua, wallet.params()))
                     .expect("valid")
-                    .encode(wallet.params())
                 }),
                 value: value_from_zatoshis(note.value()),
                 value_zat: u64::from(note.value()),
@@ -495,8 +496,8 @@ pub(crate) fn call(
                         None,
                         None,
                     )
+                    .map(|ua| encode_unified_address(&ua, wallet.params()))
                     .expect("valid")
-                    .encode(wallet.params())
                 }),
                 value: value_from_zatoshis(note.value()),
                 value_zat: u64::from(note.value()),

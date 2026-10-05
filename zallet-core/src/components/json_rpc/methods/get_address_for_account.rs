@@ -18,6 +18,7 @@ use crate::components::{
     database::DbConnection,
     json_rpc::{
         server::LegacyCode,
+        unified_encoding::encode_unified_address,
         utils::{parse_account_parameter, parse_diversifier_index},
     },
 };
@@ -185,9 +186,7 @@ pub(crate) async fn call(
         account,
         diversifier_index: diversifier_index.into(),
         receiver_types,
-        // Keep every receiver reported in `receiver_types`: the default encoding of a
-        // ZIP 316 Revision 2 address strips the transparent receiver.
-        address: address.encode_receiver_preserving(wallet.params()),
+        address: encode_unified_address(&address, wallet.params()),
     })
 }
 

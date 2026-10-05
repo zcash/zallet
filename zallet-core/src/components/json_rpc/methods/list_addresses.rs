@@ -14,7 +14,10 @@ use zcash_client_backend::data_api::{
 use zcash_keys::address::Address;
 use zcash_protocol::consensus::NetworkConstants;
 
-use crate::components::{database::DbConnection, json_rpc::server::LegacyCode};
+use crate::components::{
+    database::DbConnection,
+    json_rpc::{server::LegacyCode, unified_encoding::encode_unified_address},
+};
 
 /// Response to a `listaddresses` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -181,9 +184,7 @@ pub(crate) fn call(wallet: &DbConnection) -> Response {
                 }
                 Address::Sapling(_) => sapling_addresses.push(addr.encode(wallet.params())),
                 Address::Unified(addr) => {
-                    // Keep every receiver reported in `receiver_types`: the default encoding
-                    // of a ZIP 316 Revision 2 address strips the transparent receiver.
-                    let address = addr.encode_receiver_preserving(wallet.params());
+                    let address = encode_unified_address(addr, wallet.params());
                     unified_addresses.push(UnifiedAddress {
                         diversifier_index: match address_info.source() {
                             zcash_client_backend::data_api::AddressSource::Derived {

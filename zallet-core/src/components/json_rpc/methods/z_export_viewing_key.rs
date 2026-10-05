@@ -12,7 +12,10 @@ use zcash_protocol::consensus::NetworkConstants;
 use crate::components::{
     database::DbConnection,
     json_rpc::{
-        payments::get_account_for_address, server::LegacyCode, utils::ensure_wallet_is_unlocked,
+        payments::get_account_for_address,
+        server::LegacyCode,
+        unified_encoding::{encode_ufvk, encode_uivk},
+        utils::ensure_wallet_is_unlocked,
     },
     keystore::KeyStore,
 };
@@ -59,10 +62,9 @@ pub(crate) async fn call(
             )?;
 
             Ok(ResultType(if export_ivk {
-                ufvk.to_unified_incoming_viewing_key()
-                    .encode(wallet.params())
+                encode_uivk(&ufvk.to_unified_incoming_viewing_key(), wallet.params())
             } else {
-                ufvk.encode(wallet.params())
+                encode_ufvk(ufvk, wallet.params())
             }))
         }
         Address::Sapling(sapling_addr) => {
@@ -89,10 +91,10 @@ pub(crate) async fn call(
             // The UIVK is derivable from the UFVK alone, so this also works for
             // imported view-only accounts.
             if export_ivk {
-                return Ok(ResultType(
-                    ufvk.to_unified_incoming_viewing_key()
-                        .encode(wallet.params()),
-                ));
+                return Ok(ResultType(encode_uivk(
+                    &ufvk.to_unified_incoming_viewing_key(),
+                    wallet.params(),
+                )));
             }
 
             let account = wallet
@@ -153,6 +155,7 @@ pub(crate) async fn call(
 
 #[cfg(test)]
 mod tests {
+    use crate::components::json_rpc::unified_encoding::{encode_ufvk, encode_uivk};
     use zcash_keys::{
         encoding::{
             decode_extended_full_viewing_key, encode_extended_full_viewing_key,
@@ -263,15 +266,15 @@ mod tests {
     }
 
     #[test]
-    fn ufvk_encodes_with_revision_2_hrp() {
+    fn ufvk_encodes_with_uview_hrp() {
         let ufvk = test_ufvk();
         assert!(
-            ufvk.encode(&MAIN_NETWORK)
-                .starts_with(&format!("{}1", constants::mainnet::HRP_UNIFIED_FVK_R2))
+            encode_ufvk(&ufvk, &MAIN_NETWORK)
+                .starts_with(&format!("{}1", constants::mainnet::HRP_UNIFIED_FVK))
         );
         assert!(
-            ufvk.encode(&TEST_NETWORK)
-                .starts_with(&format!("{}1", constants::testnet::HRP_UNIFIED_FVK_R2))
+            encode_ufvk(&ufvk, &TEST_NETWORK)
+                .starts_with(&format!("{}1", constants::testnet::HRP_UNIFIED_FVK))
         );
     }
 
@@ -284,15 +287,15 @@ mod tests {
     }
 
     #[test]
-    fn uivk_encodes_with_revision_2_hrp() {
+    fn uivk_encodes_with_uivk_hrp() {
         let uivk = test_ufvk().to_unified_incoming_viewing_key();
         assert!(
-            uivk.encode(&MAIN_NETWORK)
-                .starts_with(&format!("{}1", constants::mainnet::HRP_UNIFIED_IVK_R2))
+            encode_uivk(&uivk, &MAIN_NETWORK)
+                .starts_with(&format!("{}1", constants::mainnet::HRP_UNIFIED_IVK))
         );
         assert!(
-            uivk.encode(&TEST_NETWORK)
-                .starts_with(&format!("{}1", constants::testnet::HRP_UNIFIED_IVK_R2))
+            encode_uivk(&uivk, &TEST_NETWORK)
+                .starts_with(&format!("{}1", constants::testnet::HRP_UNIFIED_IVK))
         );
     }
 

@@ -35,16 +35,12 @@ be considered breaking changes.
 
 ### Changed
 
-- Unified addresses in JSON-RPC responses are now ZIP 316 Revision 2
-  encodings: shielded-only `zu…` addresses (`zutest…` on Testnet) in place of
-  `u1…`. `z_getaddressforaccount` and `listaddresses` return the
-  transparent-including `tu…` form whenever the address has a transparent
-  receiver, so the address always contains every receiver listed in its
-  `receiver_types`. Revision 0 addresses are still accepted as input.
-- `z_exportviewingkey` returns unified viewing keys as ZIP 316 Revision 2
-  encodings: `uvf…` for full viewing keys and `uvi…` for incoming viewing keys
-  (`uvftest…` and `uvitest…` on Testnet), in place of `uview…` and `uivk…`.
-  Software that only understands Revision 0 cannot parse them.
+- JSON-RPC responses still give unified addresses and viewing keys in their
+  ZIP 316 Revision 0 form (`u1…`, `uview1…`, `uivk1…`). A unified address or
+  viewing key that Revision 0 cannot represent — one with no shielded
+  component, one carrying metadata such as an expiry, or a viewing key with a
+  P2SH item — is given in its Revision 2 form (`zu…`/`tu…`, `uvf…`, `uvi…`)
+  instead. Both revisions are accepted as input.
 
 ### Deprecated
 
