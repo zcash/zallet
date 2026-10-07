@@ -1,3 +1,6 @@
 target
 .cargo
 build/
+
+# Design and brainstorming documents (not part of repository history).
+/.plans/
