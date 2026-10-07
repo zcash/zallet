@@ -42,9 +42,9 @@ jsonrpsee = { version = "0.24", features = ["async-client"] }
 jsonrpsee-http-client = { version = "0.24", default-features = false }
 tokio = { version = "1", features = ["net", "rt-multi-thread"] }
 tower = { version = "0.4", features = ["timeout"] }
-transparent = { package = "zcash_transparent", version = "=0.11.0-pre.0" }
-zcash_client_backend = "=0.25.0-pre.0"
-zcash_primitives = "=0.31.0-pre.0"
+transparent = { package = "zcash_transparent", version = "=0.11.0-pre.1" }
+zcash_client_backend = "=0.25.0-pre.1"
+zcash_primitives = "=0.31.0-pre.1"
 zcash_protocol = "=0.11.0-pre.0"
 zebra-chain = "14"
 zebra-rpc = "18"
@@ -79,10 +79,26 @@ tokio-console = ["zallet-core/tokio-console"]
 # after rocksdb 0.24.0 and can return to crates.io with the next release.
 librocksdb-sys = { git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev = "0442de85de82234643b5ba0a8f66a13ecf31b17d" }
 
-# TEMPORARY: take zewif-zcashd on the NU7 librustzcash cohort
-# (zcash/zewif-zcashd#38, merged) until it is released. Every workspace must carry
-# the same revision.
-zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "15df1e1f372538a90e3045a2e313ffeafdfeb0f7" }
+# TEMPORARY: take zewif-zcashd on the -pre.1 NU7 librustzcash cohort
+# (zcash/zewif-zcashd#39) until it is merged and released. Every workspace must
+# carry the same revision.
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "26d8045ce28d98b36dba8da815d45dee5ca5a90f" }
+
+# TEMPORARY: take the Zebra 7 crates from a commit that moves them to the -pre.1
+# NU7 librustzcash cohort (zodl-inc/zebra#30, upstreamed as
+# ZcashFoundation/zebra#11614). The released crates pin `zcash_primitives =
+# "=0.31.0-pre.0"`, which cannot share a graph with 0.31.0-pre.1. Every crate
+# from the Zebra repository in this graph is patched, so that all of them come
+# from one commit. Return to crates.io once a Zebra release takes -pre.1.
+tower-batch-control = { git = "https://github.com/zodl-inc/zebra.git", rev = "524922b06f646d9433bed259b6de52dddac9bcf1" }
+tower-fallback = { git = "https://github.com/zodl-inc/zebra.git", rev = "524922b06f646d9433bed259b6de52dddac9bcf1" }
+zebra-chain = { git = "https://github.com/zodl-inc/zebra.git", rev = "524922b06f646d9433bed259b6de52dddac9bcf1" }
+zebra-consensus = { git = "https://github.com/zodl-inc/zebra.git", rev = "524922b06f646d9433bed259b6de52dddac9bcf1" }
+zebra-network = { git = "https://github.com/zodl-inc/zebra.git", rev = "524922b06f646d9433bed259b6de52dddac9bcf1" }
+zebra-node-services = { git = "https://github.com/zodl-inc/zebra.git", rev = "524922b06f646d9433bed259b6de52dddac9bcf1" }
+zebra-rpc = { git = "https://github.com/zodl-inc/zebra.git", rev = "524922b06f646d9433bed259b6de52dddac9bcf1" }
+zebra-script = { git = "https://github.com/zodl-inc/zebra.git", rev = "524922b06f646d9433bed259b6de52dddac9bcf1" }
+zebra-state = { git = "https://github.com/zodl-inc/zebra.git", rev = "524922b06f646d9433bed259b6de52dddac9bcf1" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

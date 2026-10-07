@@ -75,7 +75,7 @@ serde = { version = "1", features = ["serde_derive"] }
 semver = "1"
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
 toml = "0.8"
-zcash_address = "=0.14.0-pre.0"
+zcash_address = "=0.14.0-pre.1"
 
 # Randomness
 rand = "0.10"
@@ -121,7 +121,7 @@ zcash_protocol = "=0.11.0-pre.0"
 
 # Zcash payment protocols
 orchard = "0.16"
-pczt = { version = "=0.10.0-pre.0", features = [
+pczt = { version = "=0.10.0-pre.1", features = [
     "orchard",
     "sapling",
     "transparent",
@@ -131,16 +131,16 @@ pczt = { version = "=0.10.0-pre.0", features = [
     "tx-extractor",
 ] }
 sapling = { package = "sapling-crypto", version = "0.9" }
-transparent = { package = "zcash_transparent", version = "=0.11.0-pre.0" }
+transparent = { package = "zcash_transparent", version = "=0.11.0-pre.1" }
 zcash_encoding = "0.5"
-zcash_keys = { version = "=0.17.0-pre.0", features = [
+zcash_keys = { version = "=0.17.0-pre.1", features = [
     "transparent-inputs",
     "sapling",
     "orchard",
     "transparent-key-encoding",
 ] }
-zcash_primitives = "=0.31.0-pre.0"
-zcash_proofs = "=0.31.0-pre.0"
+zcash_primitives = "=0.31.0-pre.1"
+zcash_proofs = "=0.31.0-pre.1"
 zcash_script = "0.6"
 zcash_spec = "0.2"
 secp256k1 = { version = "0.33", features = ["global-context", "recovery"] }
@@ -159,8 +159,8 @@ schemerz-rusqlite = "0.370.0"
 shardtree = "0.8"
 time = "0.3"
 uuid = "1"
-zcash_client_backend = "=0.25.0-pre.0"
-zcash_client_sqlite = "=0.23.0-pre.0"
+zcash_client_backend = "=0.25.0-pre.1"
+zcash_client_sqlite = "=0.23.0-pre.1"
 zcash_note_encryption = "0.5.1"
 zip32 = "0.3"
 bip32 = "0.2"
@@ -179,7 +179,7 @@ debug = "line-tables-only"
 
 
 [patch.crates-io]
-# TEMPORARY: take zewif-zcashd on the NU7 librustzcash cohort
-# (zcash/zewif-zcashd#38, merged) until it is released. Every workspace must carry
-# the same revision.
-zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "15df1e1f372538a90e3045a2e313ffeafdfeb0f7" }
+# TEMPORARY: take zewif-zcashd on the -pre.1 NU7 librustzcash cohort
+# (zcash/zewif-zcashd#39) until it is merged and released. Every workspace must
+# carry the same revision.
+zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "26d8045ce28d98b36dba8da815d45dee5ca5a90f" }

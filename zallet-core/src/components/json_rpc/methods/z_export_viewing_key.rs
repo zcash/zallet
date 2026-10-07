@@ -62,9 +62,9 @@ pub(crate) async fn call(
             )?;
 
             Ok(ResultType(if export_ivk {
-                encode_uivk(&ufvk.to_unified_incoming_viewing_key(), wallet.params())
+                encode_uivk(&ufvk.to_unified_incoming_viewing_key(), wallet.params())?
             } else {
-                encode_ufvk(ufvk, wallet.params())
+                encode_ufvk(ufvk, wallet.params())?
             }))
         }
         Address::Sapling(sapling_addr) => {
@@ -94,7 +94,7 @@ pub(crate) async fn call(
                 return Ok(ResultType(encode_uivk(
                     &ufvk.to_unified_incoming_viewing_key(),
                     wallet.params(),
-                )));
+                )?));
             }
 
             let account = wallet
@@ -270,10 +270,12 @@ mod tests {
         let ufvk = test_ufvk();
         assert!(
             encode_ufvk(&ufvk, &MAIN_NETWORK)
+                .expect("the test UFVK has an encoding")
                 .starts_with(&format!("{}1", constants::mainnet::HRP_UNIFIED_FVK))
         );
         assert!(
             encode_ufvk(&ufvk, &TEST_NETWORK)
+                .expect("the test UFVK has an encoding")
                 .starts_with(&format!("{}1", constants::testnet::HRP_UNIFIED_FVK))
         );
     }
@@ -281,9 +283,16 @@ mod tests {
     #[test]
     fn ufvk_encoding_round_trips() {
         let ufvk = test_ufvk();
-        let encoded = ufvk.encode(&MAIN_NETWORK);
+        let encoded = ufvk
+            .encode(&MAIN_NETWORK)
+            .expect("the test UFVK has an encoding");
         let decoded = UnifiedFullViewingKey::decode(&MAIN_NETWORK, &encoded).unwrap();
-        assert_eq!(encoded, decoded.encode(&MAIN_NETWORK));
+        assert_eq!(
+            encoded,
+            decoded
+                .encode(&MAIN_NETWORK)
+                .expect("the decoded UFVK has an encoding"),
+        );
     }
 
     #[test]
@@ -291,10 +300,12 @@ mod tests {
         let uivk = test_ufvk().to_unified_incoming_viewing_key();
         assert!(
             encode_uivk(&uivk, &MAIN_NETWORK)
+                .expect("the test UIVK has an encoding")
                 .starts_with(&format!("{}1", constants::mainnet::HRP_UNIFIED_IVK))
         );
         assert!(
             encode_uivk(&uivk, &TEST_NETWORK)
+                .expect("the test UIVK has an encoding")
                 .starts_with(&format!("{}1", constants::testnet::HRP_UNIFIED_IVK))
         );
     }

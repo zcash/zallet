@@ -24,8 +24,9 @@ should be considered breaking changes.
 
 - Now built against the Zebra 7 crates — `zebra-state` 15 (with the `indexer`
   feature), `zebra-rpc` 18 and `zebra-chain` 14 — up from `zebra-state` 12 and
-  `zebra-rpc` 15, matching the Zebra cohort that builds against
-  `zcash_primitives` 0.31.0-pre.0.
+  `zebra-rpc` 15. They are taken from a Zebra commit that builds against
+  `zcash_primitives` 0.31.0-pre.1, because the released crates require
+  0.31.0-pre.0; that commit does not change the on-disk state format.
 
   This backend now requires the on-disk state format **v29.0.0**, so the
   `zebrad` writing the cache must be Zebra 7.0.0 or later. Upgrade `zebrad` and
