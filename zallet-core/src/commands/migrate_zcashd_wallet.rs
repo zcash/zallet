@@ -601,9 +601,32 @@ fn finish_import(
     exposure_height: BlockHeight,
     allow_partial_import: bool,
 ) -> Result<(), MigrateError> {
-    register_watch_pubkeys(db_data, document, report, exposure_height)?;
-    expose_spending_key_addresses(db_data, document, report, exposure_height)?;
-    expose_registered_script_addresses(db_data, report, exposure_height)?;
+    // The three steps are independent: the pubkey registration writes standalone
+    // pubkey rows and their exposures, and each exposure step reads a disjoint set
+    // of receivers, so none of them observes another's writes. Run all three even
+    // when one fails. Nothing retries them -- the import has already committed, and
+    // a re-run of the same wallet is rejected -- so a transient failure in one step
+    // must not also cost the work the others would have done.
+    let mut failures = Vec::new();
+    if let Err(e) = register_watch_pubkeys(db_data, document, report, exposure_height) {
+        failures.push(e);
+    }
+    if let Err(e) = expose_spending_key_addresses(db_data, document, report, exposure_height) {
+        failures.push(e);
+    }
+    if let Err(e) = expose_registered_script_addresses(db_data, report, exposure_height) {
+        failures.push(e);
+    }
+
+    // Only the first failure can be returned, so the rest are logged rather than
+    // dropped: an operator who cannot retry needs to see every step that failed.
+    let mut failures = failures.into_iter();
+    if let Some(first) = failures.next() {
+        for also in failures {
+            error!("A further post-import step also failed: {also:?}");
+        }
+        return Err(first);
+    }
 
     let document_account_count = document
         .wallets()
@@ -781,7 +804,7 @@ fn register_watch_pubkeys(
     report: &ZewifImportReport,
     exposure_height: BlockHeight,
 ) -> Result<(), MigrateError> {
-    let tracked = tracked_transparent_receivers(db_data)?;
+    let mut tracked = tracked_transparent_receivers(db_data)?;
     let mut skipped_uncompressed_watch_pubkeys = 0usize;
     let mut skipped_malformed_watch_pubkeys = 0usize;
     for (account_uuid, account) in imported_document_accounts(document, report) {
@@ -805,6 +828,15 @@ fn register_watch_pubkeys(
             .import_standalone_transparent_pubkeys(account_uuid, watch_pubkeys.into_iter())
             .map_err(MigrateError::Database)?;
         mark_addresses_exposed(db_data, &to_expose)?;
+        // The snapshot above predates this loop's own writes. Fold each
+        // registration into it as it happens, so a pubkey that two of the
+        // document's accounts both record is imported once: the second import
+        // would reach `StandaloneImportConflict` after the migration had
+        // committed, which is the failure this filter exists to prevent. No
+        // document produces that today -- `zewif-zcashd` attaches every
+        // transparent address to the single legacy account -- but the walk over
+        // `document.wallets()` is generic.
+        tracked.extend(to_expose.iter().map(|(address, _)| *address));
     }
     if skipped_uncompressed_watch_pubkeys > 0 {
         warn!(
