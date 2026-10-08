@@ -370,20 +370,41 @@ fn detect_incompatibilities<P: consensus::Parameters>(
 /// The height at which this build activates `branch` on `params`'s network, or `None` if it
 /// does not schedule it.
 ///
+/// Network upgrades form an ordered chain in which each upgrade implies every earlier one, so
+/// an upgrade is in effect from the earliest activation height of itself or any later upgrade
+/// in [`NETWORK_UPGRADES`]. An upgrade whose own height is unset therefore activates with the
+/// next upgrade that is scheduled, as a full node resolves an omitted upgrade, and is
+/// unscheduled only if no later upgrade is scheduled either. The chain is rooted at Sprout,
+/// whose rules are in effect from genesis.
+///
 /// This is the upgrade's activation height, which is what a full node reports, rather than
 /// the start of its consensus epoch from [`consensus::BranchId::height_bounds`]. The two
 /// differ when several upgrades activate at the same height, as on a regtest network that
 /// activates every upgrade at height 1: each earlier upgrade then has an empty epoch, which
 /// `height_bounds` reports as never in effect even though the upgrade is still scheduled.
-/// Sprout is not a network upgrade; its rules are in effect from genesis.
 fn scheduled_activation_height<P: consensus::Parameters>(
     params: &P,
     branch: consensus::BranchId,
 ) -> Option<u32> {
-    match branch.network_upgrade() {
-        Some(upgrade) => params.activation_height(upgrade).map(u32::from),
-        None => Some(u32::from(consensus::H0)),
+    let own_height = |branch: consensus::BranchId| {
+        branch
+            .network_upgrade()
+            .and_then(|upgrade| params.activation_height(upgrade))
+    };
+
+    if branch.network_upgrade().is_none() {
+        return Some(u32::from(consensus::H0));
     }
+
+    match NETWORK_UPGRADES.iter().position(|&known| known == branch) {
+        Some(index) => NETWORK_UPGRADES[index..]
+            .iter()
+            .filter_map(|&later| own_height(later))
+            .min(),
+        // An upgrade this build does not order cannot be implied by a later one.
+        None => own_height(branch),
+    }
+    .map(u32::from)
 }
 
 /// Compares one consensus branch ID between the node — which reports it as `reported`, or not
@@ -1282,6 +1303,72 @@ mod tests {
     #[test]
     fn fully_reported_upgrades_are_compatible() {
         assert!(detect(&all_known()).is_empty());
+    }
+
+    /// The only activation height set in [`sparse_regtest`].
+    const SPARSE_NU5_HEIGHT: u32 = 10;
+
+    /// A regtest network that sets only NU5's activation height, leaving every earlier and
+    /// later upgrade unset, unlike the schedules [`super::Network::from_type`] builds.
+    fn sparse_regtest() -> super::Network {
+        super::Network::RegTest(zcash_protocol::local_consensus::LocalNetwork {
+            overwinter: None,
+            sapling: None,
+            blossom: None,
+            heartwood: None,
+            canopy: None,
+            nu5: Some(BlockHeight::from_u32(SPARSE_NU5_HEIGHT)),
+            nu6: None,
+            nu6_1: None,
+            nu6_2: None,
+            nu6_3: None,
+            nu7: None,
+        })
+    }
+
+    #[test]
+    fn unset_upgrades_are_implied_by_a_later_scheduled_one() {
+        let params = sparse_regtest();
+        for branch in [
+            BranchId::Overwinter,
+            BranchId::Sapling,
+            BranchId::Blossom,
+            BranchId::Heartwood,
+            BranchId::Canopy,
+            BranchId::Nu5,
+        ] {
+            assert_eq!(
+                scheduled_activation_height(&params, branch),
+                Some(SPARSE_NU5_HEIGHT),
+                "{branch:?} is implied by NU5",
+            );
+        }
+    }
+
+    #[test]
+    fn upgrades_after_the_last_scheduled_one_are_unscheduled() {
+        let params = sparse_regtest();
+        for branch in [
+            BranchId::Nu6,
+            BranchId::Nu6_1,
+            BranchId::Nu6_2,
+            BranchId::Nu6_3,
+            BranchId::Nu7,
+        ] {
+            assert_eq!(
+                scheduled_activation_height(&params, branch),
+                None,
+                "{branch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sprout_is_in_effect_from_genesis() {
+        assert_eq!(
+            scheduled_activation_height(&sparse_regtest(), BranchId::Sprout),
+            Some(u32::from(zcash_protocol::consensus::H0)),
+        );
     }
 
     /// The lowest regtest activation height the coincident-activation property tries: the
