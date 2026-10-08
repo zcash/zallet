@@ -371,11 +371,12 @@ fn detect_incompatibilities<P: consensus::Parameters>(
 /// does not schedule it.
 ///
 /// Network upgrades form an ordered chain in which each upgrade implies every earlier one, so
-/// an upgrade is in effect from the earliest activation height of itself or any later upgrade
-/// in [`NETWORK_UPGRADES`]. An upgrade whose own height is unset therefore activates with the
-/// next upgrade that is scheduled, as a full node resolves an omitted upgrade, and is
-/// unscheduled only if no later upgrade is scheduled either. The chain is rooted at Sprout,
-/// whose rules are in effect from genesis.
+/// a branch is in effect from the earliest activation height of itself or any later upgrade
+/// in [`NETWORK_UPGRADES`]. A branch with no activation height of its own is never taken to
+/// activate at genesis: it activates only at the height of a subsequent upgrade that is
+/// scheduled, as a full node resolves an omitted upgrade, and is unscheduled if no subsequent
+/// upgrade is scheduled either. Sprout, which has no network upgrade of its own, precedes
+/// every upgrade in the chain.
 ///
 /// This is the upgrade's activation height, which is what a full node reports, rather than
 /// the start of its consensus epoch from [`consensus::BranchId::height_bounds`]. The two
@@ -392,19 +393,19 @@ fn scheduled_activation_height<P: consensus::Parameters>(
             .and_then(|upgrade| params.activation_height(upgrade))
     };
 
-    if branch.network_upgrade().is_none() {
-        return Some(u32::from(consensus::H0));
-    }
-
-    match NETWORK_UPGRADES.iter().position(|&known| known == branch) {
-        Some(index) => NETWORK_UPGRADES[index..]
-            .iter()
-            .filter_map(|&later| own_height(later))
-            .min(),
+    // The branch itself and every upgrade after it, in activation order.
+    let from_branch = match NETWORK_UPGRADES.iter().position(|&known| known == branch) {
+        Some(index) => &NETWORK_UPGRADES[index..],
+        None if branch == consensus::BranchId::Sprout => NETWORK_UPGRADES,
         // An upgrade this build does not order cannot be implied by a later one.
-        None => own_height(branch),
-    }
-    .map(u32::from)
+        None => return own_height(branch).map(u32::from),
+    };
+
+    from_branch
+        .iter()
+        .filter_map(|&upgrade| own_height(upgrade))
+        .min()
+        .map(u32::from)
 }
 
 /// Compares one consensus branch ID between the node — which reports it as `reported`, or not
@@ -1364,10 +1365,23 @@ mod tests {
     }
 
     #[test]
-    fn sprout_is_in_effect_from_genesis() {
+    fn sprout_activates_with_the_first_scheduled_upgrade_not_at_genesis() {
         assert_eq!(
             scheduled_activation_height(&sparse_regtest(), BranchId::Sprout),
-            Some(u32::from(zcash_protocol::consensus::H0)),
+            Some(SPARSE_NU5_HEIGHT),
+        );
+    }
+
+    #[test]
+    fn branch_with_no_scheduled_upgrade_is_unscheduled() {
+        let unscheduled = super::Network::from_type(NetworkType::Regtest, &[]);
+        assert_eq!(
+            scheduled_activation_height(&unscheduled, BranchId::Sprout),
+            None
+        );
+        assert_eq!(
+            scheduled_activation_height(&unscheduled, BranchId::Nu5),
+            None
         );
     }
 
