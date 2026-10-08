@@ -86,14 +86,27 @@ you need.
 
 ## What is not migrated
 
-The migration reports these (with counts) instead of importing them:
+The migration logs each of these with a count instead of importing it, except the last,
+which is dropped silently:
 
 - **Sprout spending keys and funds.** Zallet does not support the Sprout pool. Move any
   Sprout funds (e.g. to Sapling, using `zcashd`'s migration or a Sprout-capable tool)
   *before* retiring `zcashd`.
-- Address book entries.
-- Watch-only entries recorded without their public key or redeem script, and entries
-  with uncompressed public keys.
+- **Address book entries.** Zallet has no store for them yet ([#774] tracks preserving
+  them); the labels exist only in `wallet.dat`.
+- **Watch-only entries recorded without their public key or redeem script**, and
+  watch-only public keys that are uncompressed or malformed.
+- **Watch-only redeem scripts the wallet cannot represent.** Only multisig scripts
+  within the P2SH size limit are imported; any other watched script is dropped.
+- **Standalone copies of unified spending keys.** The unified accounts themselves are
+  re-derived from the mnemonic, so this loses nothing.
+- **Transactions that carry no raw transaction data.** If such a transaction was mined,
+  the post-migration scan recovers it.
+- **Records of a kind the wallet parser does not recognise.** These are discarded with
+  no warning at all, so a `wallet.dat` written by an unusual `zcashd` build may lose
+  data without any sign of it in the log.
+
+[#774]: https://github.com/zcash/zallet/issues/774
 
 Not every skip is merely reported. A transparent *spending* key that cannot be imported
 (one whose public key is uncompressed, or whose address appears under none of the
