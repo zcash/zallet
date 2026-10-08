@@ -367,12 +367,31 @@ fn detect_incompatibilities<P: consensus::Parameters>(
         .collect()
 }
 
+/// The height at which this build activates `branch` on `params`'s network, or `None` if it
+/// does not schedule it.
+///
+/// This is the upgrade's activation height, which is what a full node reports, rather than
+/// the start of its consensus epoch from [`consensus::BranchId::height_bounds`]. The two
+/// differ when several upgrades activate at the same height, as on a regtest network that
+/// activates every upgrade at height 1: each earlier upgrade then has an empty epoch, which
+/// `height_bounds` reports as never in effect even though the upgrade is still scheduled.
+/// Sprout is not a network upgrade; its rules are in effect from genesis.
+fn scheduled_activation_height<P: consensus::Parameters>(
+    params: &P,
+    branch: consensus::BranchId,
+) -> Option<u32> {
+    match branch.network_upgrade() {
+        Some(upgrade) => params.activation_height(upgrade).map(u32::from),
+        None => Some(u32::from(consensus::H0)),
+    }
+}
+
 /// Compares one consensus branch ID between the node — which reports it as `reported`, or not
 /// at all (`None`) — and this build, yielding an [`Incompatibility`] if their rules diverge.
 ///
 /// An upgrade with no activation height on a side is treated as not scheduled there:
 /// [`UpgradeStatus::Disabled`] (or simply unreported) on the node, or a `None` from
-/// [`consensus::BranchId::height_bounds`] on our side.
+/// [`scheduled_activation_height`] on our side.
 fn branch_incompatibility<P: consensus::Parameters>(
     params: &P,
     branch_id: u32,
@@ -389,9 +408,7 @@ fn branch_incompatibility<P: consensus::Parameters>(
         // We recognize this branch ID, so we know which consensus rules it selects. Verify
         // that we also agree on where they take effect.
         Ok(branch) => {
-            let expected = branch
-                .height_bounds(params)
-                .map(|(activation, _)| u32::from(activation));
+            let expected = scheduled_activation_height(params, branch);
             // Divergence begins at the earlier of the two scheduled heights.
             match (expected, node) {
                 (Some(expected), Some(node)) if expected == node => None,
@@ -848,6 +865,7 @@ mod tests {
         StreamExt as _,
         stream::{self, BoxStream},
     };
+    use proptest::prelude::*;
     use zcash_client_backend::data_api::{
         TransactionStatus,
         chain::{ChainState, CommitmentTreeRoot},
@@ -858,8 +876,10 @@ mod tests {
     };
     use zcash_protocol::{
         TxId,
-        consensus::{BlockHeight, BranchId, Network},
+        consensus::{BlockHeight, BranchId, Network, NetworkType},
     };
+
+    use crate::network::RegTestNuParam;
 
     #[cfg(feature = "spend-index")]
     use super::SpendStatus;
@@ -867,6 +887,7 @@ mod tests {
         BlockLocator, Chain, ChainBlock, ChainError, ChainTx, ChainView, Decision, Error,
         Incompatibility, NonEmpty, ReportedUpgrade, UpgradeStatus, branch_incompatibility,
         check_consensus_compatibility, classify, detect_incompatibilities,
+        scheduled_activation_height,
     };
     #[cfg(not(feature = "spend-index"))]
     use transparent::address::TransparentAddress;
@@ -1029,12 +1050,7 @@ mod tests {
 
     /// The mainnet activation height this build of Zallet expects for `branch`.
     fn expected_height(branch: BranchId) -> u32 {
-        u32::from(
-            branch
-                .height_bounds(&PARAMS)
-                .expect("branch is scheduled on mainnet")
-                .0,
-        )
+        scheduled_activation_height(&PARAMS, branch).expect("branch is scheduled on mainnet")
     }
 
     fn upgrade(branch_id: u32, height: u32, status: UpgradeStatus) -> ReportedUpgrade {
@@ -1205,7 +1221,7 @@ mod tests {
     /// The upgrade this build expects for `branch` on mainnet, reported active at the height
     /// this build schedules it — or `None` if `branch` is not scheduled on mainnet.
     fn reported_upgrade(branch: BranchId) -> Option<ReportedUpgrade> {
-        let height = u32::from(branch.height_bounds(&PARAMS)?.0);
+        let height = scheduled_activation_height(&PARAMS, branch)?;
         Some(upgrade(u32::from(branch), height, UpgradeStatus::Active))
     }
 
@@ -1266,6 +1282,41 @@ mod tests {
     #[test]
     fn fully_reported_upgrades_are_compatible() {
         assert!(detect(&all_known()).is_empty());
+    }
+
+    /// The lowest regtest activation height the coincident-activation property tries: the
+    /// first block after genesis, where the standard Z3 regtest configuration activates
+    /// every upgrade.
+    const FIRST_POST_GENESIS_HEIGHT: u32 = 1;
+
+    /// An exclusive upper bound on the regtest activation heights tried, well above any
+    /// height a regtest chain in practice reaches.
+    const ACTIVATION_HEIGHT_BOUND: u32 = 1_000_000;
+
+    proptest! {
+        /// A regtest network that activates every upgrade at one height, as the standard
+        /// Z3 regtest configuration does, agrees with a node reporting each of them active at
+        /// that height. Every upgrade but the last then has an empty consensus epoch, which
+        /// must not be mistaken for the upgrade being unscheduled.
+        #[test]
+        fn coincident_regtest_activations_are_compatible(
+            height in FIRST_POST_GENESIS_HEIGHT..ACTIVATION_HEIGHT_BOUND,
+        ) {
+            let nuparams: Vec<RegTestNuParam> = crate::network::NETWORK_UPGRADES
+                .iter()
+                .map(|&branch| {
+                    RegTestNuParam::try_from(format!("{:08x}:{height}", u32::from(branch)))
+                        .expect("well-formed regtest nuparam")
+                })
+                .collect();
+            let params = super::Network::from_type(NetworkType::Regtest, &nuparams);
+            let reported: Vec<ReportedUpgrade> = crate::network::NETWORK_UPGRADES
+                .iter()
+                .map(|&branch| upgrade(u32::from(branch), height, UpgradeStatus::Active))
+                .collect();
+
+            prop_assert!(detect_incompatibilities(&params, &reported).is_empty());
+        }
     }
 
     /// A minimal [`Chain`] that serves a fixed upgrade set and tip on mainnet.
