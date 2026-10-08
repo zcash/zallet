@@ -813,8 +813,25 @@ fn account_watch_pubkeys(
             }
         }
     }
-    let _ = account_uuid;
-    to_import.retain(|pubkey| !tracked.contains_key(&TransparentAddress::from_pubkey(pubkey)));
+    to_import.retain(
+        |pubkey| match tracked.get(&TransparentAddress::from_pubkey(pubkey)) {
+            // Not tracked at all: this step's to register.
+            None => true,
+            // A standalone row. One the importing account holds is what the wallet
+            // supports registering against: the same pubkey is a no-op, and a row
+            // imported by address alone is upgraded in place with the pubkey,
+            // keeping its row id and whatever is attached to it. Excluding it would
+            // leave an address the wallet watches without the key material it has
+            // and -- since this step is also what exposes it -- absent from
+            // `listaddresses`. One another account holds is the case to skip:
+            // importing the pubkey reaches `StandaloneImportConflict`, after the
+            // migration has committed.
+            Some(TrackedReceiver::Standalone(holder)) => *holder == account_uuid,
+            // A derived receiver keeps the exposure its derivation gives it; force
+            // exposing it beyond the gap could hide funded addresses from recovery.
+            Some(TrackedReceiver::Derived) => false,
+        },
+    );
     (to_import, uncompressed, malformed)
 }
 

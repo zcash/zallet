@@ -84,8 +84,10 @@ be considered breaking changes.
   tracks. Every such pubkey was registered regardless, and the wallet rejects an
   import of key material another account holds, so migrating a second `zcashd`
   wallet that shared a watched key failed with a database error *after* the import
-  had committed. Such an address now keeps the registration and the exposure it
-  already had.
+  had committed. A pubkey whose address *another* account already holds is now
+  left alone. One the importing account itself holds is still registered, which
+  upgrades a row imported by address alone -- as `zallet import-address` creates
+  -- with its public key, and exposes it.
 
 ## [0.1.0-beta.3] - 2026-08-24
 
