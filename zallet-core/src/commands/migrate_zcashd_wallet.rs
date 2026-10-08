@@ -690,6 +690,21 @@ fn derived_transparent_receivers(
     )
 }
 
+/// What the wallet already holds for a transparent address, as far as the watch-only
+/// pubkey registration has to care.
+///
+/// The distinction matters because the two exclusions it drives are not the same
+/// exclusion. A derived receiver must keep the exposure its derivation gives it. A
+/// standalone row only blocks the registration when another account holds it, because
+/// that is the case `import_standalone_transparent_pubkeys` rejects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrackedReceiver {
+    /// A derived receiver of some account.
+    Derived,
+    /// A standalone import held by the named account.
+    Standalone(zcash_client_sqlite::AccountUuid),
+}
+
 /// Collects the transparent receivers of every account in the wallet, standalone
 /// imports included.
 ///
@@ -701,9 +716,27 @@ fn derived_transparent_receivers(
 /// force-exposed as an import.
 fn tracked_transparent_receivers(
     db_data: &mut DbHandle,
-) -> Result<HashSet<TransparentAddress>, MigrateError> {
+) -> Result<HashMap<TransparentAddress, TrackedReceiver>, MigrateError> {
     let accounts = db_data.get_account_ids().map_err(MigrateError::Database)?;
-    collect_transparent_receivers(db_data, accounts, true)
+    let mut tracked = HashMap::new();
+    for account_uuid in accounts {
+        for (address, meta) in db_data
+            .get_transparent_receivers(account_uuid, true, true)
+            .map_err(MigrateError::Database)?
+        {
+            // The wallet's unique index on the cached receiver address means an
+            // address is held by at most one account, so this never overwrites a
+            // different account's claim on the same address.
+            tracked.insert(
+                address,
+                match meta.source() {
+                    TransparentAddressSource::Derived { .. } => TrackedReceiver::Derived,
+                    _ => TrackedReceiver::Standalone(account_uuid),
+                },
+            );
+        }
+    }
+    Ok(tracked)
 }
 
 /// Collects the transparent receivers of `accounts` into a set, change addresses
@@ -755,7 +788,8 @@ fn mark_addresses_exposed(
 /// importer counts it in `addresses_not_recognized`.
 fn account_watch_pubkeys(
     account: &zewif::Account,
-    tracked: &HashSet<TransparentAddress>,
+    account_uuid: zcash_client_sqlite::AccountUuid,
+    tracked: &HashMap<TransparentAddress, TrackedReceiver>,
 ) -> (Vec<PublicKey>, usize, usize) {
     let mut to_import = Vec::new();
     let mut uncompressed = 0usize;
@@ -779,7 +813,8 @@ fn account_watch_pubkeys(
             }
         }
     }
-    to_import.retain(|pubkey| !tracked.contains(&TransparentAddress::from_pubkey(pubkey)));
+    let _ = account_uuid;
+    to_import.retain(|pubkey| !tracked.contains_key(&TransparentAddress::from_pubkey(pubkey)));
     (to_import, uncompressed, malformed)
 }
 
@@ -808,7 +843,8 @@ fn register_watch_pubkeys(
     let mut skipped_uncompressed_watch_pubkeys = 0usize;
     let mut skipped_malformed_watch_pubkeys = 0usize;
     for (account_uuid, account) in imported_document_accounts(document, report) {
-        let (watch_pubkeys, uncompressed, malformed) = account_watch_pubkeys(account, &tracked);
+        let (watch_pubkeys, uncompressed, malformed) =
+            account_watch_pubkeys(account, account_uuid, &tracked);
         skipped_uncompressed_watch_pubkeys += uncompressed;
         skipped_malformed_watch_pubkeys += malformed;
         if watch_pubkeys.is_empty() {
@@ -836,7 +872,11 @@ fn register_watch_pubkeys(
         // document produces that today -- `zewif-zcashd` attaches every
         // transparent address to the single legacy account -- but the walk over
         // `document.wallets()` is generic.
-        tracked.extend(to_expose.iter().map(|(address, _)| *address));
+        tracked.extend(
+            to_expose
+                .iter()
+                .map(|(address, _)| (*address, TrackedReceiver::Standalone(account_uuid))),
+        );
     }
     if skipped_uncompressed_watch_pubkeys > 0 {
         warn!(
@@ -1669,7 +1709,7 @@ mod tests {
 
     use super::{
         BlockHash, EXPIRY_HEIGHT_MARGIN, HashMap, HashSet, MigrateError, MigrateZcashdWalletCmd,
-        ZCASHD_LEGACY_ACCOUNT_INDEX, ZCASHD_LEGACY_SOURCE, backfill_mined_heights,
+        TrackedReceiver, ZCASHD_LEGACY_ACCOUNT_INDEX, ZCASHD_LEGACY_SOURCE, backfill_mined_heights,
         check_import_report, derive_regtest_activations, describe_skipped_items,
         earliest_activity_estimate, enriched_document, has_seedless_legacy_account,
         mint_legacy_mnemonic, to_zewif_frontier,
@@ -1962,9 +2002,83 @@ mod tests {
         assert_eq!(
             super::account_watch_pubkeys(
                 &account,
-                &HashSet::from([TransparentAddress::from_pubkey(&already_tracked)]),
+                account_uuid(0),
+                &HashMap::from([(
+                    TransparentAddress::from_pubkey(&already_tracked),
+                    TrackedReceiver::Derived,
+                )]),
             ),
             (vec![fresh], 1, 1),
+        );
+    }
+
+    /// An `AccountUuid` distinguishable by its last byte, for the tests that care
+    /// which account holds a receiver rather than what its id is.
+    fn account_uuid(byte: u8) -> AccountUuid {
+        let mut bytes = [0u8; 16];
+        bytes[15] = byte;
+        AccountUuid::from_uuid(uuid::Uuid::from_bytes(bytes))
+    }
+
+    /// A standalone row is only another account's to keep. One the importing account
+    /// already holds is still this step's to register: re-importing the same pubkey
+    /// there is idempotent, and a row imported by address alone -- as `zallet
+    /// import-address` creates -- is upgraded in place with the pubkey and then
+    /// exposed. Skipping it would leave an address the wallet watches but
+    /// `listaddresses` never reports. A derived receiver stays excluded either way,
+    /// since it must keep the exposure its derivation gives it.
+    #[test]
+    fn watch_pubkeys_keep_a_standalone_row_held_by_the_importing_account() {
+        use transparent::address::TransparentAddress;
+
+        let secp = secp256k1::Secp256k1::new();
+        let key = |byte: u8| {
+            secp256k1::SecretKey::from_slice(&[byte; 32])
+                .expect("valid secret key")
+                .public_key(&secp)
+        };
+        let ours = key(0x01);
+        let theirs = key(0x02);
+        let derived = key(0x03);
+
+        let pubkey_entry = |pubkey: &secp256k1::PublicKey| {
+            let mut entry = watched_taddr(TransparentAddress::from_pubkey(pubkey));
+            entry.set_pubkey(
+                zewif::transparent::TransparentPubKey::from_bytes(pubkey.serialize().to_vec())
+                    .expect("valid pubkey bytes"),
+            );
+            entry
+        };
+
+        let account = account_with(
+            "Legacy",
+            vec![
+                document_address(pubkey_entry(&ours)),
+                document_address(pubkey_entry(&theirs)),
+                document_address(pubkey_entry(&derived)),
+            ],
+        );
+
+        let importing = account_uuid(0);
+        let other = account_uuid(1);
+        let tracked = HashMap::from([
+            (
+                TransparentAddress::from_pubkey(&ours),
+                TrackedReceiver::Standalone(importing),
+            ),
+            (
+                TransparentAddress::from_pubkey(&theirs),
+                TrackedReceiver::Standalone(other),
+            ),
+            (
+                TransparentAddress::from_pubkey(&derived),
+                TrackedReceiver::Derived,
+            ),
+        ]);
+
+        assert_eq!(
+            super::account_watch_pubkeys(&account, importing, &tracked),
+            (vec![ours], 0, 0),
         );
     }
 
