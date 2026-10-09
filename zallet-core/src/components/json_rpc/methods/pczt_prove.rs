@@ -18,6 +18,7 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee::types::ErrorObjectOwned;
 use pczt::Pczt;
 use pczt::roles::prover::{OrchardError, Prover};
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -83,7 +84,7 @@ pub(crate) async fn call(pczt_base64: &str) -> Response {
             if need_sapling {
                 let local = sapling_prover();
                 prover = prover
-                    .create_sapling_proofs(local, local)
+                    .create_sapling_proofs(UnwrapErr(SysRng), local, local)
                     .map_err(PcztError::SaplingProve)?;
             }
 
@@ -92,7 +93,7 @@ pub(crate) async fn call(pczt_base64: &str) -> Response {
 
                 if need_orchard {
                     prover = prover
-                        .create_orchard_proof(pk)
+                        .create_orchard_proof(UnwrapErr(SysRng), pk)
                         .map_err(PcztError::OrchardProve)?;
                 }
 
@@ -100,10 +101,14 @@ pub(crate) async fn call(pczt_base64: &str) -> Response {
                     // The prover's `IronwoodError` is not publicly nameable at
                     // this `pczt` rev, so it is formatted here rather than
                     // carried in `PcztError`.
-                    prover = prover.create_ironwood_proof(pk).map_err(|e| {
-                        LegacyCode::Verify
-                            .with_message(fl!("err-pczt-prove-ironwood", error = format!("{e:?}")))
-                    })?;
+                    prover = prover
+                        .create_ironwood_proof(UnwrapErr(SysRng), pk)
+                        .map_err(|e| {
+                            LegacyCode::Verify.with_message(fl!(
+                                "err-pczt-prove-ironwood",
+                                error = format!("{e:?}")
+                            ))
+                        })?;
                 }
             }
 

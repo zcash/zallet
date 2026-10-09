@@ -6,7 +6,10 @@ use transparent::address::TransparentAddress;
 use zcash_address::ZcashAddress;
 use zcash_keys::{address::UnifiedAddress, encoding::AddressCodec};
 
-use crate::components::{database::DbConnection, json_rpc::server::LegacyCode};
+use crate::components::{
+    database::DbConnection,
+    json_rpc::{server::LegacyCode, unified_encoding::encode_unified_address},
+};
 
 /// Response to a `z_listunifiedreceivers` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -60,7 +63,8 @@ pub(crate) fn call(wallet: &DbConnection, unified_address: &str) -> Response {
     let sapling = address.sapling().map(|s| s.encode(wallet.params()));
 
     let orchard = address.orchard().and_then(|orch| {
-        UnifiedAddress::from_receivers(Some(*orch), None, None).map(|ua| ua.encode(wallet.params()))
+        UnifiedAddress::from_receivers(Some(*orch), None, None, None, None)
+            .map(|ua| encode_unified_address(&ua, wallet.params()))
     });
 
     Ok(ListUnifiedReceivers {

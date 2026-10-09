@@ -367,12 +367,53 @@ fn detect_incompatibilities<P: consensus::Parameters>(
         .collect()
 }
 
+/// The height at which this build activates `branch` on `params`'s network, or `None` if it
+/// does not schedule it.
+///
+/// Network upgrades form an ordered chain in which each upgrade implies every earlier one, so
+/// a branch is in effect from the earliest activation height of itself or any later upgrade
+/// in [`NETWORK_UPGRADES`]. A branch with no activation height of its own is never taken to
+/// activate at genesis: it activates only at the height of a subsequent upgrade that is
+/// scheduled, as a full node resolves an omitted upgrade, and is unscheduled if no subsequent
+/// upgrade is scheduled either. Sprout, which has no network upgrade of its own, precedes
+/// every upgrade in the chain.
+///
+/// This is the upgrade's activation height, which is what a full node reports, rather than
+/// the start of its consensus epoch from [`consensus::BranchId::height_bounds`]. The two
+/// differ when several upgrades activate at the same height, as on a regtest network that
+/// activates every upgrade at height 1: each earlier upgrade then has an empty epoch, which
+/// `height_bounds` reports as never in effect even though the upgrade is still scheduled.
+fn scheduled_activation_height<P: consensus::Parameters>(
+    params: &P,
+    branch: consensus::BranchId,
+) -> Option<u32> {
+    let own_height = |branch: consensus::BranchId| {
+        branch
+            .network_upgrade()
+            .and_then(|upgrade| params.activation_height(upgrade))
+    };
+
+    // The branch itself and every upgrade after it, in activation order.
+    let from_branch = match NETWORK_UPGRADES.iter().position(|&known| known == branch) {
+        Some(index) => &NETWORK_UPGRADES[index..],
+        None if branch == consensus::BranchId::Sprout => NETWORK_UPGRADES,
+        // An upgrade this build does not order cannot be implied by a later one.
+        None => return own_height(branch).map(u32::from),
+    };
+
+    from_branch
+        .iter()
+        .filter_map(|&upgrade| own_height(upgrade))
+        .min()
+        .map(u32::from)
+}
+
 /// Compares one consensus branch ID between the node — which reports it as `reported`, or not
 /// at all (`None`) — and this build, yielding an [`Incompatibility`] if their rules diverge.
 ///
 /// An upgrade with no activation height on a side is treated as not scheduled there:
 /// [`UpgradeStatus::Disabled`] (or simply unreported) on the node, or a `None` from
-/// [`consensus::BranchId::height_bounds`] on our side.
+/// [`scheduled_activation_height`] on our side.
 fn branch_incompatibility<P: consensus::Parameters>(
     params: &P,
     branch_id: u32,
@@ -389,9 +430,7 @@ fn branch_incompatibility<P: consensus::Parameters>(
         // We recognize this branch ID, so we know which consensus rules it selects. Verify
         // that we also agree on where they take effect.
         Ok(branch) => {
-            let expected = branch
-                .height_bounds(params)
-                .map(|(activation, _)| u32::from(activation));
+            let expected = scheduled_activation_height(params, branch);
             // Divergence begins at the earlier of the two scheduled heights.
             match (expected, node) {
                 (Some(expected), Some(node)) if expected == node => None,
@@ -848,6 +887,7 @@ mod tests {
         StreamExt as _,
         stream::{self, BoxStream},
     };
+    use proptest::prelude::*;
     use zcash_client_backend::data_api::{
         TransactionStatus,
         chain::{ChainState, CommitmentTreeRoot},
@@ -858,8 +898,10 @@ mod tests {
     };
     use zcash_protocol::{
         TxId,
-        consensus::{BlockHeight, BranchId, Network},
+        consensus::{BlockHeight, BranchId, Network, NetworkType},
     };
+
+    use crate::network::RegTestNuParam;
 
     #[cfg(feature = "spend-index")]
     use super::SpendStatus;
@@ -867,6 +909,7 @@ mod tests {
         BlockLocator, Chain, ChainBlock, ChainError, ChainTx, ChainView, Decision, Error,
         Incompatibility, NonEmpty, ReportedUpgrade, UpgradeStatus, branch_incompatibility,
         check_consensus_compatibility, classify, detect_incompatibilities,
+        scheduled_activation_height,
     };
     #[cfg(not(feature = "spend-index"))]
     use transparent::address::TransparentAddress;
@@ -1029,12 +1072,7 @@ mod tests {
 
     /// The mainnet activation height this build of Zallet expects for `branch`.
     fn expected_height(branch: BranchId) -> u32 {
-        u32::from(
-            branch
-                .height_bounds(&PARAMS)
-                .expect("branch is scheduled on mainnet")
-                .0,
-        )
+        scheduled_activation_height(&PARAMS, branch).expect("branch is scheduled on mainnet")
     }
 
     fn upgrade(branch_id: u32, height: u32, status: UpgradeStatus) -> ReportedUpgrade {
@@ -1205,7 +1243,7 @@ mod tests {
     /// The upgrade this build expects for `branch` on mainnet, reported active at the height
     /// this build schedules it — or `None` if `branch` is not scheduled on mainnet.
     fn reported_upgrade(branch: BranchId) -> Option<ReportedUpgrade> {
-        let height = u32::from(branch.height_bounds(&PARAMS)?.0);
+        let height = scheduled_activation_height(&PARAMS, branch)?;
         Some(upgrade(u32::from(branch), height, UpgradeStatus::Active))
     }
 
@@ -1266,6 +1304,120 @@ mod tests {
     #[test]
     fn fully_reported_upgrades_are_compatible() {
         assert!(detect(&all_known()).is_empty());
+    }
+
+    /// The only activation height set in [`sparse_regtest`].
+    const SPARSE_NU5_HEIGHT: u32 = 10;
+
+    /// A regtest network that sets only NU5's activation height, leaving every earlier and
+    /// later upgrade unset, unlike the schedules [`super::Network::from_type`] builds.
+    fn sparse_regtest() -> super::Network {
+        super::Network::RegTest(zcash_protocol::local_consensus::LocalNetwork {
+            overwinter: None,
+            sapling: None,
+            blossom: None,
+            heartwood: None,
+            canopy: None,
+            nu5: Some(BlockHeight::from_u32(SPARSE_NU5_HEIGHT)),
+            nu6: None,
+            nu6_1: None,
+            nu6_2: None,
+            nu6_3: None,
+            nu7: None,
+        })
+    }
+
+    #[test]
+    fn unset_upgrades_are_implied_by_a_later_scheduled_one() {
+        let params = sparse_regtest();
+        for branch in [
+            BranchId::Overwinter,
+            BranchId::Sapling,
+            BranchId::Blossom,
+            BranchId::Heartwood,
+            BranchId::Canopy,
+            BranchId::Nu5,
+        ] {
+            assert_eq!(
+                scheduled_activation_height(&params, branch),
+                Some(SPARSE_NU5_HEIGHT),
+                "{branch:?} is implied by NU5",
+            );
+        }
+    }
+
+    #[test]
+    fn upgrades_after_the_last_scheduled_one_are_unscheduled() {
+        let params = sparse_regtest();
+        for branch in [
+            BranchId::Nu6,
+            BranchId::Nu6_1,
+            BranchId::Nu6_2,
+            BranchId::Nu6_3,
+            BranchId::Nu7,
+        ] {
+            assert_eq!(
+                scheduled_activation_height(&params, branch),
+                None,
+                "{branch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sprout_activates_with_the_first_scheduled_upgrade_not_at_genesis() {
+        assert_eq!(
+            scheduled_activation_height(&sparse_regtest(), BranchId::Sprout),
+            Some(SPARSE_NU5_HEIGHT),
+        );
+    }
+
+    #[test]
+    fn branch_with_no_scheduled_upgrade_is_unscheduled() {
+        let unscheduled = super::Network::from_type(NetworkType::Regtest, &[]);
+        assert_eq!(
+            scheduled_activation_height(&unscheduled, BranchId::Sprout),
+            None
+        );
+        assert_eq!(
+            scheduled_activation_height(&unscheduled, BranchId::Nu5),
+            None
+        );
+    }
+
+    /// The lowest regtest activation height the coincident-activation property tries: the
+    /// first block after genesis, where the standard Z3 regtest configuration activates
+    /// every upgrade.
+    const FIRST_POST_GENESIS_HEIGHT: u32 = 1;
+
+    /// An exclusive upper bound on the regtest activation heights tried, well above any
+    /// height a regtest chain in practice reaches.
+    const ACTIVATION_HEIGHT_BOUND: u32 = 1_000_000;
+
+    proptest! {
+        /// A regtest network that activates every upgrade at one height, as the standard
+        /// Z3 regtest configuration does, agrees with a node reporting each of them active at
+        /// that height. Every upgrade but the last then has an empty consensus epoch, which
+        /// must not be mistaken for the upgrade being unscheduled.
+        #[test]
+        fn coincident_regtest_activations_are_compatible(
+            height in FIRST_POST_GENESIS_HEIGHT..ACTIVATION_HEIGHT_BOUND,
+        ) {
+            let nuparams: Vec<RegTestNuParam> = crate::network::NETWORK_UPGRADES
+                .iter()
+                .map(|&branch| {
+                    RegTestNuParam::try_from(format!("{:08x}:{height}", u32::from(branch)))
+                        .expect("well-formed regtest nuparam")
+                })
+                .collect();
+            let params = super::Network::from_type(NetworkType::Regtest, &nuparams);
+            let reported: Vec<ReportedUpgrade> = crate::network::NETWORK_UPGRADES
+                .iter()
+                .map(|&branch| upgrade(u32::from(branch), height, UpgradeStatus::Active))
+                .collect();
+
+            prop_assert!(detect_incompatibilities(&params, &reported).is_empty());
+        }
     }
 
     /// A minimal [`Chain`] that serves a fixed upgrade set and tip on mainnet.

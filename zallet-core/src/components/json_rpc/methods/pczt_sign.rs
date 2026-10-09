@@ -6,6 +6,7 @@ use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use pczt::Pczt;
 use pczt::roles::signer::{Error as SignerError, Signer, extract_orchard_spend_auth_signatures};
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use schemars::JsonSchema;
 use secrecy::ExposeSecret;
 use serde::Serialize;
@@ -263,7 +264,7 @@ pub(crate) async fn call(
     // Ironwood notes are Orchard-shaped, so both pools sign under the same
     // spend authorizing key. Both keys are absent exactly when the wallet does
     // not hold the seed the PCZT names.
-    let sapling_ask = usk.as_ref().map(|usk| &usk.sapling().expsk.ask);
+    let sapling_ask = usk.as_ref().map(|usk| usk.sapling().expsk().ask());
     let orchard_ask = usk
         .as_ref()
         .map(|usk| orchard::keys::SpendAuthorizingKey::from(usk.orchard()));
@@ -300,19 +301,27 @@ pub(crate) async fn call(
     };
 
     let (sapling_signed, unsigned_sapling) = sign_each("Sapling spend", 0..sapling_count, |i| {
-        sapling_ask.map(|ask| signer.sign_sapling(i, ask))
+        sapling_ask.map(|ask| signer.sign_sapling(UnwrapErr(SysRng), i, ask))
     });
 
     let (orchard_signed, unsigned_orchard) = sign_each(
         "Orchard action",
         (0..orchard_count).filter(|i| !presigned_orchard.contains(i)),
-        |i| orchard_ask.as_ref().map(|ask| signer.sign_orchard(i, ask)),
+        |i| {
+            orchard_ask
+                .as_ref()
+                .map(|ask| signer.sign_orchard(UnwrapErr(SysRng), i, ask))
+        },
     );
 
     let (ironwood_signed, unsigned_ironwood) = sign_each(
         "Ironwood action",
         (0..ironwood_count).filter(|i| !presigned_ironwood.contains(i)),
-        |i| orchard_ask.as_ref().map(|ask| signer.sign_ironwood(i, ask)),
+        |i| {
+            orchard_ask
+                .as_ref()
+                .map(|ask| signer.sign_ironwood(UnwrapErr(SysRng), i, ask))
+        },
     );
 
     if strict.unwrap_or(false)

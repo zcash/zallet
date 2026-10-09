@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use abscissa_core::Runnable;
 
 use bip0039::{Count, English, Mnemonic};
-use rand::{RngCore, rngs::OsRng};
+use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
 use secp256k1::PublicKey;
 use secrecy::{SecretVec, Zeroize};
 use transparent::address::TransparentAddress;
@@ -617,11 +617,7 @@ impl MigrateZcashdWalletCmd {
 /// then confirms.
 ///
 /// The `LocalNetwork` carries every activation the wallet database's own
-/// parameters define, up to NU6.3. `zewif-zcashd`'s activation schedule
-/// currently maps only through NU6.2, so NU6.3 travels in the struct but
-/// is not separately recorded in the document's activation map; the wallet
-/// database keeps its full configured schedule regardless. NU7 is included
-/// only when compiled with `--cfg zcash_unstable="nu7"`.
+/// parameters define, through NU7.
 fn derive_regtest_activations(params: &impl Parameters) -> zewif_zcashd::RegtestActivations {
     let height = |nu: NetworkUpgrade| {
         params
@@ -639,7 +635,6 @@ fn derive_regtest_activations(params: &impl Parameters) -> zewif_zcashd::Regtest
         nu6_1: height(NetworkUpgrade::Nu6_1),
         nu6_2: height(NetworkUpgrade::Nu6_2),
         nu6_3: height(NetworkUpgrade::Nu6_3),
-        #[cfg(zcash_unstable = "nu7")]
         nu7: height(NetworkUpgrade::Nu7),
     })
 }
@@ -939,7 +934,7 @@ fn mint_legacy_mnemonic(store: &mut zewif::SecretStore) -> zewif::SeedFingerprin
     const ENTROPY_BYTES: usize = Count::Words24.entropy_bits() / BITS_PER_BYTE;
 
     let mut entropy = [0u8; ENTROPY_BYTES];
-    OsRng.fill_bytes(&mut entropy);
+    UnwrapErr(SysRng).fill_bytes(&mut entropy);
     // The mnemonic itself zeroizes its phrase and entropy on drop.
     let mnemonic = Mnemonic::<English>::from_entropy(entropy)
         .expect("valid entropy length won't fail to generate the mnemonic");
@@ -1517,11 +1512,10 @@ mod tests {
         use zcash_keys::encoding::AddressCodec;
         use zcash_protocol::consensus::MAIN_NETWORK;
 
-        let secp = secp256k1::Secp256k1::new();
         let pubkey = |byte: u8| {
-            secp256k1::SecretKey::from_slice(&[byte; 32])
+            secp256k1::SecretKey::from_secret_bytes([byte; 32])
                 .expect("valid secret key")
-                .public_key(&secp)
+                .public_key()
         };
         let entry = |pubkey_bytes: Vec<u8>| {
             zewif::TransparentKeyEntry::new(
@@ -1585,7 +1579,6 @@ mod tests {
             nu6_1: None,
             nu6_2: None,
             nu6_3: None,
-            #[cfg(zcash_unstable = "nu7")]
             nu7: None,
         };
 
@@ -1600,7 +1593,6 @@ mod tests {
             nu6_1: None,
             nu6_2: None,
             nu6_3: None,
-            #[cfg(zcash_unstable = "nu7")]
             nu7: None,
         };
         match derive_regtest_activations(&params) {

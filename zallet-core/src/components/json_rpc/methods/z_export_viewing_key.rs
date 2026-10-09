@@ -12,7 +12,10 @@ use zcash_protocol::consensus::NetworkConstants;
 use crate::components::{
     database::DbConnection,
     json_rpc::{
-        payments::get_account_for_address, server::LegacyCode, utils::ensure_wallet_is_unlocked,
+        payments::get_account_for_address,
+        server::LegacyCode,
+        unified_encoding::{encode_ufvk, encode_uivk},
+        utils::ensure_wallet_is_unlocked,
     },
     keystore::KeyStore,
 };
@@ -59,10 +62,9 @@ pub(crate) async fn call(
             )?;
 
             Ok(ResultType(if export_ivk {
-                ufvk.to_unified_incoming_viewing_key()
-                    .encode(wallet.params())
+                encode_uivk(&ufvk.to_unified_incoming_viewing_key(), wallet.params())?
             } else {
-                ufvk.encode(wallet.params())
+                encode_ufvk(ufvk, wallet.params())?
             }))
         }
         Address::Sapling(sapling_addr) => {
@@ -89,10 +91,10 @@ pub(crate) async fn call(
             // The UIVK is derivable from the UFVK alone, so this also works for
             // imported view-only accounts.
             if export_ivk {
-                return Ok(ResultType(
-                    ufvk.to_unified_incoming_viewing_key()
-                        .encode(wallet.params()),
-                ));
+                return Ok(ResultType(encode_uivk(
+                    &ufvk.to_unified_incoming_viewing_key(),
+                    wallet.params(),
+                )?));
             }
 
             let account = wallet
@@ -153,6 +155,7 @@ pub(crate) async fn call(
 
 #[cfg(test)]
 mod tests {
+    use crate::components::json_rpc::unified_encoding::{encode_ufvk, encode_uivk};
     use zcash_keys::{
         encoding::{
             decode_extended_full_viewing_key, encode_extended_full_viewing_key,
@@ -167,7 +170,8 @@ mod tests {
 
     /// Constructs a UFVK (with only a Sapling component) from seed `[0; 32]`.
     fn test_ufvk() -> UnifiedFullViewingKey {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
@@ -177,7 +181,8 @@ mod tests {
     /// Derives a Sapling extended spending key from seed [0; 32] and returns
     /// the encoded EFVK and the default payment address.
     fn test_efvk_and_address(hrp_fvk: &str, hrp_addr: &str) -> (String, String) {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let encoded_fvk = encode_extended_full_viewing_key(hrp_fvk, &extfvk);
@@ -247,11 +252,13 @@ mod tests {
     fn different_seeds_produce_different_efvks() {
         let hrp = constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
 
-        let extsk_a = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk_a = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let efvk_a = encode_extended_full_viewing_key(hrp, &extsk_a.to_extended_full_viewing_key());
 
-        let extsk_b = sapling::zip32::ExtendedSpendingKey::master(&[1; 32]);
+        let extsk_b = sapling::zip32::ExtendedSpendingKey::master(&[1; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let efvk_b = encode_extended_full_viewing_key(hrp, &extsk_b.to_extended_full_viewing_key());
 
@@ -261,23 +268,46 @@ mod tests {
     #[test]
     fn ufvk_encodes_with_uview_hrp() {
         let ufvk = test_ufvk();
-        assert!(ufvk.encode(&MAIN_NETWORK).starts_with("uview1"));
-        assert!(ufvk.encode(&TEST_NETWORK).starts_with("uviewtest1"));
+        assert!(
+            encode_ufvk(&ufvk, &MAIN_NETWORK)
+                .expect("the test UFVK has an encoding")
+                .starts_with(&format!("{}1", constants::mainnet::HRP_UNIFIED_FVK))
+        );
+        assert!(
+            encode_ufvk(&ufvk, &TEST_NETWORK)
+                .expect("the test UFVK has an encoding")
+                .starts_with(&format!("{}1", constants::testnet::HRP_UNIFIED_FVK))
+        );
     }
 
     #[test]
     fn ufvk_encoding_round_trips() {
         let ufvk = test_ufvk();
-        let encoded = ufvk.encode(&MAIN_NETWORK);
+        let encoded = ufvk
+            .encode(&MAIN_NETWORK)
+            .expect("the test UFVK has an encoding");
         let decoded = UnifiedFullViewingKey::decode(&MAIN_NETWORK, &encoded).unwrap();
-        assert_eq!(encoded, decoded.encode(&MAIN_NETWORK));
+        assert_eq!(
+            encoded,
+            decoded
+                .encode(&MAIN_NETWORK)
+                .expect("the decoded UFVK has an encoding"),
+        );
     }
 
     #[test]
     fn uivk_encodes_with_uivk_hrp() {
         let uivk = test_ufvk().to_unified_incoming_viewing_key();
-        assert!(uivk.encode(&MAIN_NETWORK).starts_with("uivk1"));
-        assert!(uivk.encode(&TEST_NETWORK).starts_with("uivktest1"));
+        assert!(
+            encode_uivk(&uivk, &MAIN_NETWORK)
+                .expect("the test UIVK has an encoding")
+                .starts_with(&format!("{}1", constants::mainnet::HRP_UNIFIED_IVK))
+        );
+        assert!(
+            encode_uivk(&uivk, &TEST_NETWORK)
+                .expect("the test UIVK has an encoding")
+                .starts_with(&format!("{}1", constants::testnet::HRP_UNIFIED_IVK))
+        );
     }
 
     #[test]

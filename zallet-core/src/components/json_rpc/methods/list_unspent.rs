@@ -33,6 +33,7 @@ use crate::components::{
     database::DbConnection,
     json_rpc::{
         server::LegacyCode,
+        unified_encoding::encode_unified_address,
         utils::{JsonZec, parse_as_of_height, parse_minconf, value_from_zatoshis},
     },
 };
@@ -430,9 +431,15 @@ pub(crate) fn call(
                 account_uuid: account_id.expose_uuid().to_string(),
                 // TODO: Ensure we generate the same kind of shielded address as `zcashd`.
                 address: (!wallet_internal).then(|| {
-                    UnifiedAddress::from_receivers(Some(note.note().recipient()), None, None)
-                        .expect("valid")
-                        .encode(wallet.params())
+                    UnifiedAddress::from_receivers(
+                        Some(note.note().recipient()),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .map(|ua| encode_unified_address(&ua, wallet.params()))
+                    .expect("valid")
                 }),
                 value: value_from_zatoshis(note.value()),
                 value_zat: u64::from(note.value()),
@@ -482,9 +489,15 @@ pub(crate) fn call(
                 account_uuid: account_id.expose_uuid().to_string(),
                 // TODO: Ensure we generate the same kind of shielded address as `zcashd`.
                 address: (!wallet_internal).then(|| {
-                    UnifiedAddress::from_receivers(Some(note.note().recipient()), None, None)
-                        .expect("valid")
-                        .encode(wallet.params())
+                    UnifiedAddress::from_receivers(
+                        Some(note.note().recipient()),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .map(|ua| encode_unified_address(&ua, wallet.params()))
+                    .expect("valid")
                 }),
                 value: value_from_zatoshis(note.value()),
                 value_zat: u64::from(note.value()),

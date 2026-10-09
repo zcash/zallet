@@ -18,6 +18,7 @@ use crate::components::{
     database::DbConnection,
     json_rpc::{
         server::LegacyCode,
+        unified_encoding::encode_unified_address,
         utils::{parse_account_parameter, parse_diversifier_index},
     },
 };
@@ -185,7 +186,7 @@ pub(crate) async fn call(
         account,
         diversifier_index: diversifier_index.into(),
         receiver_types,
-        address: address.encode(wallet.params()),
+        address: encode_unified_address(&address, wallet.params()),
     })
 }
 
@@ -210,7 +211,7 @@ fn map_address_generation_error(
             "Error: ran out of diversifier indices. Generate a new account with z_getnewaccount"
         ),
         AddressGenerationError::ReceiverTypeNotSupported(typecode) => match typecode {
-            unified::Typecode::P2sh =>  LegacyCode::Wallet.with_static(
+            unified::Typecode::P2SH =>  LegacyCode::Wallet.with_static(
                 "Error: P2SH addresses can not be created using this RPC method.",
             ),
             _ => LegacyCode::Wallet.with_message(format!(
@@ -222,7 +223,7 @@ fn map_address_generation_error(
                 "Error: account {account} cannot generate a receiver component with type {typecode:?}.",
             ))
         }
-        AddressGenerationError::ShieldedReceiverRequired => {
+        AddressGenerationError::NoSatisfiableReceiver => {
             LegacyCode::Wallet.with_static(
                 "Error: cannot generate an address containing no shielded receivers."
             )
