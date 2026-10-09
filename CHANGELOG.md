@@ -26,6 +26,20 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- `z_sendmany`, `z_shieldcoinbase` and `z_sendfromaccount` now refuse to sign
+  unless the viewing key the wallet has recorded for the spending account is
+  exactly the one the account's seed derives, component for component.
+  `pczt_sign` applies the same check to every local account for the seed and
+  account index the PCZT's signing hints name; a PCZT that no local account
+  names, such as one built elsewhere for an offline signer, is signed as
+  before. Transactions are built against the account record while signing uses
+  a seed-derived key, so a modified record could previously have the wallet
+  select one key's notes and sign with another's, or direct shielded change to
+  a key the seed does not control. A mismatch is reported as wallet database
+  corruption or tampering, and no transaction is created.
+
 ### Removed
 
 - The `zaino` chain backend and its `zallet-zaino` binary. The release
