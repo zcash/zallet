@@ -70,6 +70,24 @@ be considered breaking changes.
   note whose memo the wallet has not yet fetched likewise omits the memo
   fields, instead of reporting the placeholder text `TODO: Always enhance
   every note` in the `memo` field (which is documented as hexadecimal).
+- `migrate-zcashd-wallet` now records the P2SH addresses of the redeem scripts it
+  imports (from zcashd's `importaddress <redeemscript>` and
+  `addmultisigaddress`) as exposed. Such an address was in use outside the wallet
+  before it was imported, but it has no derivation, so it was reached by neither
+  the exposures recorded in the migrated wallet nor the gap-limit inference that
+  covers derived receivers; one that had never appeared in a wallet transaction
+  was left with no exposure height at all. One consequence is that
+  `listaddresses`, which reports only exposed addresses, did not surface it where
+  `zcashd` did.
+- `migrate-zcashd-wallet` no longer aborts when a `zcashd` wallet's watch-only
+  pubkeys (from `importpubkey`) include one whose address the Zallet wallet already
+  tracks. Every such pubkey was registered regardless, and the wallet rejects an
+  import of key material another account holds, so migrating a second `zcashd`
+  wallet that shared a watched key failed with a database error *after* the import
+  had committed. A pubkey whose address *another* account already holds is now
+  left alone. One the importing account itself holds is still registered, which
+  upgrades a row imported by address alone -- as `zallet import-address` creates
+  -- with its public key, and exposes it.
 
 ## [0.1.0-beta.3] - 2026-08-24
 
