@@ -16,6 +16,13 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Documentation-only pull requests skip the audits below; see changes.yml for
+  # what counts as documentation and how the gate stays green.
+  changes:
+    uses: $/.github/workflows/changes.yml
+    permissions:
+      contents: read
+
   # Each chain backend lives in its own cargo workspace with its own lockfile
   # (zcash/zallet#540), so every resolution graph is audited separately.
   # Audit facts are shared: each backend workspace's supply-chain/audits.toml
@@ -25,6 +32,8 @@ jobs:
   # are not in the current graph, so a shared config cannot serve all three).
   cargo-vet:
     name: Vet Rust dependencies (${{ matrix.workspace }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -64,6 +73,8 @@ jobs:
 
   cargo-deny:
     name: Check licenses (${{ matrix.workspace }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -80,13 +91,17 @@ jobs:
   required-audits:
     name: Required audits have passed
     needs:
+      - changes
       - cargo-vet
       - cargo-deny
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Determine whether all required-pass steps succeeded
+      # A job skipped by the change-detection gate counts as passed; `changes`
+      # is itself a dependency so that its failure cannot be mistaken for a
+      # documentation-only pull request.
+      - name: Determine whether all required-pass steps succeeded or were skipped
         run: |
-          echo "${NEEDS}" | jq -e '[ .[] | .result == "success" ] | all'
+          echo "${NEEDS}" | jq -e '[ .[] | .result == "success" or .result == "skipped" ] | all'
         env:
           NEEDS: ${{ toJSON(needs) }}
