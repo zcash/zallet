@@ -1,7 +1,8 @@
 # Introduction
 
 Zallet is a full-node Zcash wallet written in Rust. It is being built as a replacement for
-the [`zcashd`] wallet.
+the [`zcashd`] wallet. If you run a `zcashd` wallet today, start with
+[Migrating from `zcashd`](zcashd/README.md).
 
 [`zcashd`]: https://github.com/zcash/zcash
 
