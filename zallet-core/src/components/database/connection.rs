@@ -5,10 +5,10 @@ use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use nonempty::NonEmpty;
-use rand::rngs::OsRng;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::SecretVec;
 use shardtree::{ShardTree, error::ShardTreeError};
-use transparent::{address::TransparentAddress, bundle::OutPoint};
+use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
 use zcash_client_backend::{
     address::UnifiedAddress,
     data_api::{
@@ -100,6 +100,12 @@ impl deadpool::managed::Manager for WalletManager {
     }
 }
 
+/// The randomness source handed to every [`WalletDb`] the wallet opens.
+///
+/// The operating system's CSPRNG, matching what `zcash_client_sqlite` uses for its own
+/// wallet databases. A failure to read OS randomness is unrecoverable, so it panics.
+pub(crate) type WalletRng = UnwrapErr<SysRng>;
+
 pub(crate) struct DbConnection {
     inner: deadpool_sync::SyncWrapper<rusqlite::Connection>,
     lock: Arc<RwLock<()>>,
@@ -113,7 +119,7 @@ impl DbConnection {
 
     pub(crate) fn with<T>(
         &self,
-        f: impl FnOnce(WalletDb<&rusqlite::Connection, Network, SystemClock, OsRng>) -> T,
+        f: impl FnOnce(WalletDb<&rusqlite::Connection, Network, SystemClock, WalletRng>) -> T,
     ) -> T {
         tokio::task::block_in_place(|| {
             let _guard = self.lock.read().unwrap();
@@ -121,14 +127,14 @@ impl DbConnection {
                 self.inner.lock().unwrap().as_ref(),
                 self.params,
                 SystemClock,
-                OsRng,
+                UnwrapErr(SysRng),
             ))
         })
     }
 
     pub(crate) fn with_mut<T>(
         &self,
-        f: impl FnOnce(WalletDb<&mut rusqlite::Connection, Network, SystemClock, OsRng>) -> T,
+        f: impl FnOnce(WalletDb<&mut rusqlite::Connection, Network, SystemClock, WalletRng>) -> T,
     ) -> T {
         tokio::task::block_in_place(|| {
             let _guard = self.lock.write().unwrap();
@@ -136,7 +142,7 @@ impl DbConnection {
                 self.inner.lock().unwrap().as_mut(),
                 self.params,
                 SystemClock,
-                OsRng,
+                UnwrapErr(SysRng),
             ))
         })
     }
@@ -200,7 +206,7 @@ impl DbConnection {
         pubkeys: impl ExactSizeIterator<Item = secp256k1::PublicKey>,
     ) -> Result<
         (),
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletRead>::Error,
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as WalletRead>::Error,
     > {
         self.with_mut(|mut db_data| {
             db_data.transactionally(|wdb| {
@@ -218,11 +224,12 @@ impl DbConnection {
 }
 
 impl WalletRead for DbConnection {
-    type Error = <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletRead>::Error;
+    type Error =
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as WalletRead>::Error;
     type AccountId =
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletRead>::AccountId;
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as WalletRead>::AccountId;
     type Account =
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletRead>::Account;
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as WalletRead>::Account;
 
     fn get_account_ids(&self) -> Result<Vec<Self::AccountId>, Self::Error> {
         self.with(|db_data| db_data.get_account_ids())
@@ -429,6 +436,22 @@ impl WalletRead for DbConnection {
         self.with(|db_data| db_data.get_transparent_address_metadata(account, address))
     }
 
+    fn get_unspent_transparent_outpoints(
+        &self,
+    ) -> Result<HashMap<OutPoint, Self::AccountId>, Self::Error> {
+        self.with(|db_data| db_data.get_unspent_transparent_outpoints())
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn get_transparent_receiver_accounts(
+        &self,
+    ) -> Result<
+        HashMap<TransparentAddress, (Self::AccountId, Option<TransparentKeyScope>)>,
+        Self::Error,
+    > {
+        self.with(|db_data| db_data.get_transparent_receiver_accounts())
+    }
+
     fn utxo_query_height(&self, account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
         self.with(|db_data| db_data.utxo_query_height(account))
     }
@@ -459,11 +482,11 @@ impl WalletRead for DbConnection {
 
 impl InputSource for DbConnection {
     type Error =
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as InputSource>::Error;
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as InputSource>::Error;
     type AccountId =
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as InputSource>::AccountId;
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as InputSource>::AccountId;
     type NoteRef =
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as InputSource>::NoteRef;
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as InputSource>::NoteRef;
 
     fn get_spendable_note(
         &self,
@@ -616,7 +639,7 @@ impl InputSource for DbConnection {
 
 impl WalletWrite for DbConnection {
     type UtxoRef =
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletWrite>::UtxoRef;
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as WalletWrite>::UtxoRef;
 
     fn create_account(
         &mut self,
@@ -779,6 +802,13 @@ impl WalletWrite for DbConnection {
         self.with_mut(|mut db_data| db_data.truncate_to_chain_state(chain_state))
     }
 
+    fn queue_rescan(
+        &mut self,
+        range: Range<BlockHeight>,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        self.with_mut(|mut db_data| db_data.queue_rescan(range))
+    }
+
     fn rewind_to_chain_state(
         &mut self,
         chain_state: ChainState,
@@ -849,9 +879,10 @@ impl WalletWrite for DbConnection {
 }
 
 impl OutputLockStore for DbConnection {
-    type Error = <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletRead>::Error;
+    type Error =
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as WalletRead>::Error;
     type AccountId =
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletRead>::AccountId;
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as WalletRead>::AccountId;
 
     fn lock_outputs(
         &mut self,
@@ -877,9 +908,9 @@ impl OutputLockStore for DbConnection {
 
 impl WalletCommitmentTrees for DbConnection {
     type Error =
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletCommitmentTrees>::Error;
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as WalletCommitmentTrees>::Error;
     type SaplingShardStore<'a> =
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletCommitmentTrees>::SaplingShardStore<'a>;
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as WalletCommitmentTrees>::SaplingShardStore<'a>;
 
     fn with_sapling_tree_mut<F, A, E>(&mut self, callback: F) -> Result<A, E>
     where
@@ -911,7 +942,7 @@ impl WalletCommitmentTrees for DbConnection {
     }
 
     type OrchardShardStore<'a> =
-        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletCommitmentTrees>::OrchardShardStore<'a>;
+        <WalletDb<rusqlite::Connection, Network, SystemClock, WalletRng> as WalletCommitmentTrees>::OrchardShardStore<'a>;
 
     fn with_orchard_tree_mut<F, A, E>(&mut self, callback: F) -> Result<A, E>
     where

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64ct::{Base64, Encoding};
-use rand::{Rng, rngs::OsRng};
+use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 use tracing::{info, warn};
 
 use super::authorization::PasswordHash;
@@ -43,7 +43,7 @@ pub(crate) fn cookie_path(datadir: &Path) -> PathBuf {
 pub(crate) fn generate_cookie(
     datadir: &Path,
 ) -> Result<(String, PasswordHash, CookieGuard), Error> {
-    let password: [u8; 32] = OsRng.r#gen();
+    let password: [u8; 32] = UnwrapErr(SysRng).random();
     let password = Base64::encode_string(&password);
     let cookie = format!("{COOKIE_USER}:{password}");
 

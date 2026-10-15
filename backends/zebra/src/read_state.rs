@@ -128,7 +128,7 @@ pub fn network_to_zebra<P: Parameters>(
                 nu6_1: height(NetworkUpgrade::Nu6_1),
                 nu6_2: height(NetworkUpgrade::Nu6_2),
                 nu6_3: height(NetworkUpgrade::Nu6_3),
-                nu7: None,
+                nu7: height(NetworkUpgrade::Nu7),
             };
             Ok(ZebraNetwork::new_regtest(heights.into()))
         }
@@ -216,4 +216,43 @@ pub async fn init_read_state_service(
             .map_err(ReadStateError::Init)?;
 
     Ok((read_state_service, sync_task))
+}
+
+#[cfg(test)]
+mod tests {
+    use zallet_core::network::{Network, RegTestNuParam};
+    use zcash_protocol::consensus::{BranchId, NetworkType};
+    use zebra_chain::{block::Height, parameters::NetworkUpgrade};
+
+    use super::network_to_zebra;
+
+    /// Regtest activation height configured for NU6.3.
+    const NU6_3_HEIGHT: u32 = 50;
+    /// Regtest activation height configured for NU7.
+    const NU7_HEIGHT: u32 = 60;
+
+    fn nuparam(branch: BranchId, height: u32) -> RegTestNuParam {
+        RegTestNuParam::try_from(format!("{:08x}:{height}", u32::from(branch)))
+            .expect("well-formed regtest nuparam")
+    }
+
+    #[test]
+    fn regtest_activation_heights_are_forwarded_to_zebra() {
+        let nuparams = [
+            nuparam(BranchId::Nu6_3, NU6_3_HEIGHT),
+            nuparam(BranchId::Nu7, NU7_HEIGHT),
+        ];
+        let params = Network::from_type(NetworkType::Regtest, &nuparams);
+        let zebra_network = network_to_zebra(&params).expect("regtest maps to a Zebra network");
+        let activations = zebra_network.activation_list();
+
+        assert_eq!(
+            activations.get(&Height(NU6_3_HEIGHT)),
+            Some(&NetworkUpgrade::Nu6_3)
+        );
+        assert_eq!(
+            activations.get(&Height(NU7_HEIGHT)),
+            Some(&NetworkUpgrade::Nu7)
+        );
+    }
 }

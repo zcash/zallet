@@ -3,7 +3,7 @@ use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use schemars::JsonSchema;
 use secp256k1::{
-    Message, SECP256K1,
+    Message,
     ecdsa::{RecoverableSignature, RecoveryId},
 };
 use serde::Serialize;
@@ -93,7 +93,7 @@ pub(crate) fn call(
     let hash = message_hash(message);
 
     // Attempt to recover the public key from the signature
-    let recid = match RecoveryId::from_i32(recovery_id) {
+    let recid = match RecoveryId::try_from(recovery_id) {
         Ok(id) => id,
         Err(_) => return Ok(ResultType(false)),
     };
@@ -103,12 +103,9 @@ pub(crate) fn call(
         Err(_) => return Ok(ResultType(false)),
     };
 
-    let msg = match Message::from_digest_slice(&hash) {
-        Ok(m) => m,
-        Err(_) => return Ok(ResultType(false)),
-    };
+    let msg = Message::from_digest(hash);
 
-    let recovered_pubkey = match SECP256K1.recover_ecdsa(&msg, &recoverable_sig) {
+    let recovered_pubkey = match recoverable_sig.recover_ecdsa(msg) {
         Ok(pk) => pk,
         Err(_) => return Ok(ResultType(false)),
     };

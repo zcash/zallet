@@ -276,11 +276,11 @@ pub(super) fn propose_and_check(
                 match (
                     privacy_policy.allow_revealed_amounts(),
                     (
-                        ua.receiver_types().contains(&unified::Typecode::Orchard),
+                        ua.receiver_types().contains(&unified::Typecode::ORCHARD),
                         max_orchard_available - value,
                     ),
                     (
-                        ua.receiver_types().contains(&unified::Typecode::Sapling),
+                        ua.receiver_types().contains(&unified::Typecode::SAPLING),
                         max_sapling_available - value,
                     ),
                 ) {
@@ -1381,7 +1381,7 @@ pub(super) async fn verify_and_broadcast_transactions<C: Chain, FeeRuleT, NoteRe
             })
             .unwrap_or_default();
 
-        check_transparent_outputs(outputs, expected, ufvk.transparent(), |addr| {
+        check_transparent_outputs(outputs, expected, ufvk.p2pkh(), |addr| {
             wallet
                 .get_transparent_address_metadata(account_id, addr)
                 .map(|meta| meta.map(|m| m.source().clone()))
@@ -1541,7 +1541,7 @@ mod transparent_output_tests {
         let account = AccountId::try_from(account).ok()?;
         let usk =
             UnifiedSpendingKey::from_seed(&consensus::Network::TestNetwork, seed, account).ok()?;
-        usk.to_unified_full_viewing_key().transparent().cloned()
+        usk.to_unified_full_viewing_key().p2pkh().cloned()
     }
 
     /// The address the wallet would legitimately place at (`scope`, `index`) under `key`.
@@ -2132,8 +2132,9 @@ mod proposal_policy_tests {
     fn note_in_pool(pool: ShieldedPool, value: u64) -> Note {
         match pool {
             ShieldedPool::Sapling => {
-                let (_, recipient) =
-                    sapling::zip32::ExtendedSpendingKey::master(&[0x2a; 32]).default_address();
+                let (_, recipient) = sapling::zip32::ExtendedSpendingKey::master(&[0x2a; 32])
+                    .expect("the test seed derives a valid master key")
+                    .default_address();
                 Note::Sapling(sapling::Note::from_parts(
                     recipient,
                     sapling::value::NoteValue::from_raw(value),
