@@ -131,3 +131,5 @@ This error is not the main risk of migrating against a partially synced node:
 such a node can silently produce a birthday later than the wallet's history,
 with no error at all. Let `zebrad` reach the chain tip before migrating (see
 [How the wallet birthday is chosen](cli/migrate-zcashd-wallet.md#how-the-wallet-birthday-is-chosen)).
+
+<!-- CI probe for #881: a documentation-only change. Not for merge. -->
