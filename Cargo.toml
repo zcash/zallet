@@ -153,7 +153,7 @@ deadpool = "0.12"
 deadpool-sqlite = "0.12"
 deadpool-sync = "0.1"
 incrementalmerkletree = "0.8.2"
-rusqlite = { version = "0.37", features = ["time"] }
+rusqlite = { version = "0.37", features = ["backup", "time"] }
 schemerz = "0.2"
 schemerz-rusqlite = "0.370.0"
 shardtree = "0.7"

@@ -70,6 +70,13 @@ cmd-generate-mnemonic-confirm-backup-next =
     it somewhere durable; until you do, {-zallet} will not derive accounts or addresses
     from it.
 
+cmd-backup-complete = Wallet database backed up to {$path} ({$pages} pages).
+cmd-backup-identity-reminder =
+    Reminder: restoring this backup also requires the age encryption identity at
+    {$identity}. It never changes, so back it up once, in a different location
+    from the wallet database backup; anyone holding both can decrypt the wallet's
+    key material.
+
 cmd-confirm-backup-already-confirmed = This phrase’s backup has already been confirmed.
 cmd-confirm-backup-how-to-obtain =
     {-zallet} never displays a recovery phrase. To confirm this one’s backup you need
@@ -270,6 +277,40 @@ err-seed-selection-seedfp-required =
     The wallet holds more than one mnemonic phrase; pass --seedfp to choose which one.
 err-seed-selection-unknown-seedfp =
     The given seed fingerprint does not match any mnemonic phrase in the wallet.
+
+## `backup` command errors
+
+err-backup-cannot-create = The backup file could not be created at {$path}: {$error}
+err-backup-destination-exists =
+    A file already exists at {$path}; refusing to overwrite it, since it may be a
+    previous backup. Choose a different path, or pass a directory to get a
+    timestamped file name.
+err-backup-integrity = The backup failed its integrity check ({$detail}) and was discarded.
+err-backup-needs-recovery =
+    The wallet database was not shut down cleanly and needs recovery, which this
+    read-only backup cannot perform. Start {-zallet} once and stop it cleanly to
+    recover the database, then retry the backup.
+err-backup-no-wallet = No wallet database exists at {$path}, so there is nothing to back up.
+err-backup-not-completing =
+    The backup did not complete within {$seconds} seconds because ongoing wallet
+    writes keep restarting the copy. Retry when the wallet is less busy (for
+    example, once initial sync has finished), or stop the wallet and retry.
+err-backup-partial-in-the-way =
+    An in-progress backup file already exists at {$path}. Either another backup is
+    currently running to the same destination, or an interrupted backup left it
+    behind; if no backup is running, delete that file and retry.
+err-backup-post-publication =
+    The backup at {$path} is complete and verified, but a step after publishing
+    it failed: {$error}. The backup itself is usable; its in-progress twin file
+    may remain beside it, or its directory entry may not yet be durable against
+    a crash. Do not delete the backup over this.
+err-backup-source-busy =
+    The backup failed because the wallet database stayed continuously locked for
+    {$seconds} seconds. Something other than a healthy {-zallet} is holding the
+    database (an abandoned transaction, or another process); close it and retry.
+err-backup-timestamp-collision =
+    A backup taken within the same second already created {$path}. Retry in a
+    moment to get a new timestamped file name.
 
 ## Backup confirmation errors
 
