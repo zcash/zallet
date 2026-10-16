@@ -34,6 +34,7 @@
   - [import-mnemonic](cli/import-mnemonic.md)
   - [export-mnemonic](cli/export-mnemonic.md)
   - [confirm-backup](cli/confirm-backup.md)
+  - [backup](cli/backup.md)
   - [import-address](cli/import-address.md)
   - [add-rpc-user](cli/add-rpc-user.md)
   - [rpc](cli/rpc.md)
