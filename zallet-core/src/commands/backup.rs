@@ -16,6 +16,7 @@ use crate::{
     commands::AsyncRunnable,
     error::{Error, ErrorKind},
     fl,
+    fs::{Publish, PublishError, publish_private_file, temp_path},
     prelude::*,
 };
 
@@ -202,72 +203,57 @@ fn resolve_destination(destination: &Path, now: time::OffsetDateTime) -> Result<
     Ok(destination)
 }
 
+/// Suffix of the in-progress file the backup is written to before publication.
+///
+/// The name is deterministic so it doubles as mutual exclusion between
+/// concurrent backups to the same destination; a stale one left by an
+/// interrupted run is refused with an actionable error rather than reused.
+const PARTIAL_SUFFIX: &str = ".partial";
+
 /// Copies the wallet database to `destination` using SQLite's Online Backup API,
 /// returning the number of pages copied.
 ///
-/// The copy lands in a temporary file beside the destination and is published
-/// only after it has been verified and synced to disk, so `destination` either
-/// does not exist or is a complete, checked backup, never a torn copy.
+/// The copy lands in an owner-only temporary file beside the destination and is
+/// published only after it has been verified and synced to disk, so
+/// `destination` either does not exist or is a complete, checked backup, never
+/// a torn copy.
 fn copy_database(source: &Path, destination: &Path, limits: &CopyLimits) -> Result<u64, Error> {
-    let tmp = tmp_path(destination);
-
-    // Create the temporary file up front with owner-only permissions, mirroring
-    // `Database::open`: the backup contains everything the wallet database does,
-    // so it must never exist with wider permissions.
-    create_private_file(&tmp)?;
-
-    let result = copy_into(source, &tmp, limits).and_then(|pages| {
-        publish(&tmp, destination)?;
-        Ok(pages)
-    });
-
-    if result.is_err() {
-        // Leave nothing behind on failure; a partial file that looks like a
-        // backup is worse than no file.
-        let _ = fs::remove_file(&tmp);
-    }
-
-    result
+    publish_private_file(
+        destination,
+        Publish::NoClobber {
+            temp_suffix: PARTIAL_SUFFIX,
+        },
+        |tmp| copy_into(source, tmp, limits),
+    )
+    .map_err(|e| match e {
+        PublishError::Create(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            ErrorKind::Generic
+                .context(fl!(
+                    "err-backup-partial-in-the-way",
+                    path = tmp_path(destination).display().to_string(),
+                ))
+                .into()
+        }
+        PublishError::Create(e) => {
+            // The raw I/O error names neither the operation nor the file.
+            ErrorKind::Generic
+                .context(fl!(
+                    "err-backup-cannot-create",
+                    path = tmp_path(destination).display().to_string(),
+                    error = e.to_string(),
+                ))
+                .into()
+        }
+        PublishError::Fill(e) => e,
+        PublishError::DestinationExists => destination_exists_error(destination),
+        PublishError::Publish(e) => ErrorKind::Generic.context(e).into(),
+        PublishError::PostPublish(e) => published_backup_error(destination, e),
+    })
 }
 
 /// The in-progress file the backup is written to before it is published.
 fn tmp_path(destination: &Path) -> PathBuf {
-    let mut name = destination
-        .file_name()
-        .map(|n| n.to_os_string())
-        .unwrap_or_default();
-    name.push(".partial");
-    destination.with_file_name(name)
-}
-
-fn create_private_file(path: &Path) -> Result<(), Error> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    // Owner-only on Unix, mirroring `Database::open`. Elsewhere the file
-    // inherits the destination directory's access control (see the book page).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path).map(|_| ()).map_err(|e| {
-        let message = if e.kind() == std::io::ErrorKind::AlreadyExists {
-            // Not deleted here: refusing to reuse the path is also what keeps
-            // two concurrent backups from writing the same file.
-            fl!(
-                "err-backup-partial-in-the-way",
-                path = path.display().to_string(),
-            )
-        } else {
-            // The raw I/O error names neither the operation nor the file.
-            fl!(
-                "err-backup-cannot-create",
-                path = path.display().to_string(),
-                error = e.to_string(),
-            )
-        };
-        ErrorKind::Generic.context(message).into()
-    })
+    temp_path(destination, PARTIAL_SUFFIX)
 }
 
 /// Maps a SQLite error from the copy to an operator-actionable Zallet error.
@@ -381,58 +367,7 @@ fn copy_into(source: &Path, tmp: &Path, limits: &CopyLimits) -> Result<u64, Erro
             .into());
     }
 
-    drop(dst);
-
-    // The rename below is only meaningful if the file contents reach disk first.
-    // The handle must be writable: on Windows, flushing requires write access.
-    fs::OpenOptions::new()
-        .write(true)
-        .open(tmp)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| ErrorKind::Generic.context(e))?;
-
     Ok(pages)
-}
-
-/// Publishes `tmp` at `destination` without replacing any existing file, then
-/// syncs the parent directory (Unix only) so the completed backup survives a
-/// crash immediately after this command reports success.
-fn publish(tmp: &Path, destination: &Path) -> Result<(), Error> {
-    // A hard link publishes atomically and fails if the destination exists,
-    // where `rename` would silently replace a file that appeared during the
-    // copy. Filesystems without hard-link support fall back to a checked
-    // rename, which narrows that race without closing it.
-    match fs::hard_link(tmp, destination) {
-        Ok(()) => {
-            // The verified backup now has two names; retire the in-progress one.
-            fs::remove_file(tmp).map_err(|e| published_backup_error(destination, e))?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(destination_exists_error(destination));
-        }
-        Err(_) => {
-            // A genuine failure (not just missing hard-link support)
-            // resurfaces from the rename.
-            if destination.exists() {
-                return Err(destination_exists_error(destination));
-            }
-            fs::rename(tmp, destination).map_err(|e| ErrorKind::Generic.context(e))?;
-        }
-    }
-
-    #[cfg(unix)]
-    if let Some(parent) = destination.parent() {
-        let parent = if parent.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            parent
-        };
-        fs::File::open(parent)
-            .and_then(|d| d.sync_all())
-            .map_err(|e| published_backup_error(destination, e))?;
-    }
-
-    Ok(())
 }
 
 fn destination_exists_error(destination: &Path) -> Error {

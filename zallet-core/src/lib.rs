@@ -43,9 +43,8 @@
 //! [Abscissa]: https://github.com/iqlusioninc/abscissa
 
 // `unsafe` code is forbidden on every platform except Windows, where the narrowly
-// scoped `#[allow(unsafe_code)]` FFI calls in `components::json_rpc::server::cookie`
-// apply an owner-only DACL that `std` cannot express. Everything else on Windows is
-// still denied.
+// scoped `#[allow(unsafe_code)]` FFI calls in `fs` apply an owner-only DACL that
+// `std` cannot express. Everything else on Windows is still denied.
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 #![cfg_attr(windows, deny(unsafe_code))]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -65,6 +64,7 @@ mod commands;
 pub mod components;
 pub mod config;
 pub mod error;
+mod fs;
 mod i18n;
 pub mod network;
 mod prelude;

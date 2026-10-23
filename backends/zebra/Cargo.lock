@@ -6570,7 +6570,6 @@ dependencies = [
  "shardtree",
  "subtle",
  "syn 2.0.118",
- "tempfile",
  "time",
  "tokio",
  "toml 0.8.23",

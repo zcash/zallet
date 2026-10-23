@@ -37,6 +37,13 @@ be considered breaking changes.
   the copy from completing. Scheduled periodic backups from inside the
   running process remain tracked in #195.
 
+### Changed
+
+- `zallet generate-encryption-identity` now creates the identity file with a
+  protected owner-only ACL on Windows, matching the owner-only permissions it
+  already used on Unix. Previously the file inherited the destination
+  directory's access control on Windows.
+
 ### Removed
 
 - The `zaino` chain backend and its `zallet-zaino` binary. The release

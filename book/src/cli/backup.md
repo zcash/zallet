@@ -15,16 +15,20 @@ previous good backup.
 
 The backup is written to a temporary file first and only published after it has passed a
 database integrity check and been synced to disk, and publication never replaces an
-existing file, even one that appeared while the copy was running. If this command reports
+existing file, even one that appeared while the copy was running. (On filesystems
+without hard-link support, such as FAT and exFAT, that refusal is a checked fallback
+rather than an atomic operation; prefer a destination filesystem with hard links when
+anything else might write to the same path.) If this command reports
 success, the file at `DESTINATION` is a complete, verified backup; if it reports failure,
 no partial file is left behind. The one exception is a backup interrupted from outside
 (a kill signal or power loss), which can leave the in-progress `<DESTINATION>.partial`
 file behind; later backups to the same destination refuse to touch it, and the error
 says where it is so it can be deleted once no backup is running.
 
-Two guarantees are narrower off Unix. The backup file is created owner-only on Unix; on
-other platforms it inherits the destination directory's access control, so write backups
-into a directory that only your user can read. And the published file's directory entry
+The backup file is created owner-only from the moment it exists, on Unix (mode `0600`)
+and on Windows (a protected owner-only ACL); on any other platform it inherits the
+destination directory's access control, so write backups into a directory only your
+user can read. One guarantee is narrower off Unix: the published file's directory entry
 is made crash-durable (by syncing the containing directory) on Unix only; elsewhere its
 durability immediately after success is left to the operating system.
 

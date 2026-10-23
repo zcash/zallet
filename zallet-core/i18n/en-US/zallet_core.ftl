@@ -59,6 +59,10 @@ cmd-generate-encryption-identity-public-key = Public key: {$pubkey}
 cmd-generate-encryption-identity-written = Encryption identity written to {$path}
 cmd-generate-encryption-identity-write-failed = Failed to write encryption identity to {$path}: {$error}
 cmd-generate-encryption-identity-exists = An encryption identity already exists at {$path}; refusing to overwrite it to avoid irrecoverable key loss.
+cmd-generate-encryption-identity-post-publication =
+    The encryption identity at {$path} was written and published, but a step after
+    publishing it failed: {$error}. The identity itself is complete; do not delete
+    it. A temporary twin file may remain beside it and can be removed.
 cmd-generate-encryption-identity-passphrase-prompt = Enter passphrase to encrypt the identity:
 cmd-generate-encryption-identity-passphrase-confirm = Confirm passphrase:
 cmd-generate-encryption-identity-passphrase-mismatch = Passphrases do not match

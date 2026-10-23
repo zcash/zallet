@@ -80,9 +80,6 @@ rust_decimal.workspace = true
 schemars.workspace = true
 tower = { workspace = true, features = ["timeout"] }
 
-# Testing
-tempfile.workspace = true
-
 # Tracing
 console-subscriber = { workspace = true, optional = true }
 tracing.workspace = true
@@ -172,6 +169,7 @@ abscissa_core = { workspace = true, features = ["testing"] }
 once_cell.workspace = true
 proptest.workspace = true
 regex.workspace = true
+tempfile.workspace = true
 trycmd.workspace = true
 
 [features]
