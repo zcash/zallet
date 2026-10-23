@@ -354,10 +354,10 @@ pub(crate) async fn call<C: Chain>(
         .get_unified_full_viewing_keys()
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
     {
-        if let Some(t) = ufvk.transparent() {
-            let (internal_ovk, external_ovk) = t.ovks_for_shielding();
-            ovks.push((internal_ovk.as_bytes(), zip32::Scope::Internal));
-            ovks.push((external_ovk.as_bytes(), zip32::Scope::External));
+        if let Some(t) = ufvk.p2pkh() {
+            let shielding_ovks = t.ovks_for_shielding();
+            ovks.push((shielding_ovks.internal().as_bytes(), zip32::Scope::Internal));
+            ovks.push((shielding_ovks.external().as_bytes(), zip32::Scope::External));
         }
         for scope in [zip32::Scope::External, zip32::Scope::Internal] {
             if let Some(dfvk) = ufvk.sapling() {
@@ -628,9 +628,12 @@ pub(crate) async fn call<C: Chain>(
                     addr.map(|address| {
                         ZcashAddress::from_unified(
                             wallet.params().network_type(),
-                            unified::Address::try_from_items(vec![unified::Receiver::Orchard(
-                                address.to_raw_address_bytes(),
-                            )])
+                            unified::Address::try_from_items(
+                                unified::Revision::R0,
+                                vec![unified::Uitem::Data(unified::Receiver::Orchard(
+                                    address.to_raw_address_bytes(),
+                                ))],
+                            )
                             .expect("valid"),
                         )
                         .encode()
@@ -1226,7 +1229,8 @@ mod tests {
         // derivation, so that only the "ZcTaddrToSapling" personalization rests on a
         // literal rather than a maintained, tested implementation.
         let i_l = [7u8; 32];
-        let expsk = sapling::keys::ExpandedSpendingKey::from_spending_key(&i_l);
-        assert_eq!(&PrfExpand::SAPLING_OVK.with(&i_l)[..32], &expsk.ovk.0[..]);
+        let expsk = sapling::keys::ExpandedSpendingKey::from_spending_key(&i_l)
+            .expect("the test spending key expands to a valid key");
+        assert_eq!(&PrfExpand::SAPLING_OVK.with(&i_l)[..32], &expsk.ovk().0[..]);
     }
 }

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use abscissa_core::Runnable;
 
 use bip0039::{Count, English, Mnemonic};
-use rand::{RngCore, rngs::OsRng};
+use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
 use secp256k1::PublicKey;
 use secrecy::{SecretVec, Zeroize};
 use transparent::address::TransparentAddress;
@@ -473,7 +473,7 @@ impl MigrateZcashdWalletCmd {
         // write occurs. This runs outside the wallet database's write lock: the
         // keystore shares that lock, so diverting secrets from within `import_wallet`
         // (which holds the write lock for its whole run) would deadlock.
-        let mut sink = KeyStoreSecretSink::new(&keystore, network_params).await?;
+        let mut sink = KeyStoreSecretSink::new(&keystore, network_params.network_type()).await?;
         let import_result = (|| -> Result<ZewifImportReport, MigrateError> {
             if let Some(zewif::Secrets::Plain(store)) = document.secrets() {
                 info!(
@@ -647,11 +647,7 @@ fn finish_import(
 /// then confirms.
 ///
 /// The `LocalNetwork` carries every activation the wallet database's own
-/// parameters define, up to NU6.3. `zewif-zcashd`'s activation schedule
-/// currently maps only through NU6.2, so NU6.3 travels in the struct but
-/// is not separately recorded in the document's activation map; the wallet
-/// database keeps its full configured schedule regardless. NU7 is included
-/// only when compiled with `--cfg zcash_unstable="nu7"`.
+/// parameters define, through NU7.
 fn derive_regtest_activations(params: &impl Parameters) -> zewif_zcashd::RegtestActivations {
     let height = |nu: NetworkUpgrade| {
         params
@@ -669,7 +665,6 @@ fn derive_regtest_activations(params: &impl Parameters) -> zewif_zcashd::Regtest
         nu6_1: height(NetworkUpgrade::Nu6_1),
         nu6_2: height(NetworkUpgrade::Nu6_2),
         nu6_3: height(NetworkUpgrade::Nu6_3),
-        #[cfg(zcash_unstable = "nu7")]
         nu7: height(NetworkUpgrade::Nu7),
     })
 }
@@ -1200,10 +1195,10 @@ fn is_seedless_legacy_account(account: &zewif::Account) -> bool {
 fn mint_legacy_mnemonic(store: &mut zewif::SecretStore) -> zewif::SeedFingerprint {
     // Matches the entropy handling of the `generate-mnemonic` command.
     const BITS_PER_BYTE: usize = 8;
-    const ENTROPY_BYTES: usize = Count::Words24.entropy_bits() / BITS_PER_BYTE;
+    const ENTROPY_BYTES: usize = Count::Words24.entropy_bit_length() / BITS_PER_BYTE;
 
     let mut entropy = [0u8; ENTROPY_BYTES];
-    OsRng.fill_bytes(&mut entropy);
+    UnwrapErr(SysRng).fill_bytes(&mut entropy);
     // The mnemonic itself zeroizes its phrase and entropy on drop.
     let mnemonic = Mnemonic::<English>::from_entropy(entropy)
         .expect("valid entropy length won't fail to generate the mnemonic");
@@ -1781,11 +1776,10 @@ mod tests {
         use zcash_keys::encoding::AddressCodec;
         use zcash_protocol::consensus::MAIN_NETWORK;
 
-        let secp = secp256k1::Secp256k1::new();
         let pubkey = |byte: u8| {
-            secp256k1::SecretKey::from_slice(&[byte; 32])
+            secp256k1::SecretKey::from_secret_bytes([byte; 32])
                 .expect("valid secret key")
-                .public_key(&secp)
+                .public_key()
         };
         let entry = |pubkey_bytes: Vec<u8>| {
             zewif::TransparentKeyEntry::new(
@@ -1862,9 +1856,9 @@ mod tests {
             at_height: BlockHeight::from_u32(100),
             gap_metadata: GapMetadata::DerivationUnknown,
         };
-        let pubkey = secp256k1::SecretKey::from_slice(&[0x01; 32])
+        let pubkey = secp256k1::SecretKey::from_secret_bytes([0x01; 32])
             .expect("valid secret key")
-            .public_key(&secp256k1::Secp256k1::new());
+            .public_key();
 
         let unexposed_high = TransparentAddress::ScriptHash([0x0b; 20]);
         let unexposed_low = TransparentAddress::ScriptHash([0x0a; 20]);
@@ -1971,11 +1965,10 @@ mod tests {
     fn watch_pubkeys_exclude_what_the_wallet_already_tracks() {
         use transparent::address::TransparentAddress;
 
-        let secp = secp256k1::Secp256k1::new();
         let key = |byte: u8| {
-            secp256k1::SecretKey::from_slice(&[byte; 32])
+            secp256k1::SecretKey::from_secret_bytes([byte; 32])
                 .expect("valid secret key")
-                .public_key(&secp)
+                .public_key()
         };
         let fresh = key(0x01);
         let already_tracked = key(0x02);
@@ -2048,11 +2041,10 @@ mod tests {
     fn watch_pubkeys_keep_a_standalone_row_held_by_the_importing_account() {
         use transparent::address::TransparentAddress;
 
-        let secp = secp256k1::Secp256k1::new();
         let key = |byte: u8| {
-            secp256k1::SecretKey::from_slice(&[byte; 32])
+            secp256k1::SecretKey::from_secret_bytes([byte; 32])
                 .expect("valid secret key")
-                .public_key(&secp)
+                .public_key()
         };
         let ours = key(0x01);
         let theirs = key(0x02);
@@ -2114,7 +2106,6 @@ mod tests {
             nu6_1: None,
             nu6_2: None,
             nu6_3: None,
-            #[cfg(zcash_unstable = "nu7")]
             nu7: None,
         };
 
@@ -2129,7 +2120,6 @@ mod tests {
             nu6_1: None,
             nu6_2: None,
             nu6_3: None,
-            #[cfg(zcash_unstable = "nu7")]
             nu7: None,
         };
         match derive_regtest_activations(&params) {

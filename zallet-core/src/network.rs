@@ -31,7 +31,6 @@ pub(crate) const NETWORK_UPGRADES: &[consensus::BranchId] = &[
     consensus::BranchId::Nu6_1,
     consensus::BranchId::Nu6_2,
     consensus::BranchId::Nu6_3,
-    #[cfg(zcash_unstable = "nu7")]
     consensus::BranchId::Nu7,
 ];
 
@@ -80,7 +79,6 @@ impl Network {
                     nu6_1: height(consensus::BranchId::Nu6_1),
                     nu6_2: height(consensus::BranchId::Nu6_2),
                     nu6_3: height(consensus::BranchId::Nu6_3),
-                    #[cfg(zcash_unstable = "nu7")]
                     nu7: height(consensus::BranchId::Nu7),
                 })
             }

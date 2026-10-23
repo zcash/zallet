@@ -119,6 +119,9 @@ pub(super) fn build_request(amounts: &[AmountParameter]) -> RpcResult<Transactio
                 zcash_client_backend::zip321::PaymentError::ZeroValuedTransparentOutput => {
                     "Cannot send zero-valued output to transparent recipient"
                 }
+                zcash_client_backend::zip321::PaymentError::SproutAddress => {
+                    "Sending funds into the Sprout pool is no longer supported."
+                }
             })
         })?;
 
@@ -276,11 +279,11 @@ pub(super) fn propose_and_check(
                 match (
                     privacy_policy.allow_revealed_amounts(),
                     (
-                        ua.receiver_types().contains(&unified::Typecode::Orchard),
+                        ua.receiver_types().contains(&unified::Typecode::ORCHARD),
                         max_orchard_available - value,
                     ),
                     (
-                        ua.receiver_types().contains(&unified::Typecode::Sapling),
+                        ua.receiver_types().contains(&unified::Typecode::SAPLING),
                         max_sapling_available - value,
                     ),
                 ) {
@@ -1381,7 +1384,7 @@ pub(super) async fn verify_and_broadcast_transactions<C: Chain, FeeRuleT, NoteRe
             })
             .unwrap_or_default();
 
-        check_transparent_outputs(outputs, expected, ufvk.transparent(), |addr| {
+        check_transparent_outputs(outputs, expected, ufvk.p2pkh(), |addr| {
             wallet
                 .get_transparent_address_metadata(account_id, addr)
                 .map(|meta| meta.map(|m| m.source().clone()))
@@ -1541,7 +1544,7 @@ mod transparent_output_tests {
         let account = AccountId::try_from(account).ok()?;
         let usk =
             UnifiedSpendingKey::from_seed(&consensus::Network::TestNetwork, seed, account).ok()?;
-        usk.to_unified_full_viewing_key().transparent().cloned()
+        usk.to_unified_full_viewing_key().p2pkh().cloned()
     }
 
     /// The address the wallet would legitimately place at (`scope`, `index`) under `key`.
@@ -1831,6 +1834,9 @@ mod build_request_tests {
 
     use proptest::prelude::*;
 
+    use zcash_address::ToAddress;
+    use zcash_protocol::consensus::NetworkType;
+
     use super::arb::*;
     use super::*;
     use crate::components::json_rpc::utils::zec_str;
@@ -1949,6 +1955,23 @@ mod build_request_tests {
             let request = build_request(&amounts)
                 .expect("a batch of distinct mixed-protocol recipients should build a request");
             prop_assert_eq!(request.payments().len(), pool_indices.len());
+        }
+
+        /// A Sprout recipient is rejected as an invalid parameter, as in `zcashd`, on
+        /// every network and for every Sprout payload.
+        #[test]
+        fn rejects_a_sprout_recipient(
+            net in prop_oneof![Just(NetworkType::Main), Just(NetworkType::Test)],
+            payload in prop::array::uniform(any::<u8>()),
+        ) {
+            let sprout = ZcashAddress::from_sprout(net, payload).encode();
+            let err = build_request(&[amount(&sprout, "0.1")])
+                .expect_err("a Sprout recipient should be rejected");
+            prop_assert_eq!(
+                err,
+                LegacyCode::InvalidParameter
+                    .with_static("Sending funds into the Sprout pool is no longer supported.")
+            );
         }
     }
 }
@@ -2132,8 +2155,9 @@ mod proposal_policy_tests {
     fn note_in_pool(pool: ShieldedPool, value: u64) -> Note {
         match pool {
             ShieldedPool::Sapling => {
-                let (_, recipient) =
-                    sapling::zip32::ExtendedSpendingKey::master(&[0x2a; 32]).default_address();
+                let (_, recipient) = sapling::zip32::ExtendedSpendingKey::master(&[0x2a; 32])
+                    .expect("the test seed derives a valid master key")
+                    .default_address();
                 Note::Sapling(sapling::Note::from_parts(
                     recipient,
                     sapling::value::NoteValue::from_raw(value),

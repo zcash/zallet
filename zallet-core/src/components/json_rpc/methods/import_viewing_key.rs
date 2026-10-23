@@ -7,7 +7,7 @@ use zcash_keys::{
     encoding::{decode_extended_full_viewing_key, encode_payment_address},
     keys::UnifiedFullViewingKey,
 };
-use zcash_protocol::consensus::{BlockHeight, NetworkConstants};
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::components::{
     chain::Chain,
@@ -106,8 +106,11 @@ pub(crate) async fn call<C: Chain>(
         return Err(LegacyCode::InvalidParameter.with_static("Block height out of range."));
     }
 
-    let hrp_fvk = wallet.params().hrp_sapling_extended_full_viewing_key();
-    let hrp_addr = wallet.params().hrp_sapling_payment_address();
+    let hrp_fvk = zcash_keys::constants::hrp_sapling_extended_full_viewing_key(
+        wallet.params().network_type(),
+    );
+    let hrp_addr =
+        zcash_address::constants::hrp_sapling_payment_address(wallet.params().network_type());
     let (extfvk, address) = decode_vkey_and_address(hrp_fvk, hrp_addr, vkey)?;
 
     // Construct a UFVK from the Sapling extended full viewing key so the wallet can
@@ -169,27 +172,30 @@ pub(crate) async fn call<C: Chain>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zcash_address::constants as address_constants;
+    use zcash_keys::constants as key_constants;
     use zcash_keys::encoding::encode_extended_full_viewing_key;
-    use zcash_protocol::constants;
 
     /// Derives a test extended full viewing key from seed [0; 32] and encodes it.
     fn encoded_mainnet_extfvk() -> String {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         encode_extended_full_viewing_key(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
             &extfvk,
         )
     }
 
     /// Derives a test extended full viewing key from seed [0; 32] and encodes it for testnet.
     fn encoded_testnet_extfvk() -> String {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         encode_extended_full_viewing_key(
-            constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            key_constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
             &extfvk,
         )
     }
@@ -235,8 +241,8 @@ mod tests {
     fn decode_valid_mainnet_vkey() {
         let encoded = encoded_mainnet_extfvk();
         let (_, address) = decode_vkey_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             &encoded,
         )
         .unwrap();
@@ -249,8 +255,8 @@ mod tests {
     fn decode_valid_testnet_vkey() {
         let encoded = encoded_testnet_extfvk();
         let (_, address) = decode_vkey_and_address(
-            constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
             &encoded,
         )
         .unwrap();
@@ -264,15 +270,15 @@ mod tests {
         let encoded = encoded_mainnet_extfvk();
 
         let (_, addr1) = decode_vkey_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             &encoded,
         )
         .unwrap();
 
         let (_, addr2) = decode_vkey_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             &encoded,
         )
         .unwrap();
@@ -284,14 +290,14 @@ mod tests {
     fn decode_roundtrip() {
         let encoded = encoded_mainnet_extfvk();
         let (extfvk, _) = decode_vkey_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             &encoded,
         )
         .unwrap();
 
         let re_encoded = encode_extended_full_viewing_key(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
             &extfvk,
         );
         assert_eq!(re_encoded, encoded);
@@ -300,8 +306,8 @@ mod tests {
     #[test]
     fn decode_invalid_vkey() {
         let result = decode_vkey_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             "not-a-valid-key",
         );
         assert!(result.is_err());
@@ -312,8 +318,8 @@ mod tests {
         // Testnet viewing key decoded with mainnet HRP should fail.
         let testnet_encoded = encoded_testnet_extfvk();
         let result = decode_vkey_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             &testnet_encoded,
         );
         assert!(result.is_err());
@@ -322,8 +328,8 @@ mod tests {
     #[test]
     fn decode_empty_vkey() {
         let result = decode_vkey_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             "",
         );
         assert!(result.is_err());
@@ -333,15 +339,16 @@ mod tests {
     fn decode_spending_key_rejected_as_viewing_key() {
         // A spending key string should be rejected when decoded as a viewing key,
         // since the HRP will not match.
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         let spending_key_encoded = zcash_keys::encoding::encode_extended_spending_key(
-            constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
             &extsk,
         );
 
         let result = decode_vkey_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             &spending_key_encoded,
         );
         assert!(result.is_err());

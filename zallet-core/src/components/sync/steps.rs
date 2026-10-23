@@ -1,21 +1,18 @@
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::ops::{ControlFlow, Range};
 
 use futures::TryStreamExt as _;
 use jsonrpsee::tracing::info;
-use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
 use zcash_client_backend::{
     data_api::{
         BlockMetadata, WalletCommitmentTrees, WalletRead, WalletWrite, chain::ChainState,
         scanning::ScanRange,
     },
     scanning::{
-        Nullifiers,
+        SpendIdentifiers,
         full::{self, ScanBlockError},
     },
 };
-use zcash_client_sqlite::AccountUuid;
 use zcash_primitives::block::Block;
 use zcash_protocol::consensus::BlockHeight;
 
@@ -65,22 +62,6 @@ pub(super) async fn update_subtree_roots<C: Chain>(
     db_data.put_ironwood_subtree_roots(0, &ironwood_roots)?;
 
     Ok(())
-}
-
-/// An index from transparent address to the wallet account that controls it.
-type TransparentAddressIndex =
-    HashMap<TransparentAddress, (AccountUuid, Option<TransparentKeyScope>)>;
-
-/// Collects the wallet's transparent receivers, for detecting transparent outputs while
-/// scanning full blocks.
-fn transparent_address_index(db_data: &DbConnection) -> Result<TransparentAddressIndex, SyncError> {
-    let mut index = HashMap::new();
-    for account in db_data.get_account_ids()? {
-        for (address, metadata) in db_data.get_transparent_receivers(account, true, true)? {
-            index.insert(address, (account, metadata.scope()));
-        }
-    }
-    Ok(index)
 }
 
 /// Maps the error type produced by [`full::scan_block`] into a [`SyncError`].
@@ -199,10 +180,10 @@ pub(super) async fn scan_blocks<V: ChainView>(
             Some(from_state.final_ironwood_tree().tree_size() as u32),
         ));
 
-        // Get the nullifiers for the unspent notes we are tracking, and the transparent
+        // Get the identifiers of the unspent outputs we are tracking, and the transparent
         // addresses we control.
-        let mut nullifiers = Nullifiers::unspent(db_data)?;
-        let addresses = transparent_address_index(db_data)?;
+        let mut spend_ids = SpendIdentifiers::unspent(db_data)?;
+        let addresses = db_data.get_transparent_receiver_accounts()?;
 
         // Now wait on the batch and scan each block as it becomes available.
         let mut scanned_blocks = Vec::with_capacity(scan_range.len());
@@ -217,13 +198,13 @@ pub(super) async fn scan_blocks<V: ChainView>(
                 &header,
                 vtx,
                 &scanning_keys,
-                &nullifiers,
+                &spend_ids,
                 prior_block_metadata.as_ref(),
                 |address| Ok::<_, Infallible>(addresses.get(address).copied()),
             )
             .map_err(scan_block_error)?;
 
-            nullifiers.update_with(&scanned_block);
+            spend_ids.update_with(&scanned_block);
             prior_block_metadata = Some(scanned_block.to_block_metadata());
             scanned_blocks.push(scanned_block);
         }
@@ -288,10 +269,10 @@ pub(super) async fn scan_block<V: ChainView>(
         Some(from_state.final_ironwood_tree().tree_size() as u32),
     ));
 
-    // Get the nullifiers for the unspent notes we are tracking, and the transparent
+    // Get the identifiers of the unspent outputs we are tracking, and the transparent
     // addresses we control.
-    let nullifiers = Nullifiers::unspent(db_data)?;
-    let addresses = transparent_address_index(db_data)?;
+    let spend_ids = SpendIdentifiers::unspent(db_data)?;
+    let addresses = db_data.get_transparent_receiver_accounts()?;
 
     let (scanning_keys, header, vtx) = result
         .await
@@ -303,7 +284,7 @@ pub(super) async fn scan_block<V: ChainView>(
         &header,
         vtx,
         &scanning_keys,
-        &nullifiers,
+        &spend_ids,
         prior_block_metadata.as_ref(),
         |address| Ok::<_, Infallible>(addresses.get(address).copied()),
     )

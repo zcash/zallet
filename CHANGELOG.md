@@ -36,6 +36,30 @@ be considered breaking changes.
   fails loudly rather than running forever if sustained wallet writes keep
   the copy from completing. Scheduled periodic backups from inside the
   running process remain tracked in #195.
+- NU7 support in ordinary builds. Zallet follows the NU7 network upgrade on
+  Mainnet (height 3,543,405) and Testnet (height 4,465,026), and
+  `regtest_nuparams` accepts the NU7 consensus branch ID without building with
+  `--cfg zcash_unstable="nu7"`. Upgrade before Mainnet reaches the activation
+  height, together with a `zebrad` that also follows NU7.
+
+### Changed
+
+- JSON-RPC responses still give unified addresses and viewing keys in their
+  ZIP 316 Revision 0 form (`u1…`, `uview1…`, `uivk1…`). A unified address or
+  viewing key that Revision 0 cannot represent — one with no shielded
+  component, one carrying metadata such as an expiry, or a viewing key with a
+  P2SH item — is given in its Revision 2 form (`zu…`/`tu…`, `uvf…`, `uvi…`)
+  instead. Both revisions are accepted as input.
+- `z_sendmany` rejects a Sprout recipient address with
+  `RPC_INVALID_PARAMETER` ("Sending funds into the Sprout pool is no longer
+  supported."), as `zcashd` did, when it builds the payment request.
+- `z_sendmany` fails for a recipient unified address that has expired, or whose
+  ZIP 316 Revision 2 expiry height is earlier than the expiry height of the
+  transaction that would pay it.
+
+### Deprecated
+
+- `indexer.db_path`. It has no effect, and Zallet logs a warning when it is set.
 
 ### Removed
 
@@ -49,9 +73,6 @@ be considered breaking changes.
 - No chain backend currently runs on macOS or Windows, because the `zebra`
   backend is Linux-only.
 
-### Deprecated
-
-- `indexer.db_path`. It has no effect, and Zallet logs a warning when it is set.
 
 ### Fixed
 

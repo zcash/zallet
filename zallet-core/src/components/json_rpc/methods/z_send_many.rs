@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use abscissa_core::Application;
 
 use jsonrpsee::core::{JsonValue, RpcResult};
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::ExposeSecret;
 use serde_json::json;
 use zcash_client_backend::data_api::wallet::SpendingKeys;
@@ -18,7 +19,7 @@ use zcash_client_backend::{
     fees::StandardFeeRule,
     wallet::OvkPolicy,
 };
-use zcash_client_sqlite::{AccountUuid, ReceivedNoteId};
+use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, util::SystemClock};
 use zcash_keys::{
     address::Address,
     keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
@@ -239,6 +240,8 @@ async fn run<C: Chain>(
         create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             wallet.as_mut(),
             &params,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             &prover,
             &prover,
             &spending_keys,
@@ -402,7 +405,7 @@ mod tests {
             // `unified_source_spends_only_its_receivers_pools`.
             prop_assume!(ua.orchard().is_some() && ua.sapling().is_some());
 
-            let policy = spend_policy_for(&Address::Unified(ua));
+            let policy = spend_policy_for(&Address::Unified(Box::new(ua)));
 
             prop_assert!(
                 policy.transparent().is_none(),
@@ -426,7 +429,7 @@ mod tests {
             let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
             let Some(saddr) = ua.sapling().cloned() else { return Ok(()) };
 
-            let policy = spend_policy_for(&Address::Sapling(saddr));
+            let policy = spend_policy_for(&Address::Sapling(Box::new(saddr)));
 
             prop_assert_eq!(
                 policy.shielded(),
@@ -480,12 +483,13 @@ mod tests {
             }
 
             for (orchard, sapling, expected) in combos {
-                let Some(ua) = UnifiedAddress::from_receivers(orchard, sapling, transparent)
+                let Some(ua) =
+                    UnifiedAddress::from_receivers(orchard, sapling, transparent, None, None)
                 else {
                     continue;
                 };
 
-                let policy = spend_policy_for(&Address::Unified(ua));
+                let policy = spend_policy_for(&Address::Unified(Box::new(ua)));
 
                 prop_assert_eq!(
                     policy.shielded(),
@@ -516,7 +520,7 @@ mod tests {
                 "a fully transparent send keeps its change transparent",
             );
 
-            let shielded_source = spend_policy_for(&Address::Unified(ua));
+            let shielded_source = spend_policy_for(&Address::Unified(Box::new(ua)));
             prop_assert_eq!(
                 transparent_change_policy_for(&shielded_source),
                 TransparentChangePolicy::ShieldChange,

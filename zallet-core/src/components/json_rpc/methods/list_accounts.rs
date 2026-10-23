@@ -5,7 +5,10 @@ use serde::Serialize;
 use zcash_client_backend::data_api::{Account as _, AddressSource, WalletRead};
 use zcash_client_sqlite::AccountUuid;
 
-use crate::components::{database::DbConnection, json_rpc::server::LegacyCode};
+use crate::components::{
+    database::DbConnection,
+    json_rpc::{server::LegacyCode, unified_encoding::encode_unified_address},
+};
 
 /// Response to a `z_listaccounts` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -143,7 +146,11 @@ pub(super) fn account_details<T>(
                 let (ua, sapling, transparent) = match a.address() {
                     zcash_keys::address::Address::Sapling(_) => (None, Some(enc), None),
                     zcash_keys::address::Address::Transparent(_) => (None, None, Some(enc)),
-                    zcash_keys::address::Address::Unified(_) => (Some(enc), None, None),
+                    zcash_keys::address::Address::Unified(ua) => (
+                        Some(encode_unified_address(ua, wallet.params())),
+                        None,
+                        None,
+                    ),
                     zcash_keys::address::Address::Tex(_) => {
                         unreachable!("zcash_client_sqlite never stores these")
                     }
