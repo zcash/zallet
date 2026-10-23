@@ -97,7 +97,7 @@ pub(crate) async fn call(
         )));
     }
 
-    let request = build_request(&amounts)?;
+    let request = build_request(wallet.params(), &amounts)?;
 
     // A ZIP 320 (TEX) recipient can only be paid by a two-step proposal — shield
     // to a fresh transparent address, then pay the TEX address from it — and
