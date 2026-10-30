@@ -24,6 +24,11 @@ use crate::{
 
 impl ImportAddressCmd {
     /// Runs the address import against the chain backend produced by `factory`.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "one-shot CLI command: the only task on an otherwise idle pool, so a \
+                  nested acquisition cannot exhaust it (see `Database::handle`)"
+    )]
     pub(crate) async fn run_with<F: ChainFactory>(&self, factory: &F) -> Result<(), Error> {
         let config = APP.config();
         let _lock = config.lock_datadir()?;

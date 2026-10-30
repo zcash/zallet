@@ -64,6 +64,28 @@ impl fmt::Debug for Database {
 
 impl Database {
     pub(crate) async fn open(config: &ZalletConfig) -> Result<Self, Error> {
+        Self::open_with_pool_size(config, None).await
+    }
+
+    /// Opens the wallet database with the pool bounded at `max_connections` instead of
+    /// the production sizing policy (see `connection::pool`).
+    ///
+    /// This exists so the saturated-pool regression tests can run against the smallest
+    /// possible pool, where holding one connection while acquiring another deadlocks
+    /// immediately instead of only under production load. Those tests exercise wallet
+    /// RPCs, so this is gated to the `wallet` build alongside them.
+    #[cfg(all(test, zallet_build = "wallet"))]
+    pub(crate) async fn open_with_max_connections(
+        config: &ZalletConfig,
+        max_connections: std::num::NonZeroUsize,
+    ) -> Result<Self, Error> {
+        Self::open_with_pool_size(config, Some(max_connections)).await
+    }
+
+    async fn open_with_pool_size(
+        config: &ZalletConfig,
+        max_connections: Option<std::num::NonZeroUsize>,
+    ) -> Result<Self, Error> {
         let path = config.wallet_db_path();
 
         // A zero-length file is not yet a SQLite database (SQLite initializes it
@@ -103,7 +125,12 @@ impl Database {
             })?;
         }
 
-        let db_data_pool = connection::pool(&path, config.consensus.network())?;
+        let db_data_pool = match max_connections {
+            None => connection::pool(&path, config.consensus.network())?,
+            Some(max_size) => {
+                connection::pool_with_size(&path, config.consensus.network(), max_size)?
+            }
+        };
 
         let database = Self { db_data_pool };
 
@@ -200,11 +227,43 @@ impl Database {
         Ok(database)
     }
 
+    /// Acquires a database connection from the pool, waiting (without limit) for one to
+    /// become available.
+    ///
+    /// # Deadlock avoidance
+    ///
+    /// The wallet sync tasks retain
+    /// [`sync::LONG_LIVED_SYNC_CONNECTIONS`](crate::components::sync::LONG_LIVED_SYNC_CONNECTIONS)
+    /// of the pool's connections for the lifetime of the process, so the remaining
+    /// connections must keep circulating. A task that holds a [`DbHandle`] MUST NOT
+    /// await anything that acquires another pooled connection: not this method, and not
+    /// any [`KeyStore`](crate::components::keystore::KeyStore) method that touches key
+    /// material, since those acquire their own connection internally. Instead, stage the
+    /// database reads the operation needs, drop the handle, perform the keystore work,
+    /// and reacquire a handle for the remaining database work (see zcash/zallet#708).
+    ///
+    /// This rule is enforced by `clippy::await_holding_invalid_type` (see `clippy.toml`
+    /// at the repository root): holding a pooled connection across any await is a
+    /// warning unless `#[expect]`ed with a justification.
+    ///
+    /// One-shot CLI commands are exempt: they run as a single task against an otherwise
+    /// idle pool, whose production size is always at least
+    /// [`sync::LONG_LIVED_SYNC_CONNECTIONS`](crate::components::sync::LONG_LIVED_SYNC_CONNECTIONS)
+    /// plus `MIN_FOREGROUND_CONNECTIONS` (see `connection::pool`; only tests may shrink
+    /// it below that floor), so a nested acquisition there cannot exhaust the pool.
     pub(crate) async fn handle(&self) -> Result<DbHandle, Error> {
         self.db_data_pool
             .get()
             .await
             .map_err(|e| ErrorKind::Generic.context(e).into())
+    }
+
+    /// Returns the network parameters the wallet database was opened with.
+    ///
+    /// Reading them never touches the connection pool, so unlike [`Self::handle`] this
+    /// cannot block behind other database users.
+    pub(crate) fn params(&self) -> &crate::network::Network {
+        self.db_data_pool.manager().params()
     }
 }
 

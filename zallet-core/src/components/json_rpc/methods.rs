@@ -111,6 +111,9 @@ mod z_send_many;
 #[cfg(zallet_build = "wallet")]
 mod z_shieldcoinbase;
 
+#[cfg(all(test, zallet_build = "wallet"))]
+mod tests;
+
 pub(crate) use pczt_common::spawn_proving_cache_warmer;
 
 /// The general JSON-RPC interface, containing the methods provided in all Zallet builds.
@@ -1019,10 +1022,7 @@ impl<C: Chain> RpcImpl<C> {
     }
 
     async fn wallet(&self) -> RpcResult<DbHandle> {
-        self.wallet
-            .handle()
-            .await
-            .map_err(|_| jsonrpsee::types::ErrorCode::InternalError.into())
+        super::utils::wallet_handle(&self.wallet).await
     }
 
     async fn chain(&self) -> RpcResult<C> {
@@ -1075,6 +1075,11 @@ impl<C: Chain> WalletRpcImpl<C> {
 
 #[async_trait]
 impl<C: Chain> RpcServer for RpcImpl<C> {
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "held across chain-view awaits only; this method never acquires another \
+                  pooled connection or touches the keystore (see `Database::handle`)"
+    )]
     async fn get_wallet_status(&self) -> get_wallet_status::Response {
         get_wallet_status::call(
             self.wallet().await?.as_ref(),
@@ -1099,7 +1104,7 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
         diversifier_index: Option<u128>,
     ) -> get_address_for_account::Response {
         get_address_for_account::call(
-            self.wallet().await?.as_mut(),
+            &self.wallet,
             #[cfg(zallet_build = "wallet")]
             self.keystore.clone(),
             account,
@@ -1120,6 +1125,11 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
         list_unified_receivers::call(self.wallet().await?.as_ref(), unified_address)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "held across chain-view awaits only; this method never acquires another \
+                  pooled connection or touches the keystore (see `Database::handle`)"
+    )]
     async fn list_transactions(
         &self,
         account_uuid: Option<String>,
@@ -1139,6 +1149,11 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
         .await
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "held across chain-view awaits only; this method never acquires another \
+                  pooled connection or touches the keystore (see `Database::handle`)"
+    )]
     async fn get_raw_transaction(
         &self,
         txid: &str,
@@ -1156,12 +1171,12 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
     }
 
     async fn decode_raw_transaction(&self, hexstring: &str) -> decode_raw_transaction::Response {
-        decode_raw_transaction::call(self.wallet().await?.params(), hexstring)
+        decode_raw_transaction::call(self.wallet.params(), hexstring)
     }
 
     async fn view_transaction(&self, txid: &str) -> view_transaction::Response {
         view_transaction::call(
-            self.wallet().await?.as_ref(),
+            &self.wallet,
             #[cfg(zallet_build = "wallet")]
             &self.keystore,
             self.chain().await?,
@@ -1171,11 +1186,11 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
     }
 
     async fn stop(&self) -> stop::Response {
-        stop::call(self.wallet().await?)
+        stop::call(self.wallet.params())
     }
 
     async fn validate_address(&self, address: &str) -> validate_address::Response {
-        validate_address::call(self.wallet().await?.params(), address)
+        validate_address::call(self.wallet.params(), address)
     }
 
     async fn verify_message(
@@ -1184,20 +1199,15 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
         signature: &str,
         message: &str,
     ) -> verify_message::Response {
-        verify_message::call(
-            self.wallet().await?.params(),
-            zcashaddress,
-            signature,
-            message,
-        )
+        verify_message::call(self.wallet.params(), zcashaddress, signature, message)
     }
 
     async fn convert_tex(&self, transparent_address: &str) -> convert_tex::Response {
-        convert_tex::call(self.wallet().await?.params(), transparent_address)
+        convert_tex::call(self.wallet.params(), transparent_address)
     }
 
     async fn decode_script(&self, hexstring: &str) -> decode_script::Response {
-        decode_script::call(self.wallet().await?.params(), hexstring)
+        decode_script::call(self.wallet.params(), hexstring)
     }
 
     async fn pczt_combine(&self, pczts: Vec<String>) -> pczt_combine::Response {
@@ -1209,7 +1219,7 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
     }
 
     async fn pczt_inspect(&self, pczt: &str) -> pczt_inspect::Response {
-        pczt_inspect::call(self.wallet().await?.params(), pczt)
+        pczt_inspect::call(self.wallet.params(), pczt)
     }
 }
 
@@ -1217,7 +1227,7 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
 #[async_trait]
 impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
     async fn help(&self, command: Option<&str>) -> help::Response {
-        help::call(self.wallet().await?.params().network_type(), command)
+        help::call(self.general.wallet.params().network_type(), command)
     }
 
     fn openrpc(&self) -> openrpc::Response {
@@ -1258,7 +1268,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         seedfp: Option<&str>,
     ) -> get_new_account::Response {
         get_new_account::call(
-            self.wallet().await?.as_mut(),
+            &self.general.wallet,
             &self.keystore,
             self.chain().await?,
             &self.decryptor,
@@ -1273,7 +1283,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         accounts: Vec<recover_accounts::AccountParameter<'_>>,
     ) -> recover_accounts::Response {
         recover_accounts::call(
-            self.wallet().await?.as_mut(),
+            &self.general.wallet,
             &self.keystore,
             self.chain().await?,
             &self.decryptor,
@@ -1293,15 +1303,15 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         minconf: Option<u32>,
     ) -> z_get_balance_for_account::Response {
         self.general.ensure_synced()?;
-        z_get_balance_for_account::call(
-            self.wallet().await?.as_ref(),
-            &self.keystore,
-            account,
-            minconf,
-        )
-        .await
+        z_get_balance_for_account::call(&self.general.wallet, &self.keystore, account, minconf)
+            .await
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "held across chain-view awaits only; this method never acquires another \
+                  pooled connection or touches the keystore (see `Database::handle`)"
+    )]
     async fn import_address(
         &self,
         account: &str,
@@ -1318,6 +1328,11 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         .await
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "held across chain-view awaits only; this method never acquires another \
+                  pooled connection or touches the keystore (see `Database::handle`)"
+    )]
     async fn import_viewing_key(
         &self,
         vkey: &str,
@@ -1372,7 +1387,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
     }
 
     async fn export_key(&self, address: &str) -> export_key::Response {
-        export_key::call(self.wallet().await?.as_ref(), &self.keystore, address).await
+        export_key::call(self.general.wallet.params(), &self.keystore, address).await
     }
 
     async fn import_key(
@@ -1382,7 +1397,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         start_height: Option<u64>,
     ) -> import_key::Response {
         import_key::call(
-            self.wallet().await?.as_mut(),
+            &self.general.wallet,
             &self.keystore,
             self.chain().await?,
             &self.decryptor,
@@ -1406,7 +1421,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         // doing the expensive work of constructing a proposal.
         self.async_ops.check_capacity().await?;
         let (context, fut) = z_send_many::call(
-            self.wallet().await?,
+            self.general.wallet.clone(),
             self.keystore.clone(),
             self.chain().await?,
             fromaddress,
@@ -1454,7 +1469,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         // doing the expensive work of constructing a proposal.
         self.async_ops.check_capacity().await?;
         let (preflight, context, fut) = z_shieldcoinbase::call(
-            self.wallet().await?,
+            self.general.wallet.clone(),
             self.keystore.clone(),
             self.chain().await?,
             fromaddress,
@@ -1474,7 +1489,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         zaddr: &str,
         ivk: Option<bool>,
     ) -> z_export_viewing_key::Response {
-        z_export_viewing_key::call(self.wallet().await?.as_ref(), &self.keystore, zaddr, ivk).await
+        z_export_viewing_key::call(&self.general.wallet, &self.keystore, zaddr, ivk).await
     }
 
     async fn pczt_create(
@@ -1504,7 +1519,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         strict: Option<bool>,
     ) -> pczt_sign::Response {
         pczt_sign::call(
-            self.wallet().await?,
+            self.general.wallet.params(),
             self.keystore.clone(),
             pczt,
             privacy_policy,
@@ -1515,16 +1530,10 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
 
     async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response {
         self.general.ensure_synced()?;
-        pczt_extract::call(self.wallet().await?, pczt).await
+        pczt_extract::call(self.general.wallet.clone(), pczt).await
     }
 
     async fn sign_message(&self, t_addr: &str, message: &str) -> sign_message::Response {
-        sign_message::call(
-            self.wallet().await?.as_ref(),
-            &self.keystore,
-            t_addr,
-            message,
-        )
-        .await
+        sign_message::call(&self.general.wallet, &self.keystore, t_addr, message).await
     }
 }

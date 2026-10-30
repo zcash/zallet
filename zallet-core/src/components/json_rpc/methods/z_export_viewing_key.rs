@@ -10,9 +10,11 @@ use zcash_keys::{
 use zcash_protocol::consensus::NetworkConstants;
 
 use crate::components::{
-    database::DbConnection,
+    database::Database,
     json_rpc::{
-        payments::get_account_for_address, server::LegacyCode, utils::ensure_wallet_is_unlocked,
+        payments::get_account_for_address,
+        server::LegacyCode,
+        utils::{ensure_wallet_is_unlocked, wallet_handle},
     },
     keystore::KeyStore,
 };
@@ -29,86 +31,101 @@ pub(super) const PARAM_ZADDR_DESC: &str = "The Sapling payment address or unifie
 pub(super) const PARAM_IVK_DESC: &str = "Whether to export the unified incoming viewing key (UIVK) instead of the full viewing key. Default is false.";
 
 pub(crate) async fn call(
-    wallet: &DbConnection,
+    wallet: &Database,
     keystore: &KeyStore,
     zaddr: &str,
     ivk: Option<bool>,
 ) -> Response {
     ensure_wallet_is_unlocked(keystore).await?;
 
-    let address = Address::decode(wallet.params(), zaddr)
+    let params = *wallet.params();
+
+    let address = Address::decode(&params, zaddr)
         .ok_or(LegacyCode::InvalidAddressOrKey.with_static("Invalid zaddr"))?;
 
     let export_ivk = ivk.unwrap_or(false);
 
     match &address {
         Address::Unified(_) => {
-            let account = get_account_for_address(wallet, &address).map_err(|e| {
-                // Align the "address not held" error with the Sapling path below;
-                // `get_account_for_address` reports it with a payment-oriented message.
-                if e.code() == LegacyCode::InvalidAddressOrKey as i32 {
-                    LegacyCode::Wallet.with_static(
-                        "Wallet does not hold private key or viewing key for this zaddr",
-                    )
-                } else {
-                    e
-                }
-            })?;
+            let account = get_account_for_address(wallet_handle(wallet).await?.as_ref(), &address)
+                .map_err(|e| {
+                    // Align the "address not held" error with the Sapling path below;
+                    // `get_account_for_address` reports it with a payment-oriented message.
+                    if e.code() == LegacyCode::InvalidAddressOrKey as i32 {
+                        LegacyCode::Wallet.with_static(
+                            "Wallet does not hold private key or viewing key for this zaddr",
+                        )
+                    } else {
+                        e
+                    }
+                })?;
             let ufvk = account.ufvk().ok_or(
                 LegacyCode::Wallet.with_static("Account does not have a unified full viewing key"),
             )?;
 
             Ok(ResultType(if export_ivk {
-                ufvk.to_unified_incoming_viewing_key()
-                    .encode(wallet.params())
+                ufvk.to_unified_incoming_viewing_key().encode(&params)
             } else {
-                ufvk.encode(wallet.params())
+                ufvk.encode(&params)
             }))
         }
         Address::Sapling(sapling_addr) => {
-            // Look up the account by matching the Sapling address against each UFVK's
-            // Sapling component. `get_account_for_address` doesn't find bare Sapling
-            // receivers derived from unified accounts.
-            let ufvks = wallet
-                .get_unified_full_viewing_keys()
-                .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+            // Stage the account lookup on a scoped connection, released before the seed
+            // decryption below, which acquires its own connection via the keystore (see
+            // `Database::handle`).
+            let (ufvk, seed_fp, account_index) = {
+                let handle = wallet_handle(wallet).await?;
+                let wallet = handle.as_ref();
 
-            let (account_id, ufvk) = ufvks
-                .iter()
-                .find_map(|(id, ufvk)| {
-                    ufvk.sapling()
-                        .and_then(|dfvk| dfvk.decrypt_diversifier(sapling_addr))
-                        .map(|_| (*id, ufvk))
-                })
-                .ok_or_else(|| {
-                    LegacyCode::Wallet.with_static(
+                // Look up the account by matching the Sapling address against each UFVK's
+                // Sapling component. `get_account_for_address` doesn't find bare Sapling
+                // receivers derived from unified accounts.
+                let ufvks = wallet
+                    .get_unified_full_viewing_keys()
+                    .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+
+                let (account_id, ufvk) = ufvks
+                    .iter()
+                    .find_map(|(id, ufvk)| {
+                        ufvk.sapling()
+                            .and_then(|dfvk| dfvk.decrypt_diversifier(sapling_addr))
+                            .map(|_| (*id, ufvk))
+                    })
+                    .ok_or_else(|| {
+                        LegacyCode::Wallet.with_static(
+                            "Wallet does not hold private key or viewing key for this zaddr",
+                        )
+                    })?;
+
+                // The UIVK is derivable from the UFVK alone, so this also works for
+                // imported view-only accounts.
+                if export_ivk {
+                    return Ok(ResultType(
+                        ufvk.to_unified_incoming_viewing_key().encode(&params),
+                    ));
+                }
+
+                let account = wallet
+                    .get_account(account_id)
+                    .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+                    .ok_or(LegacyCode::Wallet.with_static(
                         "Wallet does not hold private key or viewing key for this zaddr",
-                    )
+                    ))?;
+
+                let derivation = account.source().key_derivation().ok_or_else(|| {
+                    LegacyCode::Wallet
+                        .with_static("Cannot export viewing key for an imported view-only account")
                 })?;
 
-            // The UIVK is derivable from the UFVK alone, so this also works for
-            // imported view-only accounts.
-            if export_ivk {
-                return Ok(ResultType(
-                    ufvk.to_unified_incoming_viewing_key()
-                        .encode(wallet.params()),
-                ));
-            }
-
-            let account = wallet
-                .get_account(account_id)
-                .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-                .ok_or(LegacyCode::Wallet.with_static(
-                    "Wallet does not hold private key or viewing key for this zaddr",
-                ))?;
-
-            let derivation = account.source().key_derivation().ok_or_else(|| {
-                LegacyCode::Wallet
-                    .with_static("Cannot export viewing key for an imported view-only account")
-            })?;
+                (
+                    ufvk.clone(),
+                    *derivation.seed_fingerprint(),
+                    derivation.account_index(),
+                )
+            };
 
             let seed = keystore
-                .decrypt_seed(derivation.seed_fingerprint())
+                .decrypt_seed(&seed_fp)
                 .await
                 .map_err(|e| match e.kind() {
                     // TODO: Improve internal error types.
@@ -119,12 +136,8 @@ pub(crate) async fn call(
                     _ => LegacyCode::Database.with_message(e.to_string()),
                 })?;
 
-            let usk = UnifiedSpendingKey::from_seed(
-                wallet.params(),
-                seed.expose_secret(),
-                derivation.account_index(),
-            )
-            .map_err(|e| LegacyCode::Wallet.with_message(e.to_string()))?;
+            let usk = UnifiedSpendingKey::from_seed(&params, seed.expose_secret(), account_index)
+                .map_err(|e| LegacyCode::Wallet.with_message(e.to_string()))?;
 
             // The account was selected by matching the address against the stored
             // UFVK, but the exported key is re-derived from the seed. Ensure the two
@@ -143,7 +156,7 @@ pub(crate) async fn call(
             #[allow(deprecated)]
             let extfvk = usk.sapling().to_extended_full_viewing_key();
 
-            let hrp = wallet.params().hrp_sapling_extended_full_viewing_key();
+            let hrp = params.hrp_sapling_extended_full_viewing_key();
             Ok(ResultType(encode_extended_full_viewing_key(hrp, &extfvk)))
         }
         _ => Err(LegacyCode::InvalidAddressOrKey

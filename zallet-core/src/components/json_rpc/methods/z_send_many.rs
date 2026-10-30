@@ -24,19 +24,22 @@ use zcash_keys::{
     keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
 };
 use zcash_proofs::prover::LocalTxProver;
+use zcash_protocol::TxId;
 
+use super::pczt_common::PROVING_SLOTS;
 use crate::{
     components::{
         chain::Chain,
-        database::DbHandle,
+        database::Database,
         json_rpc::{
             asyncop::{ContextInfo, OperationId},
             payments::{
-                AmountParameter, SendResult, build_request, confirmations_policy_for_minconf,
-                get_account_for_address, get_legacy_pool_account, parse_privacy_policy,
-                propose_and_check, spend_policy_for, verify_and_broadcast_transactions,
+                AmountParameter, SendResult, broadcast_transactions, build_request,
+                confirmations_policy_for_minconf, get_account_for_address, get_legacy_pool_account,
+                parse_privacy_policy, propose_and_check, spend_policy_for, verify_transactions,
             },
             server::LegacyCode,
+            utils::wallet_handle,
         },
         keystore::KeyStore,
     },
@@ -45,7 +48,9 @@ use crate::{
 };
 
 #[cfg(feature = "zcashd-import")]
-use crate::components::json_rpc::utils::collect_standalone_transparent_keys;
+use crate::components::json_rpc::utils::{
+    decrypt_standalone_transparent_keys, standalone_transparent_receivers,
+};
 
 /// Response to a `z_sendmany` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -84,7 +89,7 @@ fn legacy_pool_spend_policy() -> SpendPolicy {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn call<C: Chain>(
-    mut wallet: DbHandle,
+    wallet: Database,
     keystore: KeyStore,
     chain: C,
     fromaddress: String,
@@ -106,58 +111,86 @@ pub(crate) async fn call<C: Chain>(
 
     let request = build_request(&amounts)?;
 
-    let (account, spend_policy) = match fromaddress.as_str() {
-        // Select from the legacy transparent address pool, which this wallet holds in a
-        // single account. Enabled by `features.legacy_pool_seed_fingerprint`.
-        "ANY_TADDR" => (
-            get_legacy_pool_account(wallet.as_ref())?,
-            legacy_pool_spend_policy(),
-        ),
-        // Select the account corresponding to the given address.
-        _ => {
-            let address = Address::decode(wallet.params(), &fromaddress).ok_or_else(|| {
-                LegacyCode::InvalidAddressOrKey.with_static(
-                "Invalid from address: should be a taddr, zaddr, UA, or the string 'ANY_TADDR'.",
-            )
-            })?;
-
-            let account = get_account_for_address(wallet.as_ref(), &address)?;
-
-            (account, spend_policy_for(&address))
-        }
-    };
-
-    let privacy_policy = parse_privacy_policy(privacy_policy.as_deref())?;
-
-    // Reject an oversized recipient set before input selection and proving, which both
-    // scale with it. Every recipient needs at least one output in its pool, so this only
-    // rejects requests the post-proposal per-pool check would reject anyway.
-    //
-    // TODO: also bound the serialized transaction size.
-    // https://github.com/zcash/zallet/issues/255
-    let actions_limit: usize = APP.config().builder.limits.orchard_actions().into();
-    if amounts.len() > actions_limit {
-        return Err(LegacyCode::Misc.with_message(fl!(
-            "err-excess-recipients",
-            count = amounts.len(),
-            limit = actions_limit,
-            config = "-orchardactionlimit=N",
-            bound = "N >= %u".to_string(),
-        )));
-    }
-
-    let confirmations_policy = confirmations_policy_for_minconf(minconf)?;
-
     let params = *wallet.params();
-    let proposal = propose_and_check(
-        wallet.as_mut(),
-        &params,
-        account.id(),
-        request,
-        privacy_policy,
-        confirmations_policy,
-        &spend_policy,
-    )?;
+
+    // Stage the account resolution and the proposal on a connection scoped to this
+    // block, so it is provably released before the keystore decryptions below, which
+    // acquire their own connection (see `Database::handle`). The block contains no
+    // await point, which is what lets `clippy::await_holding_invalid_type` check the
+    // staging.
+    let staged = {
+        let mut handle = wallet_handle(&wallet).await?;
+
+        let (account, spend_policy) = match fromaddress.as_str() {
+            // Select from the legacy transparent address pool, which this wallet holds
+            // in a single account. Enabled by `features.legacy_pool_seed_fingerprint`.
+            "ANY_TADDR" => (
+                get_legacy_pool_account(handle.as_ref())?,
+                legacy_pool_spend_policy(),
+            ),
+            // Select the account corresponding to the given address.
+            _ => {
+                let address = Address::decode(&params, &fromaddress).ok_or_else(|| {
+                    LegacyCode::InvalidAddressOrKey.with_static(
+                        "Invalid from address: should be a taddr, zaddr, UA, or the string 'ANY_TADDR'.",
+                    )
+                })?;
+
+                let account = get_account_for_address(handle.as_ref(), &address)?;
+
+                (account, spend_policy_for(&address))
+            }
+        };
+
+        let privacy_policy = parse_privacy_policy(privacy_policy.as_deref())?;
+
+        // Reject an oversized recipient set before input selection and proving, which
+        // both scale with it. Every recipient needs at least one output in its pool, so
+        // this only rejects requests the post-proposal per-pool check would reject
+        // anyway.
+        //
+        // TODO: also bound the serialized transaction size.
+        // https://github.com/zcash/zallet/issues/255
+        let actions_limit: usize = APP.config().builder.limits.orchard_actions().into();
+        if amounts.len() > actions_limit {
+            return Err(LegacyCode::Misc.with_message(fl!(
+                "err-excess-recipients",
+                count = amounts.len(),
+                limit = actions_limit,
+                config = "-orchardactionlimit=N",
+                bound = "N >= %u".to_string(),
+            )));
+        }
+
+        let confirmations_policy = confirmations_policy_for_minconf(minconf)?;
+
+        let proposal = propose_and_check(
+            handle.as_mut(),
+            &params,
+            account.id(),
+            request,
+            privacy_policy,
+            confirmations_policy,
+            &spend_policy,
+        )?;
+
+        // Read which of the account's receivers are standalone imports while the staged
+        // connection is still held; the matching keys are decrypted below, after it is
+        // released.
+        #[cfg(feature = "zcashd-import")]
+        let standalone_addrs = standalone_transparent_receivers(handle.as_ref(), account.id())?;
+
+        (
+            account,
+            proposal,
+            #[cfg(feature = "zcashd-import")]
+            standalone_addrs,
+        )
+    };
+    #[cfg(feature = "zcashd-import")]
+    let (account, proposal, standalone_addrs) = staged;
+    #[cfg(not(feature = "zcashd-import"))]
+    let (account, proposal) = staged;
 
     let derivation = account.source().key_derivation().ok_or_else(|| {
         LegacyCode::InvalidAddressOrKey.with_message(fl!("err-from-address-no-payment-source"))
@@ -175,17 +208,13 @@ pub(crate) async fn call<C: Chain>(
             }
             _ => LegacyCode::Database.with_message(e.to_string()),
         })?;
-    let usk = UnifiedSpendingKey::from_seed(
-        wallet.params(),
-        seed.expose_secret(),
-        derivation.account_index(),
-    )
-    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
+    let usk =
+        UnifiedSpendingKey::from_seed(&params, seed.expose_secret(), derivation.account_index())
+            .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
 
     #[cfg(feature = "zcashd-import")]
     let standalone_keys =
-        collect_standalone_transparent_keys(wallet.as_ref(), &keystore, account.id(), &proposal)
-            .await?;
+        decrypt_standalone_transparent_keys(&keystore, &standalone_addrs, &proposal).await?;
 
     // TODO: verify that the proposal satisfies the requested privacy policy
 
@@ -225,14 +254,31 @@ pub(crate) async fn call<C: Chain>(
 /// 2. #1360 Note selection is not optimal.
 /// 3. #1277 Spendable notes are not locked, so an operation running in parallel
 ///    could also try to use them.
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "transaction construction writes through this connection inside the blocking \
+              task, so the hold across that one await is inherent; it is bounded by the \
+              proving permit, and the connection is dropped before the broadcast await"
+)]
 async fn run<C: Chain>(
-    mut wallet: DbHandle,
+    wallet: Database,
     chain: C,
     account_id: AccountUuid,
     ufvk: UnifiedFullViewingKey,
     proposal: Proposal<StandardFeeRule, ReceivedNoteId>,
     spending_keys: SpendingKeys,
 ) -> RpcResult<SendResult> {
+    // Transaction construction is CPU-bound proving, so it runs under a proving slot.
+    // The permit is taken BEFORE the connection, for the same reasons as `pczt_extract`:
+    // it keeps the semaphore-then-pool acquisition order consistent, and it bounds how
+    // many of the pool's foreground connections send operations can hold during proving
+    // (`AsyncOperation::new` spawns the operation immediately, so every accepted
+    // operation runs concurrently rather than waiting in a queue).
+    let permit = PROVING_SLOTS
+        .acquire()
+        .await
+        .expect("the proving semaphore is never closed");
+    let mut wallet = wallet_handle(&wallet).await?;
     let prover = LocalTxProver::bundled();
     let (wallet, proposal, txids) = crate::spawn_blocking!("z_sendmany prover", move || {
         let params = *wallet.params();
@@ -254,8 +300,17 @@ async fn run<C: Chain>(
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
 
-    verify_and_broadcast_transactions(&wallet, chain, account_id, &ufvk, &proposal, txids.into())
-        .await
+    // Proving is done; release the slot.
+    drop(permit);
+
+    // Verify the built transactions synchronously, then release the connection before
+    // the broadcast: a slow or unresponsive node must not pin a pooled connection per
+    // in-flight send (see `Database::handle`).
+    let txids: Vec<TxId> = txids.into();
+    let transactions = verify_transactions(wallet.as_ref(), account_id, &ufvk, &proposal, &txids)?;
+    drop(wallet);
+
+    broadcast_transactions(chain, txids, transactions).await
 }
 
 #[cfg(test)]

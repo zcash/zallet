@@ -17,6 +17,7 @@ use zcash_client_backend::data_api::WalletRead;
 use zcash_client_sqlite::{AccountUuid, error::SqliteClientError};
 use zcash_keys::encoding::AddressCodec;
 use zcash_note_encryption::{try_note_decryption, try_output_recovery_with_ovk};
+use zcash_primitives::block::Block;
 use zcash_protocol::{
     ShieldedPool, TxId,
     consensus::{BlockHeight, Parameters},
@@ -26,10 +27,10 @@ use zcash_protocol::{
 
 use crate::components::{
     chain::{Chain, ChainError, ChainView},
-    database::DbConnection,
+    database::{Database, DbConnection},
     json_rpc::{
         server::LegacyCode,
-        utils::{JsonZec, parse_txid, value_from_zatoshis},
+        utils::{JsonZec, parse_txid, value_from_zatoshis, wallet_handle},
     },
 };
 
@@ -311,7 +312,7 @@ fn ovk_for_shielding_from_taddr(raw_seed: &[u8]) -> [u8; 32] {
 }
 
 pub(crate) async fn call<C: Chain>(
-    wallet: &DbConnection,
+    wallet: &Database,
     #[cfg(zallet_build = "wallet")] keystore: &KeyStore,
     chain: C,
     txid_str: &str,
@@ -323,12 +324,37 @@ pub(crate) async fn call<C: Chain>(
         .await
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
-    let tx = wallet
-        .get_transaction(txid)
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-        .ok_or(
-            LegacyCode::InvalidAddressOrKey.with_static("Invalid or non-wallet transaction id"),
-        )?;
+    // Stage the wallet reads needed before key material and the chain get involved, on
+    // a connection scoped to this block so it is provably released before the keystore
+    // queries below (which acquire their own connection; see `Database::handle`). The
+    // block contains no await point, which is what lets
+    // `clippy::await_holding_invalid_type` check the staging.
+    let (tx, account_ids, ufvks, mined_height) = {
+        let staged = wallet_handle(wallet).await?;
+        let wallet = staged.as_ref();
+
+        let tx = wallet
+            .get_transaction(txid)
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+            .ok_or(
+                LegacyCode::InvalidAddressOrKey.with_static("Invalid or non-wallet transaction id"),
+            )?;
+
+        // Collect account IDs for transparent coin relevance detection.
+        let account_ids = wallet
+            .get_account_ids()
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+
+        let ufvks = wallet
+            .get_unified_full_viewing_keys()
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+
+        let mined_height = wallet
+            .get_tx_height(txid)
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+
+        (tx, account_ids, ufvks, mined_height)
+    };
 
     // TODO: Should we enforce ZIP 212 when viewing outputs of a transaction that is
     //       already in the wallet?
@@ -340,20 +366,12 @@ pub(crate) async fn call<C: Chain>(
 
     let mut transparent_input_values = BTreeMap::new();
 
-    // Collect account IDs for transparent coin relevance detection.
-    let account_ids = wallet
-        .get_account_ids()
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
-
     // Collect viewing keys for recovering output information.
     // - OVKs are used cross-protocol and thus are collected as byte arrays.
     let mut sapling_ivks = vec![];
     let mut orchard_ivks = vec![];
     let mut ovks = vec![];
-    for (account_id, ufvk) in wallet
-        .get_unified_full_viewing_keys()
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-    {
+    for (account_id, ufvk) in ufvks {
         if let Some(t) = ufvk.transparent() {
             let (internal_ovk, external_ovk) = t.ovks_for_shielding();
             ovks.push((internal_ovk.as_bytes(), zip32::Scope::Internal));
@@ -416,6 +434,60 @@ pub(crate) async fn call<C: Chain>(
             }
         }
     }
+
+    // Prefetch the spent output for each transparent input from the chain, so the
+    // connection reacquired below is never held across a network round-trip. Only the
+    // single output each input actually spends is kept, not the whole previous
+    // transaction's output vector: the input count (one lookup each) is chosen by
+    // whoever crafted the transaction, and a previous transaction may have many more
+    // outputs than this one spends, so retaining full vectors would let a crafted
+    // transaction amplify peak memory without bound.
+    let mut spent_outputs = Vec::new();
+    if let Some(bundle) = tx.transparent_bundle()
+        && !bundle.is_coinbase()
+    {
+        for input in &bundle.vin {
+            let index = input.prevout().n();
+            spent_outputs.push(
+                chain_view
+                    .get_transaction(*input.prevout().txid())
+                    .await
+                    .map(|prev_tx| {
+                        prev_tx.and_then(|prev_tx| {
+                            prev_tx
+                                .inner()
+                                .transparent_bundle()
+                                .and_then(|b| output_at(&b.vout, index))
+                        })
+                    }),
+            );
+        }
+    }
+
+    let chain_tip = chain_view
+        .tip()
+        .await
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+
+    // The block a mined transaction was found in, for the status fields.
+    let mined = match mined_height {
+        Some(height) => {
+            let block = chain_view
+                .get_block(height)
+                .await
+                .map_err(|_| SqliteClientError::ChainHeightUnknown)
+                .and_then(|block| block.ok_or(SqliteClientError::ChainHeightUnknown))
+                .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+            Some((height, block))
+        }
+        None => None,
+    };
+
+    // All chain data and key material are in hand; the remaining reads are local, so
+    // the connection reacquired here is never held across an await point (checked by
+    // `clippy::await_holding_invalid_type`).
+    let handle = wallet_handle(wallet).await?;
+    let wallet = handle.as_ref();
 
     // TODO: Add `WalletRead::get_note_with_nullifier`
     type OutputInfo = (TxId, u16, AccountUuid, Option<String>, Zatoshis);
@@ -676,24 +748,15 @@ pub(crate) async fn call<C: Chain>(
     if let Some(bundle) = tx.transparent_bundle() {
         // Skip transparent inputs for coinbase transactions (as they are not spends).
         if !bundle.is_coinbase() {
-            // Transparent inputs
-            for (input, idx) in bundle.vin.iter().zip(0u16..) {
+            // Transparent inputs, paired with their prefetched spent outputs.
+            for ((input, idx), spent_output) in bundle.vin.iter().zip(0u16..).zip(spent_outputs) {
                 let txid_prev = input.prevout().txid().to_string();
 
-                let prev_outputs = chain_view
-                    .get_transaction(*input.prevout().txid())
-                    .await
-                    .map(|prev_tx| {
-                        prev_tx.and_then(|prev_tx| {
-                            prev_tx.inner().transparent_bundle().map(|b| b.vout.clone())
-                        })
-                    });
                 // An input whose spent output cannot be found has no known value or
                 // address, so it is left out of `spends`. Its value is then missing
                 // from `transparent_input_values`, so the fee is omitted, as the `fee`
                 // field documents.
-                let Some(output) = spent_transparent_output(prev_outputs, input.prevout().n())?
-                else {
+                let Some(output) = spent_transparent_output(spent_output)? else {
                     continue;
                 };
                 let address = output.recipient_address();
@@ -968,14 +1031,7 @@ pub(crate) async fn call<C: Chain>(
         )?);
     }
 
-    let chain_tip = chain_view
-        .tip()
-        .await
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
-
-    let wallet_tx_info = WalletTxInfo::fetch(wallet, &chain_view, &tx, chain_tip.height())
-        .await
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+    let wallet_tx_info = WalletTxInfo::derive(&tx, chain_tip.height(), mined.as_ref());
 
     let fee = tx
         .fee_paid(|prevout| Ok::<_, BalanceError>(transparent_input_values.get(prevout).copied()))
@@ -1051,17 +1107,18 @@ struct WalletTxInfo {
 
 impl WalletTxInfo {
     /// Logic adapted from `WalletTxToJSON` in `zcashd`, to match the semantics of the `gettransaction` fields.
-    async fn fetch<V: ChainView>(
-        wallet: &DbConnection,
-        chain_view: &V,
+    ///
+    /// `mined` carries the height and block a mined transaction was found in, both
+    /// prefetched by the caller: deriving the fields is then pure, so it can run while
+    /// a wallet database connection is held without pinning it across chain access.
+    fn derive(
         tx: &zcash_primitives::transaction::Transaction,
         chain_height: BlockHeight,
-    ) -> Result<Self, SqliteClientError> {
-        let mined_height = wallet.get_tx_height(tx.txid())?;
-
+        mined: Option<&(BlockHeight, Block)>,
+    ) -> Self {
         let confirmations = {
-            match mined_height {
-                Some(mined_height) => i64::from(chain_height + 1 - mined_height),
+            match mined {
+                Some((mined_height, _)) => i64::from(chain_height + 1 - *mined_height),
                 None => {
                     // TODO: Also check if the transaction is in the mempool.
                     //       https://github.com/zcash/zallet/issues/237
@@ -1081,14 +1138,8 @@ impl WalletTxInfo {
 
         let mut status = "waiting";
 
-        let (blockhash, blockindex, blocktime) = if let Some(height) = mined_height {
+        let (blockhash, blockindex, blocktime) = if let Some((_, block)) = mined {
             status = "mined";
-
-            let block = chain_view
-                .get_block(height)
-                .await
-                .map_err(|_| SqliteClientError::ChainHeightUnknown)?
-                .ok_or(SqliteClientError::ChainHeightUnknown)?;
 
             let tx_index = block
                 .vtx()
@@ -1113,7 +1164,7 @@ impl WalletTxInfo {
             (None, None, None)
         };
 
-        Ok(Self {
+        Self {
             status,
             confirmations,
             generated,
@@ -1121,7 +1172,7 @@ impl WalletTxInfo {
             blockindex,
             blocktime,
             expiryheight: tx.expiry_height().into(),
-        })
+        }
     }
 }
 
@@ -1137,23 +1188,29 @@ fn is_expired_tx(tx: &zcash_primitives::transaction::Transaction, height: BlockH
     }
 }
 
-/// Finds the transparent output that a transaction input spends.
+/// Returns the output at `index` in a previous transaction's output vector, cloning only
+/// that one output.
 ///
-/// `prev_outputs` is the chain's answer for the previous transaction: its transparent
-/// outputs, or `None` if the chain does not know that transaction. Returns `Ok(None)` if
-/// the spent output cannot be found. Returns an RPC error if the chain lookup failed.
+/// Used by the prefetch so a transaction that spends one output of a previous
+/// transaction with many outputs retains only the spent output, not the whole vector.
+fn output_at(outputs: &[TxOut], index: u32) -> Option<TxOut> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| outputs.get(index).cloned())
+}
+
+/// Maps a prefetched spent-output lookup to the RPC result shape.
+///
+/// `spent_output` is the chain's answer for the output this input spends: `Some` if the
+/// previous transaction was found and had an output at the spent index, `None` if either
+/// was missing (so the output cannot be found). Returns an RPC error if the chain lookup
+/// itself failed.
 fn spent_transparent_output(
-    prev_outputs: Result<Option<Vec<TxOut>>, ChainError>,
-    index: u32,
+    spent_output: Result<Option<TxOut>, ChainError>,
 ) -> RpcResult<Option<TxOut>> {
-    let prev_outputs = prev_outputs.map_err(|e| {
+    spent_output.map_err(|e| {
         LegacyCode::Database.with_message(format!("Failed to fetch a spent output: {e}"))
-    })?;
-    Ok(prev_outputs.and_then(|outputs| {
-        usize::try_from(index)
-            .ok()
-            .and_then(|index| outputs.into_iter().nth(index))
-    }))
+    })
 }
 
 fn is_expiring_soon_tx(
@@ -1194,28 +1251,33 @@ mod tests {
     }
 
     #[test]
-    fn spent_output_is_found_by_index() {
+    fn output_at_selects_by_index() {
         let outputs = vec![txout(1), txout(2)];
-        assert_eq!(
-            spent_transparent_output(Ok(Some(outputs)), 1).unwrap(),
-            Some(txout(2)),
-        );
+        assert_eq!(output_at(&outputs, 1), Some(txout(2)));
     }
 
     #[test]
-    fn spent_output_cannot_be_found_without_failing() {
-        // The previous transaction is unknown to the chain.
-        assert_eq!(spent_transparent_output(Ok(None), 0).unwrap(), None);
+    fn output_at_missing_index_is_none() {
         // The previous transaction has no output at this index.
+        assert_eq!(output_at(&[txout(1)], 1), None);
+        // An index beyond the range of `usize` cannot exist either.
+        assert_eq!(output_at(&[txout(1)], u32::MAX), None);
+    }
+
+    #[test]
+    fn spent_output_passes_through_the_lookup_result() {
+        // A found output and a not-found output both pass through unchanged; only a
+        // failed chain lookup becomes an error.
         assert_eq!(
-            spent_transparent_output(Ok(Some(vec![txout(1)])), 1).unwrap(),
-            None,
+            spent_transparent_output(Ok(Some(txout(2)))).unwrap(),
+            Some(txout(2)),
         );
+        assert_eq!(spent_transparent_output(Ok(None)).unwrap(), None);
     }
 
     #[test]
     fn spent_output_lookup_failure_is_an_rpc_error() {
-        let err = spent_transparent_output(Err(ChainError::unavailable("node down")), 0)
+        let err = spent_transparent_output(Err(ChainError::unavailable("node down")))
             .expect_err("a failed chain lookup must not read as a missing output");
         assert_eq!(err.code(), i32::from(LegacyCode::Database));
     }

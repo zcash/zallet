@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -41,11 +42,59 @@ use crate::{
     network::Network,
 };
 
+/// The minimum number of pool connections that must remain available for foreground
+/// (JSON-RPC and CLI) work after the wallet sync tasks have taken theirs.
+///
+/// Each foreground task acquires at most one connection at a time (see
+/// [`super::Database::handle`]), so any nonzero reservation preserves liveness; the
+/// value 4 matches the wallet RPC concurrency that `zcashd` served by default
+/// (`-rpcthreads=4`), which is the parallelism integrators already size for.
+const MIN_FOREGROUND_CONNECTIONS: usize = 4;
+
+/// Returns the connection-pool size to use for the wallet database.
+///
+/// This is deadpool's default sizing (twice the logical CPU count, per
+/// `deadpool-0.12.3/src/util.rs`; `num_cpus` honours cgroup CPU quotas, so a
+/// single-CPU container counts as one), raised to a floor that keeps wallet RPCs
+/// serviceable: the sync tasks retain
+/// [`crate::components::sync::LONG_LIVED_SYNC_CONNECTIONS`] connections for the
+/// lifetime of the process, so on a small host the default alone (e.g. 2 on a
+/// single-core machine) could be consumed entirely by sync, starving every other
+/// database user forever (deadpool's `Pool::get` waits without a timeout).
+fn pool_max_size() -> NonZeroUsize {
+    NonZeroUsize::new(with_foreground_headroom(
+        deadpool::managed::PoolConfig::default().max_size,
+    ))
+    .expect("the foreground headroom floor is nonzero")
+}
+
+/// Raises a candidate pool size to the smallest size that leaves
+/// [`MIN_FOREGROUND_CONNECTIONS`] connections available while the sync tasks hold
+/// theirs.
+fn with_foreground_headroom(candidate_size: usize) -> usize {
+    candidate_size
+        .max(crate::components::sync::LONG_LIVED_SYNC_CONNECTIONS + MIN_FOREGROUND_CONNECTIONS)
+}
+
 pub(super) fn pool(path: impl AsRef<Path>, params: Network) -> Result<WalletPool, Error> {
+    pool_with_size(path, params, pool_max_size())
+}
+
+/// Builds a connection pool holding at most `max_size` connections.
+///
+/// Production callers go through [`pool`], which applies the sizing policy above; this
+/// seam exists so tests can inject a deliberately saturated pool. `max_size` is nonzero
+/// at the type level because a zero-sized pool would make every `get()` wait forever,
+/// which is exactly the silent failure the sizing policy exists to rule out.
+pub(super) fn pool_with_size(
+    path: impl AsRef<Path>,
+    params: Network,
+    max_size: NonZeroUsize,
+) -> Result<WalletPool, Error> {
     let config = deadpool_sqlite::Config::new(path.as_ref());
     let manager = WalletManager::from_config(&config, params);
     WalletPool::builder(manager)
-        .config(deadpool::managed::PoolConfig::default())
+        .config(deadpool::managed::PoolConfig::new(max_size.get()))
         .build()
         .map_err(|e| ErrorKind::Generic.context(e).into())
 }
@@ -57,6 +106,13 @@ pub(crate) struct WalletManager {
     /// Connection pools are thread-safe, but SQLite does not reliably follow the busy
     /// handler (configured by `rusqlite` to a timeout after 5s), so we explicitly guard
     /// against SQLite `DatabaseBusy` errors.
+    ///
+    /// Lock order relative to the connection pool: this lock is only ever taken inside
+    /// the synchronous `DbConnection::with*` methods of a connection that has already
+    /// been acquired from the pool, and those methods cannot `.await`, so this lock is
+    /// never held across a pool acquisition. The converse (waiting on this lock while
+    /// holding a pool connection) is the only order that occurs, and is bounded by the
+    /// other holders' closures.
     lock: Arc<RwLock<()>>,
     params: Network,
 }
@@ -71,6 +127,11 @@ impl WalletManager {
             lock: Arc::new(RwLock::new(())),
             params,
         }
+    }
+
+    /// Returns the network parameters the wallet database serves.
+    pub(crate) fn params(&self) -> &Network {
+        &self.params
     }
 }
 
@@ -979,5 +1040,31 @@ impl WalletCommitmentTrees for DbConnection {
         index: u64,
     ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
         self.with_mut(|mut db_data| db_data.get_ironwood_subtree_root(index))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MIN_FOREGROUND_CONNECTIONS, with_foreground_headroom};
+    use crate::components::sync::LONG_LIVED_SYNC_CONNECTIONS;
+
+    /// The pool must always be able to serve every long-lived sync connection plus the
+    /// reserved foreground headroom, however small the host's CPU-derived default is.
+    /// Sizes already above the floor are respected unchanged.
+    #[test]
+    fn pool_size_always_leaves_foreground_headroom() {
+        let floor = LONG_LIVED_SYNC_CONNECTIONS + MIN_FOREGROUND_CONNECTIONS;
+
+        // Every candidate at or below the floor (including the pathological 0, and the
+        // size deadpool derives on a single-core host) is raised to exactly the floor.
+        for candidate in 0..=floor {
+            assert_eq!(with_foreground_headroom(candidate), floor);
+        }
+
+        // Candidates above the floor are not shrunk: larger hosts keep their larger
+        // default pools.
+        for candidate in (floor + 1)..(floor + 64) {
+            assert_eq!(with_foreground_headroom(candidate), candidate);
+        }
     }
 }

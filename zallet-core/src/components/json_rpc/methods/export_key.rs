@@ -5,10 +5,12 @@ use serde::Serialize;
 use zcash_keys::encoding::{decode_payment_address, encode_extended_spending_key};
 use zcash_protocol::consensus::NetworkConstants;
 
-use crate::components::{
-    database::DbConnection,
-    json_rpc::{server::LegacyCode, utils::ensure_wallet_is_unlocked},
-    keystore::KeyStore,
+use crate::{
+    components::{
+        json_rpc::{server::LegacyCode, utils::ensure_wallet_is_unlocked},
+        keystore::KeyStore,
+    },
+    network::Network,
 };
 
 /// Response to a `z_exportkey` RPC request.
@@ -22,17 +24,14 @@ pub(crate) struct ResultType(String);
 pub(super) const PARAM_ADDRESS_DESC: &str =
     "The Sapling payment address corresponding to the spending key to export.";
 
-pub(crate) async fn call(wallet: &DbConnection, keystore: &KeyStore, address: &str) -> Response {
+pub(crate) async fn call(params: &Network, keystore: &KeyStore, address: &str) -> Response {
     ensure_wallet_is_unlocked(keystore).await?;
 
     // Decode the Sapling payment address.
-    let payment_address = decode_payment_address(
-        wallet.params().hrp_sapling_payment_address(),
-        address,
-    )
-    .map_err(|e| {
-        LegacyCode::InvalidAddressOrKey.with_message(format!("Invalid Sapling address: {e}"))
-    })?;
+    let payment_address = decode_payment_address(params.hrp_sapling_payment_address(), address)
+        .map_err(|e| {
+            LegacyCode::InvalidAddressOrKey.with_message(format!("Invalid Sapling address: {e}"))
+        })?;
 
     // Look up and decrypt the standalone spending key for this address.
     let extsk = keystore
@@ -44,8 +43,7 @@ pub(crate) async fn call(wallet: &DbConnection, keystore: &KeyStore, address: &s
                 .with_static("Wallet does not hold the spending key for this Sapling address")
         })?;
 
-    let encoded =
-        encode_extended_spending_key(wallet.params().hrp_sapling_extended_spending_key(), &extsk);
+    let encoded = encode_extended_spending_key(params.hrp_sapling_extended_spending_key(), &extsk);
 
     Ok(ResultType(encoded))
 }

@@ -15,10 +15,10 @@ use zcash_client_backend::{
 use zcash_client_sqlite::error::SqliteClientError;
 
 use crate::components::{
-    database::DbConnection,
+    database::Database,
     json_rpc::{
         server::LegacyCode,
-        utils::{parse_account_parameter, parse_diversifier_index},
+        utils::{parse_account_parameter, parse_diversifier_index, wallet_handle},
     },
 };
 
@@ -56,7 +56,7 @@ pub(super) const PARAM_RECEIVER_TYPES_DESC: &str =
 pub(super) const PARAM_DIVERSIFIER_INDEX_DESC: &str = "A specific diversifier index to derive at.";
 
 pub(crate) async fn call(
-    wallet: &mut DbConnection,
+    wallet: &Database,
     #[cfg(zallet_build = "wallet")] keystore: KeyStore,
     account: JsonValue,
     receiver_types: Option<Vec<String>>,
@@ -80,17 +80,24 @@ pub(crate) async fn call(
     // Accounts with no key derivation (an imported viewing key, say) are not covered by
     // any mnemonic, so there is nothing to have backed up and nothing to check.
     #[cfg(zallet_build = "wallet")]
-    if let Some(seed_fp) = wallet
-        .get_account(account_id)
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-        .and_then(|account| {
-            account
-                .source()
-                .key_derivation()
-                .map(|derivation| *derivation.seed_fingerprint())
-        })
     {
-        ensure_seed_is_backed_up(&keystore, &seed_fp).await?;
+        // The wallet connection is scoped to this read and released before the backup
+        // check, which queries the keystore on its own connection (see
+        // `Database::handle`).
+        let seed_fp = wallet_handle(wallet)
+            .await?
+            .as_ref()
+            .get_account(account_id)
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+            .and_then(|account| {
+                account
+                    .source()
+                    .key_derivation()
+                    .map(|derivation| *derivation.seed_fingerprint())
+            });
+        if let Some(seed_fp) = seed_fp {
+            ensure_seed_is_backed_up(&keystore, &seed_fp).await?;
+        }
     }
 
     let (receiver_types, request) = match receiver_types {
@@ -152,8 +159,12 @@ pub(crate) async fn call(
 
     let diversifier_index = diversifier_index.map(parse_diversifier_index).transpose()?;
 
+    // The checks above are complete; reacquire a connection to derive the address.
+    let mut wallet = wallet_handle(wallet).await?;
+
     let (address, diversifier_index) = if let Some(diversifier_index) = diversifier_index {
         match wallet
+            .as_mut()
             .get_address_for_index(account_id, diversifier_index, request)
             .map_err(|e| map_sqlite_error(e, &account))?
         {
@@ -167,6 +178,7 @@ pub(crate) async fn call(
         }
     } else {
         wallet
+            .as_mut()
             .get_next_available_address(account_id, request)
             .map_err(|e| map_sqlite_error(e, &account))?
             // This would be a race condition between this and account deletion.

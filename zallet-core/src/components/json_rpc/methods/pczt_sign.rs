@@ -19,7 +19,6 @@ use super::pczt_common::{
 use super::pczt_error::PcztError;
 use crate::{
     components::{
-        database::DbHandle,
         json_rpc::{
             payments::{PrivacyPolicy, parse_privacy_policy},
             server::LegacyCode,
@@ -27,6 +26,7 @@ use crate::{
         keystore::KeyStore,
     },
     fl,
+    network::Network,
 };
 
 pub(crate) type Response = RpcResult<ResultType>;
@@ -132,7 +132,7 @@ fn check_privacy_policy(pczt: &Pczt, acknowledged: PrivacyPolicy) -> RpcResult<(
 /// is every input of a PCZT that carries no hints (one created by a different
 /// wallet).
 pub(crate) async fn call(
-    wallet: DbHandle,
+    params: &Network,
     keystore: KeyStore,
     pczt_base64: &str,
     privacy_policy: Option<String>,
@@ -232,15 +232,13 @@ pub(crate) async fn call(
         None => None,
         Some(hints) => match keystore.decrypt_seed(&hints.seed_fp).await {
             Ok(seed) => Some(
-                UnifiedSpendingKey::from_seed(
-                    wallet.params(),
-                    seed.expose_secret(),
-                    hints.account_idx,
-                )
-                .map_err(|e| {
-                    LegacyCode::InvalidAddressOrKey
-                        .with_message(fl!("err-pczt-derive-spending-key", error = e.to_string()))
-                })?,
+                UnifiedSpendingKey::from_seed(params, seed.expose_secret(), hints.account_idx)
+                    .map_err(|e| {
+                        LegacyCode::InvalidAddressOrKey.with_message(fl!(
+                            "err-pczt-derive-spending-key",
+                            error = e.to_string()
+                        ))
+                    })?,
             ),
             Err(e)
                 if matches!(e.kind(), crate::error::ErrorKind::Generic)

@@ -8,8 +8,11 @@ use zcash_client_backend::data_api::{AccountBalance, WalletRead, wallet::Confirm
 use zcash_protocol::value::Zatoshis;
 
 use crate::components::{
-    database::DbConnection,
-    json_rpc::{server::LegacyCode, utils::parse_account_parameter},
+    database::Database,
+    json_rpc::{
+        server::LegacyCode,
+        utils::{parse_account_parameter, wallet_handle},
+    },
     keystore::KeyStore,
 };
 
@@ -71,12 +74,16 @@ pub(super) const PARAM_MINCONF_DESC: &str =
     "Only include outputs in transactions confirmed at least this many times.";
 
 pub(crate) async fn call(
-    wallet: &DbConnection,
+    wallet: &Database,
     keystore: &KeyStore,
     account: JsonValue,
     minconf: Option<u32>,
 ) -> Response {
+    // `parse_account_parameter` queries the keystore and acquires its own wallet
+    // connection, so it must run before this task takes one (see `Database::handle`).
     let account_id = parse_account_parameter(wallet, keystore, &account).await?;
+
+    let wallet = wallet_handle(wallet).await?;
 
     let confirmations_policy = match minconf.and_then(NonZeroU32::new) {
         Some(c) => ConfirmationsPolicy::new_symmetrical(c, false),

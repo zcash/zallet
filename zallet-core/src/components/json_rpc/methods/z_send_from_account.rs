@@ -18,15 +18,15 @@ use super::{pczt_create, pczt_extract, pczt_prove, pczt_sign};
 use crate::{
     components::{
         chain::Chain,
-        database::{Database, DbHandle},
+        database::Database,
         json_rpc::{
             fund_source::FundSource,
             payments::{
-                AmountParameter, SendResult, build_request, confirmations_policy_for_minconf,
-                parse_privacy_policy, verify_and_broadcast_transactions,
+                AmountParameter, SendResult, broadcast_transactions, build_request,
+                confirmations_policy_for_minconf, parse_privacy_policy, verify_transactions,
             },
             server::LegacyCode,
-            utils::parse_account_parameter,
+            utils::{parse_account_parameter, wallet_handle},
         },
         keystore::KeyStore,
     },
@@ -49,13 +49,6 @@ pub(super) const PARAM_MINCONF_DESC: &str = "Only use funds confirmed at least t
 pub(super) const PARAM_PRIVACY_POLICY_DESC: &str =
     "Policy for what information leakage is acceptable.";
 
-async fn wallet_handle(wallet: &Database) -> RpcResult<DbHandle> {
-    wallet
-        .handle()
-        .await
-        .map_err(|_| jsonrpsee::types::ErrorCode::InternalError.into())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn call<C: Chain>(
     wallet: Database,
@@ -67,38 +60,51 @@ pub(crate) async fn call<C: Chain>(
     minconf: Option<u32>,
     privacy_policy: String,
 ) -> Response {
-    let mut handle = wallet_handle(&wallet).await?;
-
     let request = build_request(&recipients)?;
 
-    let account_id = parse_account_parameter(handle.as_ref(), &keystore, &account).await?;
+    // `parse_account_parameter` queries the keystore and acquires its own wallet
+    // connection, so it must run before this task takes one (see `Database::handle`).
+    let account_id = parse_account_parameter(&wallet, &keystore, &account).await?;
 
-    // Fetch the account up front: it both validates that the account exists and
-    // provides the key derivation needed to sign the transaction.
-    let account = handle
-        .as_ref()
-        .get_account(account_id)
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-        .ok_or_else(|| LegacyCode::InvalidParameter.with_message(fl!("err-account-not-found")))?;
+    // Stage the account lookup and the proposal on a connection scoped to this block,
+    // so it is provably released before the remaining steps, which decrypt key material
+    // via the keystore or acquire their own wallet connections (see `Database::handle`).
+    // The block contains no await point, which is what lets
+    // `clippy::await_holding_invalid_type` check the staging.
+    let (account, privacy_policy, pczt, proposal) = {
+        let mut handle = wallet_handle(&wallet).await?;
 
-    let fund_source = FundSource::parse(&fund_source, handle.params())?;
+        // Fetch the account up front: it both validates that the account exists and
+        // provides the key derivation needed to sign the transaction.
+        let account = handle
+            .as_ref()
+            .get_account(account_id)
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+            .ok_or_else(|| {
+                LegacyCode::InvalidParameter.with_message(fl!("err-account-not-found"))
+            })?;
 
-    // This method sends in one shot, so the caller must acknowledge the privacy
-    // implications up front: the policy is required, not optional. It is
-    // enforced at proposal time here, and acknowledged again at the signing
-    // step below.
-    let privacy_policy = parse_privacy_policy(Some(&privacy_policy))?;
+        let fund_source = FundSource::parse(&fund_source, handle.params())?;
 
-    let confirmations_policy = confirmations_policy_for_minconf(minconf)?;
+        // This method sends in one shot, so the caller must acknowledge the privacy
+        // implications up front: the policy is required, not optional. It is
+        // enforced at proposal time here, and acknowledged again at the signing
+        // step below.
+        let privacy_policy = parse_privacy_policy(Some(&privacy_policy))?;
 
-    let (pczt, _required_policy, proposal) = pczt_create::build_pczt(
-        &mut handle,
-        &account,
-        &fund_source.spend_policy(),
-        request,
-        privacy_policy,
-        confirmations_policy,
-    )?;
+        let confirmations_policy = confirmations_policy_for_minconf(minconf)?;
+
+        let (pczt, _required_policy, proposal) = pczt_create::build_pczt(
+            &mut handle,
+            &account,
+            &fund_source.spend_policy(),
+            request,
+            privacy_policy,
+            confirmations_policy,
+        )?;
+
+        (account, privacy_policy, pczt, proposal)
+    };
 
     // Derive the full viewing key from the wallet seed while we still hold the
     // account. The built transaction's transparent outputs are verified against
@@ -120,16 +126,12 @@ pub(crate) async fn call<C: Chain>(
             _ => LegacyCode::Database.with_message(e.to_string()),
         })?;
     let ufvk = UnifiedSpendingKey::from_seed(
-        handle.params(),
+        wallet.params(),
         seed.expose_secret(),
         derivation.account_index(),
     )
     .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?
     .to_unified_full_viewing_key();
-
-    // The remaining steps acquire their own wallet handles; do not hold this
-    // one across them.
-    drop(handle);
 
     // Drive the PCZT through the same pipeline the `pczt_*` methods expose.
     let proved = pczt_prove::call(&encode_pczt_base64(pczt)?).await?;
@@ -139,7 +141,7 @@ pub(crate) async fn call<C: Chain>(
     // multi-party hand-off. The caller's policy doubles as the acknowledgement
     // that signing requires.
     let signed = pczt_sign::call(
-        wallet_handle(&wallet).await?,
+        wallet.params(),
         keystore.clone(),
         &proved.pczt,
         Some(privacy_policy.to_string()),
@@ -150,21 +152,21 @@ pub(crate) async fn call<C: Chain>(
     // Extraction verifies the proofs and signatures, and records the
     // transaction in the wallet so its inputs are marked pending-spent before
     // broadcast.
-    let extracted = pczt_extract::call(wallet_handle(&wallet).await?, &signed.pczt).await?;
+    let extracted = pczt_extract::call(wallet.clone(), &signed.pczt).await?;
 
     // The user-facing txid string is byte-reversed hex, per Bitcoin convention.
     let txid = ReverseHex::decode(&extracted.txid)
         .map(TxId::from_bytes)
         .ok_or_else(|| LegacyCode::Misc.with_static("Failed to decode txid"))?;
 
-    let handle = wallet_handle(&wallet).await?;
-    verify_and_broadcast_transactions(
-        handle.as_ref(),
-        chain,
-        account_id,
-        &ufvk,
-        &proposal,
-        vec![txid],
-    )
-    .await
+    // Verify the built transaction on a connection scoped to this block, released
+    // before the broadcast: a slow or unresponsive node must not pin a pooled
+    // connection (see `Database::handle`).
+    let txids = vec![txid];
+    let transactions = {
+        let handle = wallet_handle(&wallet).await?;
+        verify_transactions(handle.as_ref(), account_id, &ufvk, &proposal, &txids)?
+    };
+
+    broadcast_transactions(chain, txids, transactions).await
 }

@@ -13,6 +13,11 @@ use crate::{
 };
 
 impl AsyncRunnable for ExportMnemonicCmd {
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "one-shot CLI command: the only task on an otherwise idle pool, so a \
+                  nested acquisition cannot exhaust it (see `Database::handle`)"
+    )]
     async fn run(&self) -> Result<(), Error> {
         let config = APP.config();
         let _lock = config.lock_datadir()?;

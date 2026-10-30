@@ -9,8 +9,11 @@ use zcash_protocol::consensus::{BlockHeight, NetworkConstants};
 
 use crate::components::{
     chain::Chain,
-    database::DbConnection,
-    json_rpc::{server::LegacyCode, utils::fetch_account_birthday},
+    database::Database,
+    json_rpc::{
+        server::LegacyCode,
+        utils::{fetch_account_birthday, wallet_handle},
+    },
     keystore::KeyStore,
     sync::WalletDecryptorHandle,
 };
@@ -83,7 +86,7 @@ impl From<rusqlite::Error> for ImportError {
 }
 
 pub(crate) async fn call<C: Chain>(
-    wallet: &mut DbConnection,
+    wallet: &Database,
     keystore: &KeyStore,
     chain: C,
     decryptor: &WalletDecryptorHandle,
@@ -99,7 +102,14 @@ pub(crate) async fn call<C: Chain>(
             .map_err(|_| LegacyCode::InvalidParameter.with_static("Block height out of range."))?,
     );
 
-    let chain_tip = wallet
+    // Each wallet read below takes its own scoped connection, because the key
+    // encryption between them acquires a connection via the keystore (see
+    // `Database::handle`). The reads therefore see independent snapshots, which is
+    // deliberate: the only check whose staleness would matter (whether the key is
+    // already imported) is re-checked inside the import transaction below.
+    let chain_tip = wallet_handle(wallet)
+        .await?
+        .as_ref()
         .chain_height()
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
@@ -131,7 +141,9 @@ pub(crate) async fn call<C: Chain>(
         .map_err(|e| LegacyCode::Wallet.with_message(e.to_string()))?;
 
     // Check if the key is already known to the wallet.
-    let is_new_key = wallet
+    let is_new_key = wallet_handle(wallet)
+        .await?
+        .as_ref()
         .get_account_for_ufvk(&ufvk)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
         .is_none();
@@ -173,7 +185,8 @@ pub(crate) async fn call<C: Chain>(
     // wallet-database transaction: the account and its key commit together or not at all, so
     // the wallet can never track an account whose key is missing, nor hold a key for an
     // account it doesn't scan.
-    wallet
+    wallet_handle(wallet)
+        .await?
         .with_mut(|mut db_data| {
             db_data.transactionally_with_extension(|wdb, ext| -> Result<(), ImportError> {
                 if let Some(birthday) = &birthday {

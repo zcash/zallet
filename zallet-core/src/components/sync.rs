@@ -70,7 +70,7 @@ use zip32::Scope;
 use super::{
     TaskHandle,
     chain::{Chain, ChainBlock, ChainError, ChainView},
-    database::{Database, DbConnection},
+    database::{Database, DbConnection, DbHandle},
 };
 use crate::{config::ZalletConfig, error::Error, fl, network::Network};
 
@@ -121,6 +121,19 @@ impl Drop for PendingWalletSyncTasks {
     }
 }
 
+/// The number of pooled database connections that wallet sync retains for the lifetime
+/// of the process.
+///
+/// Derived from the four tasks spawned by [`WalletSync::spawn`], each of which moves one
+/// `DbHandle` into itself: the batch decryptor, steady-state sync (which inherits the
+/// handle `initialize` uses), history recovery, and transaction data requests. The
+/// connection pool is sized above this value (see
+/// [`Database::handle`](crate::components::database::Database::handle) and
+/// `database::connection::pool`) so that foreground wallet operations are never starved
+/// by sync. [`WalletSync::spawn`] acquires its connections as an array of exactly this
+/// length, so adding a task without updating this constant is a compile error there.
+pub(crate) const LONG_LIVED_SYNC_CONNECTIONS: usize = 4;
+
 impl WalletSync {
     /// Builds the batch decryptor. Split from [`WalletSync::spawn`] so the RPC server can be
     /// handed a handle before `spawn`'s initial scan, which would otherwise delay RPC startup.
@@ -134,6 +147,12 @@ impl WalletSync {
     ///
     /// On success, the caller owns cancellation for every returned task and must register
     /// that ownership before its next cancellable await.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "sync deliberately retains LONG_LIVED_SYNC_CONNECTIONS pooled \
+                  connections for the lifetime of the process; the pool is sized above \
+                  that count (see `database::connection::pool`)"
+    )]
     pub(crate) async fn spawn<C: Chain>(
         config: &ZalletConfig,
         db: Database,
@@ -146,9 +165,26 @@ impl WalletSync {
         let params = config.consensus.network();
         let recover_batch_size = config.sync.recover_batch_size();
 
+        // One pooled connection per long-lived sync task, acquired together so that the
+        // number taken is tied to [`LONG_LIVED_SYNC_CONNECTIONS`] by this array's
+        // length: adding a task to this function means growing the array (and the
+        // constant, and with it the pool's sizing floor in `database::connection`),
+        // rather than silently taking another connection further down.
+        let [
+            decryptor_conn,
+            steady_state_conn,
+            recover_history_conn,
+            data_requests_conn,
+        ]: [DbHandle; LONG_LIVED_SYNC_CONNECTIONS] = [
+            db.handle().await?,
+            db.handle().await?,
+            db.handle().await?,
+            db.handle().await?,
+        ];
+
         // Spawn the processing tasks.
         let batch_decryptor_task = {
-            let mut db_data = db.handle().await?;
+            let mut db_data = decryptor_conn;
             crate::spawn!("Batch decryptor", async move {
                 batch_decryptor(params, db_data.as_mut(), decryptor_engine).await?;
                 Ok(())
@@ -157,7 +193,7 @@ impl WalletSync {
         let mut pending_tasks = PendingWalletSyncTasks::new(&batch_decryptor_task);
 
         // Ensure the wallet is in a state that the sync tasks can work with.
-        let mut db_data = db.handle().await?;
+        let mut db_data = steady_state_conn;
         let (starting_tip, starting_boundary) = initialize(
             &chain,
             &params,
@@ -203,7 +239,7 @@ impl WalletSync {
 
         let recover_history_task = {
             let chain = chain.clone();
-            let mut db_data = db.handle().await?;
+            let mut db_data = recover_history_conn;
             let upper_boundary = current_boundary.clone();
             let data_request_signal = data_request_signal.clone();
             crate::spawn!("Recover history", async move {
@@ -224,7 +260,7 @@ impl WalletSync {
         };
         pending_tasks.include(&recover_history_task);
 
-        let mut db_data = db.handle().await?;
+        let mut db_data = data_requests_conn;
         let data_requests_task = crate::spawn!("Data requests", async move {
             data_requests(
                 chain,

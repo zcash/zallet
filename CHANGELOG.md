@@ -55,6 +55,22 @@ be considered breaking changes.
 
 ### Fixed
 
+- Wallet JSON-RPC methods no longer risk waiting forever for a database
+  connection while wallet sync is running (#708). Methods that use both the
+  database and stored key material (`z_getnewaccount`, `z_recoveraccounts`,
+  `z_getaddressforaccount`, `z_getbalanceforaccount`, `z_viewtransaction`,
+  `z_importkey`, `z_exportkey`, `z_exportviewingkey`, `z_sendmany`,
+  `z_sendfromaccount`, `z_shieldcoinbase`, `pczt_sign`, `pczt_extract`,
+  `signmessage`) previously
+  held one pooled connection while acquiring another, which could deadlock
+  them (and starve every other wallet RPC, including `z_listaccounts` and
+  `getwalletinfo`) once sync's long-lived connections had consumed the rest
+  of the pool. On small machines this was reachable from a fresh wallet:
+  `z_getnewaccount` could hang before any account existed. The pool's
+  CPU-derived default sizing honours container CPU quotas, so a container
+  limited to one or two CPUs was the most common way to hit this. The
+  connection pool is now also always sized with headroom above the
+  connections sync retains.
 - `z_viewtransaction` no longer panics when it cannot find the output
   that a transparent input spends: the previous transaction is unknown to the
   node, or has no output at that index. That input is left out of `spends`,
