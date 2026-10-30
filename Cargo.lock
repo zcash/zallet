@@ -5956,6 +5956,7 @@ dependencies = [
  "rusqlite",
  "rust-embed",
  "rust_decimal",
+ "rustix",
  "sapling-crypto",
  "schemars",
  "schemerz",

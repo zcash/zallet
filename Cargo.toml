@@ -154,6 +154,7 @@ deadpool-sqlite = "0.12"
 deadpool-sync = "0.1"
 incrementalmerkletree = "0.9"
 rusqlite = { version = "0.37", features = ["backup", "time"] }
+rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }
 schemerz = "0.3"
 schemerz-rusqlite = "0.371"
 shardtree = "0.8"

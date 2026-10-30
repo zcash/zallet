@@ -80,9 +80,6 @@ rust_decimal.workspace = true
 schemars.workspace = true
 tower = { workspace = true, features = ["timeout"] }
 
-# Testing
-tempfile.workspace = true
-
 # Tracing
 console-subscriber = { workspace = true, optional = true }
 tracing.workspace = true
@@ -143,6 +140,10 @@ zewif-zcashd = { workspace = true, optional = true }
 # lightwalletd (temporary)
 tonic.workspace = true
 
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+# Already in the production graph via `age`; used for RENAME_NOREPLACE renames.
+rustix.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 # Used to create secret-bearing files (e.g. the RPC auth cookie) with an
 # explicit owner-only DACL, instead of the ACL inherited from the parent
@@ -172,6 +173,7 @@ abscissa_core = { workspace = true, features = ["testing"] }
 once_cell.workspace = true
 proptest.workspace = true
 regex.workspace = true
+tempfile.workspace = true
 trycmd.workspace = true
 
 [features]

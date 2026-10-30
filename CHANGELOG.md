@@ -61,6 +61,15 @@ be considered breaking changes.
 
 - `indexer.db_path`. It has no effect, and Zallet logs a warning when it is set.
 
+### Changed
+
+- `zallet generate-encryption-identity` now creates the identity file with a
+  protected owner-only ACL on Windows, matching the owner-only permissions it
+  already used on Unix (previously the file inherited the destination
+  directory's access control there), and publishes it with a write-through
+  rename on Windows, so the identity is durable before the command reports
+  success.
+
 ### Removed
 
 - The `zaino` chain backend and its `zallet-zaino` binary. The release
