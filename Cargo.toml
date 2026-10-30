@@ -166,8 +166,8 @@ zip32 = "0.3"
 bip32 = "0.2"
 
 # Zcashd wallet migration
-zewif = { version = "1.0.0-rc.3" }
-zewif-zcashd = { version = "0.1.0-rc.5" }
+zewif = { version = "=1.0.0-rc.3" }
+zewif-zcashd = { version = "=0.1.0-rc.6" }
 which = "8.0"
 anyhow = "1.0"
 
@@ -176,10 +176,3 @@ tonic = "0.14"
 
 [profile.release]
 debug = "line-tables-only"
-
-
-[patch.crates-io]
-# TEMPORARY: take zewif-zcashd from its `main`, which moves it to the released
-# NU7 librustzcash cohort (zcash/zewif-zcashd#40), until that is released.
-# Every workspace must carry the same revision.
-zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "a369b2e66243b37cea068fcb849c87d9155ac72e" }

@@ -28,9 +28,6 @@ url = "https://raw.githubusercontent.com/ZcashFoundation/zebra/main/supply-chain
 [policy.librocksdb-sys]
 audit-as-crates-io = false
 
-[policy.zewif-zcashd]
-audit-as-crates-io = true
-
 [[exemptions.abscissa_core]]
 version = "0.9.0"
 criteria = "safe-to-deploy"
