@@ -559,6 +559,13 @@ user-id = 169181
 user-login = "nuttycom"
 user-name = "Kris Nuttycombe"
 
+[[publisher.zewif-zcashd]]
+version = "0.1.0-rc.6"
+when = "2026-10-30"
+user-id = 6289
+user-login = "str4d"
+user-name = "Jack Grigg"
+
 [[publisher.zip32]]
 version = "0.3.0"
 when = "2026-09-29"

@@ -25,9 +25,6 @@ url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/
 [imports.zebra]
 url = "https://raw.githubusercontent.com/ZcashFoundation/zebra/main/supply-chain/audits.toml"
 
-[policy.zewif-zcashd]
-audit-as-crates-io = true
-
 [[exemptions.abscissa_core]]
 version = "0.9.0"
 criteria = "safe-to-deploy"
@@ -1626,8 +1623,4 @@ criteria = "safe-to-deploy"
 
 [[exemptions.zerovec-derive]]
 version = "0.11.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.zewif-zcashd]]
-version = "0.1.0-rc.5@git:a369b2e66243b37cea068fcb849c87d9155ac72e"
 criteria = "safe-to-deploy"
