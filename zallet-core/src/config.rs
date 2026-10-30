@@ -1246,7 +1246,8 @@ impl ZalletConfig {
             .unwrap();
             match field_default {
                 Some(present) => {
-                    Serialize::serialize(&present, toml::ser::ValueSerializer::new(config)).unwrap()
+                    Serialize::serialize(&present, toml::ser::ValueSerializer::new(config))
+                        .unwrap();
                 }
                 None => write!(config, "UNSET").unwrap(),
             }
@@ -1291,13 +1292,11 @@ impl ZalletConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::BackendName;
+    use super::{BackendName, ZalletConfig};
+    use zcash_protocol::consensus::NetworkType;
 
     #[cfg(zallet_build = "wallet")]
-    use {
-        super::{ConsensusSection, KeyStoreSection, ZalletConfig},
-        zcash_protocol::consensus::NetworkType,
-    };
+    use super::{ConsensusSection, KeyStoreSection};
 
     /// Builds a config whose only interesting content is the network and the
     /// `keystore.require_backup` setting.
@@ -1335,6 +1334,15 @@ mod tests {
         // Both directions, so that regtest can opt in as well as mainnet opting out.
         assert!(backup_config(NetworkType::Regtest, Some(true)).require_backup());
         assert!(!backup_config(NetworkType::Main, Some(false)).require_backup());
+    }
+
+    #[test]
+    fn generated_example_is_a_valid_config_document() {
+        let document = ZalletConfig::generate_example();
+        let config: ZalletConfig =
+            toml::from_str(&document).expect("generated example is a complete config document");
+        assert_eq!(config.consensus.network, NetworkType::Main);
+        assert_eq!(config.features.as_of_version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
