@@ -205,10 +205,6 @@ criteria = "safe-to-deploy"
 version = "0.9.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.chacha20]]
-version = "0.10.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.chacha20poly1305]]
 version = "0.10.1"
 criteria = "safe-to-deploy"
@@ -311,10 +307,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.cpufeatures]]
 version = "0.2.17"
-criteria = "safe-to-deploy"
-
-[[exemptions.cpufeatures]]
-version = "0.3.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.crc32fast]]
@@ -533,14 +525,6 @@ criteria = "safe-to-deploy"
 version = "0.2.15"
 criteria = "safe-to-deploy"
 
-[[exemptions.getrandom]]
-version = "0.2.17"
-criteria = "safe-to-deploy"
-
-[[exemptions.getrandom]]
-version = "0.4.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.getset]]
 version = "0.1.7"
 criteria = "safe-to-deploy"
@@ -603,10 +587,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.httparse]]
 version = "1.10.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.humantime]]
-version = "2.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.humantime-serde]]
@@ -687,10 +667,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.indenter]]
 version = "0.3.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.indexmap]]
-version = "1.9.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.io_tee]]
@@ -905,20 +881,12 @@ criteria = "safe-to-deploy"
 version = "0.9.12"
 criteria = "safe-to-deploy"
 
-[[exemptions.password-hash]]
-version = "0.5.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.pbkdf2]]
 version = "0.12.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.pbkdf2]]
 version = "0.13.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.petgraph]]
-version = "0.7.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.petgraph]]
@@ -1041,10 +1009,6 @@ criteria = "safe-to-deploy"
 version = "5.2.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.r-efi]]
-version = "6.0.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.radium]]
 version = "0.7.0"
 criteria = "safe-to-deploy"
@@ -1055,14 +1019,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.rand]]
 version = "0.9.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.rand]]
-version = "0.10.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.rand_core]]
-version = "0.10.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.rayon]]
@@ -1301,10 +1257,6 @@ criteria = "safe-to-deploy"
 version = "3.0.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.sync_wrapper]]
-version = "1.0.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.sys-locale]]
 version = "0.3.2"
 criteria = "safe-to-deploy"
@@ -1475,10 +1427,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.universal-hash]]
 version = "0.6.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.untrusted]]
-version = "0.9.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.url]]
