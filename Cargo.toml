@@ -37,7 +37,7 @@ fmutex = "0.3"
 home = "0.5"
 known-folders = "1"
 windows = "0.62"
-xdg = "2.5"
+xdg = "3"
 
 # Hashing
 blake2b_simd = "1"

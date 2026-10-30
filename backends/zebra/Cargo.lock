@@ -6564,12 +6564,6 @@ dependencies = [
 
 [[package]]
 name = "xdg"
-version = "2.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "213b7324336b53d2414b2db8537e56544d981803139155afa84f76eeebb7a546"
-
-[[package]]
-name = "xdg"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fb433233f2df9344722454bc7e96465c9d03bff9d77c248f9e7523fe79585b5"
@@ -6671,7 +6665,7 @@ dependencies = [
  "which",
  "windows",
  "x25519-dalek 2.0.1",
- "xdg 2.5.2",
+ "xdg",
  "zcash_address",
  "zcash_client_backend",
  "zcash_client_sqlite",
@@ -6982,7 +6976,7 @@ dependencies = [
  "sapling-crypto",
  "tracing",
  "wagyu-zcash-parameters",
- "xdg 3.0.0",
+ "xdg",
  "zcash_primitives",
 ]
 

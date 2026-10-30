@@ -1729,10 +1729,6 @@ version = "3.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.xdg]]
-version = "2.5.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.xdg]]
 version = "3.0.0"
 criteria = "safe-to-deploy"
 
