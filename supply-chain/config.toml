@@ -29,17 +29,11 @@ url = "https://raw.githubusercontent.com/ZcashFoundation/zebra/main/supply-chain
 
 [policy.f4jumble]
 
-[policy.incrementalmerkletree]
-
-[policy.shardtree]
-
 [policy.zcash_address]
 
 [policy.zcash_client_backend]
 
 [policy.zcash_client_sqlite]
-
-[policy.zcash_encoding]
 
 [policy.zcash_keys]
 
