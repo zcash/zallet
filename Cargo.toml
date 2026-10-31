@@ -37,7 +37,7 @@ fmutex = "0.3"
 home = "0.5"
 known-folders = "1"
 windows = "0.62"
-xdg = "2.5"
+xdg = "3"
 
 # Hashing
 blake2b_simd = "1"
@@ -74,7 +74,7 @@ hex = "0.4"
 serde = { version = "1", features = ["serde_derive"] }
 semver = "1"
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
-toml = "0.8"
+toml = "0.9"
 zcash_address = "0.14"
 
 # Randomness
@@ -95,7 +95,7 @@ http-body-util = "0.1"
 hyper = "1"
 jsonrpsee = "0.24"
 jsonrpsee-http-client = { version = "0.24", default-features = false }
-nix = "0.29" # `stop` RPC method
+nix = "0.31" # `stop` RPC method
 rust_decimal = { version = "1.37", default-features = false, features = [
     "serde-arbitrary-precision",
     "serde-float",
@@ -108,7 +108,7 @@ once_cell = "1.2"
 proptest = "1.9"
 regex = "1.4"
 tempfile = "3"
-trycmd = "0.15"
+trycmd = "1"
 
 # Tracing
 console-subscriber = "0.5"
@@ -160,8 +160,8 @@ schemerz-rusqlite = "0.371"
 shardtree = "0.8"
 time = "0.3"
 uuid = "1"
-zcash_client_backend = "=0.25.0"
-zcash_client_sqlite = "=0.23.0"
+zcash_client_backend = "0.25"
+zcash_client_sqlite = "0.23"
 zcash_note_encryption = "0.5.1"
 zip32 = "0.3"
 bip32 = "0.2"

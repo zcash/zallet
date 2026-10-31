@@ -7,18 +7,27 @@ on:
       - '.github/workflows/aggregate-audits.yml'
       - 'supply-chain/audits.toml'
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   trigger:
     name: Trigger
     runs-on: ubuntu-latest
     steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        with:
+          app-id: ${{ secrets.DISPATCH_APP_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
+          owner: zcash
+          repositories: rust-ecosystem
+          permission-contents: write
+
       - name: Trigger aggregation in zcash/rust-ecosystem
         run: >
-          gh api repos/zcash/rust-ecosystem/dispatches
-            --field event_type="aggregate-audits"
-            --field client_payload[sha]="$GITHUB_SHA"
+          gh api --method POST repos/zcash/rust-ecosystem/dispatches
+          --field event_type="aggregate-audits"
+          --field "client_payload[sha]=$GITHUB_SHA"
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
