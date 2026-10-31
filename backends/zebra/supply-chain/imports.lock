@@ -1170,12 +1170,6 @@ criteria = "safe-to-deploy"
 version = "0.8.12"
 notes = "No unsafe usage (forbidden) or ambient capabilities"
 
-[[audits.embark-studios.audits.similar]]
-who = "Johan Andersson <opensource@embark-studios.com>"
-criteria = "safe-to-deploy"
-version = "2.2.1"
-notes = "No unsafe usage or ambient capabilities"
-
 [[audits.embark-studios.audits.tap]]
 who = "Johan Andersson <opensource@embark-studios.com>"
 criteria = "safe-to-deploy"
@@ -3090,12 +3084,6 @@ notes = """
 Mostly removes some deprecated and unsound APIs.
 """
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.similar]]
-who = "Nika Layzell <nika@thelayzells.com>"
-criteria = "safe-to-deploy"
-delta = "2.2.1 -> 2.7.0"
-aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.smallvec]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
