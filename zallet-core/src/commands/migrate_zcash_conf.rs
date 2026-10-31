@@ -200,8 +200,8 @@ pub(crate) fn zcashd_default_data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         xdg::BaseDirectories::new()
-            .ok()
-            .map(|base_dirs| base_dirs.get_data_home().join("Zcash"))
+            .get_data_home()
+            .map(|data_home| data_home.join("Zcash"))
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
