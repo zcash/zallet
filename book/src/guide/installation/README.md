@@ -111,7 +111,7 @@ cargo install --locked zallet
 This will automatically download Zallet from [crates.io], build it, and install it in
 Cargo's global binary directory (`~/.cargo/bin/` by default).
 
-To update, run `cargo install zallet` again. It will check if there is a newer version,
+To update, run `cargo install --locked zallet` again. It will check if there is a newer version,
 and re-install Zallet if a new version is found. You will need to shut down and restart
 any [running Zallet instances](../../cli/start.md) to apply the new version.
 
