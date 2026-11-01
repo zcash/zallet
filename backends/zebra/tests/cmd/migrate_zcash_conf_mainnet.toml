@@ -15,7 +15,7 @@ network = "main"
 [external]
 
 [features]
-as_of_version = "0.1.0-beta.3"
+as_of_version = "0.1.0-beta.4"
 
 [features.deprecated]
 

@@ -20,6 +20,8 @@ should be considered breaking changes.
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-11-01
+
 ### Changed
 
 - Now built against the Zebra 7.0.0 crates — `zebra-state` 16 (with the

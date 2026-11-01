@@ -26,6 +26,8 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-11-01
+
 ### Added
 
 - The `zallet backup` command writes a consistent, integrity-checked snapshot

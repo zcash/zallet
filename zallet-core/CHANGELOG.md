@@ -21,6 +21,8 @@ should be considered breaking changes.
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-11-01
+
 ### Changed
 
 - Migrated to the librustzcash NU7 release cohort: `zcash_protocol` 0.11,
