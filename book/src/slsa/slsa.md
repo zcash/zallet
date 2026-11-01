@@ -133,6 +133,23 @@ export PATH="$PATH:$HOME/go/bin"
 # tagged digest was signed under the real namespace.
 ```
 
+#### Versions re-released from a release branch
+
+The identities above assume the release workflow ran on the tag push. When a
+release run fails and is re-run with `workflow_dispatch` from a
+`release/${VERSION}` branch (the tagged commit plus a workflow fix), its images,
+binaries and packages are signed by that branch run instead. This applies to
+`v0.1.0-beta.1` and `v0.1.0-beta.4`. For those versions, use:
+
+```bash
+export IMAGE_WORKFLOW="https://github.com/${REPO}/.github/workflows/build-and-push-docker-hub.yaml@refs/heads/release/${VERSION}"
+export BIN_WORKFLOW="https://github.com/${REPO}/.github/workflows/binaries-and-deb-release.yml@refs/heads/release/${VERSION}"
+export BIN_SIGNER_WORKFLOW="github.com/${REPO}/.github/workflows/binaries-and-deb-release.yml@refs/heads/release/${VERSION}"
+```
+
+The released source is still the tagged commit; the branch adds only the
+workflow fix. Step 1 below validates the tag as usual.
+
 ### 1. Validate the git tag
 
 ```bash
