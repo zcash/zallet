@@ -27,10 +27,10 @@ should be considered breaking changes.
 
 - Migrated to the librustzcash NU7 release cohort: `zcash_protocol` 0.11,
   `zcash_address` 0.14, `zcash_transparent` 0.11, `zcash_primitives` and
-  `zcash_proofs` 0.31, `zcash_keys` 0.17, `pczt` 0.10, and
-  `zcash_client_backend` 0.25.0 and `zcash_client_sqlite` 0.23.0 (both pinned
-  exactly), together with `orchard` 0.16, `sapling-crypto` 0.9,
-  `incrementalmerkletree` 0.9, `shardtree` 0.8 and `zip32` 0.3. These replace
+  `zcash_proofs` 0.31, `zcash_keys` 0.17, `pczt` 0.10, `zcash_client_backend`
+  0.25 and `zcash_client_sqlite` 0.23, together with `orchard` 0.16,
+  `sapling-crypto` 0.9, `incrementalmerkletree` 0.9, `shardtree` 0.8 and
+  `zip32` 0.3. These replace
   the `[patch.crates-io]` git pin of the 0.30 cohort. A backend workspace must
   resolve the same versions so that every lockfile resolves the cohort
   identically.

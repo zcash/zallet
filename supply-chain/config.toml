@@ -1106,7 +1106,7 @@ version = "1.1.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]
-version = "0.23.41"
+version = "0.23.46"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-pki-types]]
