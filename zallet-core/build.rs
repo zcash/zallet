@@ -50,6 +50,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(out_dir) => PathBuf::from(out_dir),
     };
 
+    #[cfg(feature = "rpc-cli")]
+    generate_rpc_cli_params(&out_dir)?;
+
     // `OUT_DIR` is "intentionally opaque as it is only intended for `rustc` interaction"
     // (https://github.com/rust-lang/cargo/issues/9858). Peek into the black box and use
     // it to figure out where the target directory is.
@@ -279,187 +282,315 @@ fn generate_rpc_book_reference(out_dir: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[cfg(not(zallet_build = "merchant_terminal"))]
-fn generate_rpc_openrpc(out_dir: &Path) -> Result<(), Box<dyn Error>> {
+#[cfg(any(not(zallet_build = "merchant_terminal"), feature = "rpc-cli"))]
+struct ParsedRpcMethod<'a> {
+    command: String,
+    module: String,
+    #[cfg_attr(zallet_build = "merchant_terminal", allow(dead_code))]
+    source: &'a syn::TraitItemFn,
+    params: Vec<ParsedRpcParameter>,
+}
+
+#[cfg(any(not(zallet_build = "merchant_terminal"), feature = "rpc-cli"))]
+struct ParsedRpcParameter {
+    name: String,
+    #[cfg_attr(zallet_build = "merchant_terminal", allow(dead_code))]
+    schema_ty: String,
+    required: Option<bool>,
+    #[cfg(feature = "rpc-cli")]
+    conversion: RpcCliConversion,
+}
+
+#[cfg(feature = "rpc-cli")]
+#[derive(Clone, Copy)]
+enum RpcCliConversion {
+    String,
+    NullableString,
+    Json,
+}
+
+#[cfg(any(not(zallet_build = "merchant_terminal"), feature = "rpc-cli"))]
+fn find_rpc_trait<'a>(methods_ast: &'a syn::File, name: &str) -> &'a syn::ItemTrait {
+    methods_ast
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Trait(item_trait) if item_trait.ident == name => Some(item_trait),
+            _ => None,
+        })
+        .expect("present")
+}
+
+#[cfg(any(not(zallet_build = "merchant_terminal"), feature = "rpc-cli"))]
+fn parse_rpc_method(method: &syn::TraitItemFn) -> Option<ParsedRpcMethod<'_>> {
     use quote::ToTokens;
 
+    // Find methods via their `#[method(name = "command")]` attribute.
+    let mut command = None;
+    method
+        .attrs
+        .iter()
+        .find(|attr| attr.path().is_ident("method"))
+        .and_then(|attr| {
+            attr.parse_nested_meta(|meta| {
+                command = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                Ok(())
+            })
+            .ok()
+        });
+    let command = command?;
+
+    let module = match &method.sig.output {
+        syn::ReturnType::Type(_, ret) => match ret.as_ref() {
+            syn::Type::Path(type_path) => type_path.path.segments.first(),
+            _ => None,
+        },
+        _ => None,
+    }
+    .expect("required")
+    .ident
+    .to_string();
+
+    let params = method
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::FnArg::Receiver(_) => None,
+            syn::FnArg::Typed(pat_type) => match pat_type.pat.as_ref() {
+                syn::Pat::Ident(pat_ident) => {
+                    let name = pat_ident.ident.to_string();
+                    let rust_ty = pat_type.ty.as_ref();
+
+                    // If we can determine the parameter's optionality, do so.
+                    let (param_ty, required) = match rust_ty {
+                        syn::Type::Path(type_path) => {
+                            let is_standalone_ident = type_path.path.leading_colon.is_none()
+                                && type_path.path.segments.len() == 1;
+                            let first_segment = &type_path.path.segments[0];
+
+                            if first_segment.ident == "Option" && is_standalone_ident {
+                                // Strip the `Option<_>` for the schema and CLI types.
+                                let inner_ty = match &first_segment.arguments {
+                                    syn::PathArguments::AngleBracketed(args) => {
+                                        match args.args.first().expect("valid Option") {
+                                            syn::GenericArgument::Type(ty) => ty,
+                                            _ => panic!("Invalid Option"),
+                                        }
+                                    }
+                                    _ => panic!("Invalid Option"),
+                                };
+                                (inner_ty, Some(false))
+                            } else if first_segment.ident == "Vec" {
+                                // We don't know whether the vec may be empty.
+                                (rust_ty, None)
+                            } else {
+                                (rust_ty, Some(true))
+                            }
+                        }
+                        _ => (rust_ty, Some(true)),
+                    };
+
+                    let param_ty = param_ty.to_token_stream().to_string();
+                    let schema_ty = match param_ty.as_str() {
+                        "age :: secrecy :: SecretString" => "String".into(),
+                        _ => param_ty.clone(),
+                    };
+                    #[cfg(feature = "rpc-cli")]
+                    let optional = required == Some(false);
+                    #[cfg(feature = "rpc-cli")]
+                    let conversion = match (optional, param_ty.as_str()) {
+                        (false, "String" | "& str" | "age :: secrecy :: SecretString") => {
+                            RpcCliConversion::String
+                        }
+                        (true, "String" | "& str") => RpcCliConversion::NullableString,
+                        _ => RpcCliConversion::Json,
+                    };
+
+                    Some(ParsedRpcParameter {
+                        name,
+                        schema_ty,
+                        required,
+                        #[cfg(feature = "rpc-cli")]
+                        conversion,
+                    })
+                }
+                _ => None,
+            },
+        })
+        .collect();
+
+    Some(ParsedRpcMethod {
+        command,
+        module,
+        source: method,
+        params,
+    })
+}
+
+#[cfg(feature = "rpc-cli")]
+fn append_rpc_cli_methods(contents: &mut String, rpc_trait: &syn::ItemTrait) {
+    for method in rpc_trait.items.iter().filter_map(|item| match item {
+        syn::TraitItem::Fn(method) => parse_rpc_method(method),
+        _ => None,
+    }) {
+        let ParsedRpcMethod {
+            command,
+            module,
+            params,
+            ..
+        } = method;
+
+        contents.push_str(&format!("    {command:?} => Method::new(&[\n"));
+        for parameter in params {
+            let ParsedRpcParameter {
+                name,
+                required,
+                conversion,
+                ..
+            } = parameter;
+            let param_upper = name.to_uppercase();
+
+            contents.push_str(&format!("        Parameter::new({name:?}, "));
+            match required {
+                Some(required) => contents.push_str(&required.to_string()),
+                None => {
+                    contents.push_str("super::");
+                    contents.push_str(&module);
+                    contents.push_str("::PARAM_");
+                    contents.push_str(&param_upper);
+                    contents.push_str("_REQUIRED");
+                }
+            }
+            contents.push_str(", Conversion::");
+            contents.push_str(match conversion {
+                RpcCliConversion::String => "String",
+                RpcCliConversion::NullableString => "NullableString",
+                RpcCliConversion::Json => "Json",
+            });
+            contents.push_str("),\n");
+        }
+        contents.push_str("    ]),\n");
+    }
+}
+
+#[cfg(feature = "rpc-cli")]
+fn generate_rpc_cli_params(out_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let methods_rs = fs::read_to_string(JSON_RPC_METHODS_RS)?;
+    let methods_ast = syn::parse_file(&methods_rs)?;
+
+    let mut contents =
+        String::from("static METHODS: ::phf::Map<&str, Method> = ::phf::phf_map! {\n");
+    append_rpc_cli_methods(&mut contents, find_rpc_trait(&methods_ast, "Rpc"));
+    #[cfg(not(zallet_build = "merchant_terminal"))]
+    append_rpc_cli_methods(&mut contents, find_rpc_trait(&methods_ast, "WalletRpc"));
+    contents.push_str("};\n");
+
+    fs::write(out_dir.join("rpc_cli_params.rs"), contents)?;
+
+    Ok(())
+}
+
+#[cfg(not(zallet_build = "merchant_terminal"))]
+fn generate_rpc_openrpc(out_dir: &Path) -> Result<(), Box<dyn Error>> {
     // Parse the source file containing the `Rpc` trait.
     let methods_rs = fs::read_to_string(JSON_RPC_METHODS_RS)?;
     let methods_ast = syn::parse_file(&methods_rs)?;
 
-    let rpc_trait = methods_ast
-        .items
-        .iter()
-        .find_map(|item| match item {
-            syn::Item::Trait(item_trait) if item_trait.ident == "Rpc" => Some(item_trait),
-            _ => None,
-        })
-        .expect("present");
-    let wallet_rpc_trait = methods_ast
-        .items
-        .iter()
-        .find_map(|item| match item {
-            syn::Item::Trait(item_trait) if item_trait.ident == "WalletRpc" => Some(item_trait),
-            _ => None,
-        })
-        .expect("present");
+    let rpc_trait = find_rpc_trait(&methods_ast, "Rpc");
+    let wallet_rpc_trait = find_rpc_trait(&methods_ast, "WalletRpc");
 
     let mut contents = "#[allow(unused_qualifications)]
 pub(super) static METHODS: ::phf::Map<&str, RpcMethod> = ::phf::phf_map! {
 "
     .to_string();
 
-    for item in rpc_trait.items.iter().chain(&wallet_rpc_trait.items) {
-        if let syn::TraitItem::Fn(method) = item {
-            // Find methods via their `#[method(name = "command")]` attribute.
-            let mut command = None;
-            method
-                .attrs
-                .iter()
-                .find(|attr| attr.path().is_ident("method"))
-                .and_then(|attr| {
-                    attr.parse_nested_meta(|meta| {
-                        command = Some(meta.value()?.parse::<syn::LitStr>()?.value());
-                        Ok(())
-                    })
-                    .ok()
-                });
+    for method in rpc_trait
+        .items
+        .iter()
+        .chain(&wallet_rpc_trait.items)
+        .filter_map(|item| match item {
+            syn::TraitItem::Fn(method) => parse_rpc_method(method),
+            _ => None,
+        })
+    {
+        let ParsedRpcMethod {
+            command,
+            module,
+            source,
+            params,
+        } = method;
+        contents.push('"');
+        contents.push_str(&command);
+        contents.push_str("\" => RpcMethod {\n");
 
-            if let Some(command) = command {
-                let module = match &method.sig.output {
-                    syn::ReturnType::Type(_, ret) => match ret.as_ref() {
-                        syn::Type::Path(type_path) => type_path.path.segments.first(),
-                        _ => None,
-                    },
-                    _ => None,
-                }
-                .expect("required")
-                .ident
-                .to_string();
+        contents.push_str("    description: \"");
+        for attr in source
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("doc"))
+        {
+            if let syn::Meta::NameValue(doc_line) = &attr.meta
+                && let syn::Expr::Lit(docs) = &doc_line.value
+                && let syn::Lit::Str(s) = &docs.lit
+            {
+                // Trim the leading space from the doc comment line.
+                let line = s.value();
+                let trimmed_line = if line.is_empty() { &line } else { &line[1..] };
 
-                let params = method.sig.inputs.iter().filter_map(|arg| match arg {
-                    syn::FnArg::Receiver(_) => None,
-                    syn::FnArg::Typed(pat_type) => match pat_type.pat.as_ref() {
-                        syn::Pat::Ident(pat_ident) => {
-                            let parameter = pat_ident.ident.to_string();
-                            let rust_ty = pat_type.ty.as_ref();
+                let escaped = trimmed_line.escape_default().collect::<String>();
 
-                            // If we can determine the parameter's optionality, do so.
-                            let (param_ty, required) = match rust_ty {
-                                syn::Type::Path(type_path) => {
-                                    let is_standalone_ident =
-                                        type_path.path.leading_colon.is_none()
-                                            && type_path.path.segments.len() == 1;
-                                    let first_segment = &type_path.path.segments[0];
+                contents.push_str(&escaped);
+                contents.push_str("\\n");
+            }
+        }
+        contents.push_str("\",\n");
 
-                                    if first_segment.ident == "Option" && is_standalone_ident {
-                                        // Strip the `Option<_>` for the schema type.
-                                        let schema_ty = match &first_segment.arguments {
-                                            syn::PathArguments::AngleBracketed(args) => {
-                                                match args.args.first().expect("valid Option") {
-                                                    syn::GenericArgument::Type(ty) => ty,
-                                                    _ => panic!("Invalid Option"),
-                                                }
-                                            }
-                                            _ => panic!("Invalid Option"),
-                                        };
-                                        (schema_ty, Some(false))
-                                    } else if first_segment.ident == "Vec" {
-                                        // We don't know whether the vec may be empty.
-                                        (rust_ty, None)
-                                    } else {
-                                        (rust_ty, Some(true))
-                                    }
-                                }
-                                _ => (rust_ty, Some(true)),
-                            };
+        contents.push_str("    params: |_g| vec![\n");
+        for parameter in params {
+            let param_upper = parameter.name.to_uppercase();
 
-                            // Handle a few conversions we know we need.
-                            let param_ty = param_ty.to_token_stream().to_string();
-                            let schema_ty = match param_ty.as_str() {
-                                "age :: secrecy :: SecretString" => "String".into(),
-                                _ => param_ty,
-                            };
-
-                            Some((parameter, schema_ty, required))
-                        }
-                        _ => None,
-                    },
-                });
-
-                contents.push('"');
-                contents.push_str(&command);
-                contents.push_str("\" => RpcMethod {\n");
-
-                contents.push_str("    description: \"");
-                for attr in method
-                    .attrs
-                    .iter()
-                    .filter(|attr| attr.path().is_ident("doc"))
-                {
-                    if let syn::Meta::NameValue(doc_line) = &attr.meta
-                        && let syn::Expr::Lit(docs) = &doc_line.value
-                        && let syn::Lit::Str(s) = &docs.lit
-                    {
-                        // Trim the leading space from the doc comment line.
-                        let line = s.value();
-                        let trimmed_line = if line.is_empty() { &line } else { &line[1..] };
-
-                        let escaped = trimmed_line.escape_default().collect::<String>();
-
-                        contents.push_str(&escaped);
-                        contents.push_str("\\n");
-                    }
-                }
-                contents.push_str("\",\n");
-
-                contents.push_str("    params: |_g| vec![\n");
-                for (parameter, schema_ty, required) in params {
-                    let param_upper = parameter.to_uppercase();
-
-                    contents.push_str("        _g.param::<");
-                    contents.push_str(&schema_ty);
-                    contents.push_str(">(\"");
-                    contents.push_str(&parameter);
-                    contents.push_str("\", super::");
+            contents.push_str("        _g.param::<");
+            contents.push_str(&parameter.schema_ty);
+            contents.push_str(">(\"");
+            contents.push_str(&parameter.name);
+            contents.push_str("\", super::");
+            contents.push_str(&module);
+            contents.push_str("::PARAM_");
+            contents.push_str(&param_upper);
+            contents.push_str("_DESC, ");
+            match parameter.required {
+                Some(required) => contents.push_str(&required.to_string()),
+                None => {
+                    // Require a helper const to be present.
+                    contents.push_str("super::");
                     contents.push_str(&module);
                     contents.push_str("::PARAM_");
                     contents.push_str(&param_upper);
-                    contents.push_str("_DESC, ");
-                    match required {
-                        Some(required) => contents.push_str(&required.to_string()),
-                        None => {
-                            // Require a helper const to be present.
-                            contents.push_str("super::");
-                            contents.push_str(&module);
-                            contents.push_str("::PARAM_");
-                            contents.push_str(&param_upper);
-                            contents.push_str("_REQUIRED");
-                        }
-                    }
-                    contents.push_str("),\n");
+                    contents.push_str("_REQUIRED");
                 }
-                contents.push_str("    ],\n");
-
-                contents.push_str("    result: |g| g.result::<super::");
-                contents.push_str(&module);
-                contents.push_str("::ResultType>(\"");
-                contents.push_str(&command);
-                contents.push_str("_result\"),\n");
-
-                contents.push_str("    deprecated: ");
-                contents.push_str(
-                    &method
-                        .attrs
-                        .iter()
-                        .any(|attr| attr.path().is_ident("deprecated"))
-                        .to_string(),
-                );
-                contents.push_str(",\n");
-
-                contents.push_str("},\n");
             }
+            contents.push_str("),\n");
         }
+        contents.push_str("    ],\n");
+
+        contents.push_str("    result: |g| g.result::<super::");
+        contents.push_str(&module);
+        contents.push_str("::ResultType>(\"");
+        contents.push_str(&command);
+        contents.push_str("_result\"),\n");
+
+        contents.push_str("    deprecated: ");
+        contents.push_str(
+            &source
+                .attrs
+                .iter()
+                .any(|attr| attr.path().is_ident("deprecated"))
+                .to_string(),
+        );
+        contents.push_str(",\n");
+
+        contents.push_str("},\n");
     }
 
     contents.push_str("};");
