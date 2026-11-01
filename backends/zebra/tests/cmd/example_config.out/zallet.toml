@@ -173,7 +173,7 @@ network = "main"
 # features. If this version is not compatible with `zallet --version`, most Zallet
 # commands will error and print out information about how to upgrade your wallet,
 # along with any changes you need to make to your usage of Zallet.
-as_of_version = "0.1.0-beta.3"
+as_of_version = "0.1.0-beta.4"
 
 # Enable "legacy `zcashd` pool of funds" semantics for the given seed.
 #

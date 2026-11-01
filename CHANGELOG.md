@@ -26,6 +26,8 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-11-01
+
 ### Added
 
 - The `zallet backup` command writes a consistent, integrity-checked snapshot
@@ -56,19 +58,16 @@ be considered breaking changes.
 - `z_sendmany` fails for a recipient unified address that has expired, or whose
   ZIP 316 Revision 2 expiry height is earlier than the expiry height of the
   transaction that would pay it.
-
-### Deprecated
-
-- `indexer.db_path`. It has no effect, and Zallet logs a warning when it is set.
-
-### Changed
-
 - `zallet generate-encryption-identity` now creates the identity file with a
   protected owner-only ACL on Windows, matching the owner-only permissions it
   already used on Unix (previously the file inherited the destination
   directory's access control there), and publishes it with a write-through
   rename on Windows, so the identity is durable before the command reports
   success.
+
+### Deprecated
+
+- `indexer.db_path`. It has no effect, and Zallet logs a warning when it is set.
 
 ### Removed
 
