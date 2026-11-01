@@ -70,7 +70,7 @@ on:
       smoke-distro:
         description: "Debian release used for binary/package smoke tests"
         required: false
-        default: bullseye
+        default: bookworm
         type: string
       apt-distributions:
         description: "Comma- or newline-separated Debian distributions to mirror/publish to apt.z.cash"
@@ -96,7 +96,7 @@ jobs:
       - id: compute
         env:
           PLATFORM_SPEC: ${{ inputs.platforms || 'linux/amd64' }}
-          MATRIX_DEBIAN: ${{ inputs['smoke-distro'] || 'bullseye' }}
+          MATRIX_DEBIAN: ${{ inputs['smoke-distro'] || 'bookworm' }}
         run: |
           set -euo pipefail
           MATRIX_JSON=$(
@@ -105,7 +105,7 @@ jobs:
           import os
 
           raw = os.environ.get("PLATFORM_SPEC", "").replace("\r", "")
-          debian_fallback = os.environ.get("MATRIX_DEBIAN", "bullseye").strip() or "bullseye"
+          debian_fallback = os.environ.get("MATRIX_DEBIAN", "bookworm").strip() or "bookworm"
 
           tokens = [tok.strip() for tok in raw.replace("\n", ",").split(",") if tok.strip()]
           if not tokens:
@@ -502,9 +502,9 @@ jobs:
             -v "$PWD/smoke":/release:ro \
             "debian:${SMOKE_TEST_DISTRO}-slim" \
             bash -euo pipefail -c "\
-              apt-get update >/dev/null && \
-              apt-get install -y --no-install-recommends ca-certificates >/dev/null && \
-              dpkg -i /release/package.deb || apt-get -f install -y >/dev/null && \
+              apt-get update >/dev/null; \
+              apt-get install -y --no-install-recommends ca-certificates >/dev/null; \
+              { dpkg -i /release/package.deb || apt-get -f install -y >/dev/null; }; \
               zallet -h >/dev/null"
 
       # NOTE: APT index publishing (aptly mirror/snapshot/publish + S3 sync) was
