@@ -31,7 +31,7 @@ Artifact details:
   and verification commands.
 - **Debian packages** — published to the project APT repository for Debian
   `bullseye` and `bookworm` (and their Ubuntu contemporaries); the release pipeline
-  smoke-tests the packaged binaries in a `bullseye` container on both
+  smoke-tests the packaged binaries in a `bookworm` container on both
   architectures. See [Debian packages](installation/debian.md).
 - **Docker images** — a multi-arch (`linux/amd64`, `linux/arm64`) manifest on
   Docker Hub. See [Docker](installation/docker.md).

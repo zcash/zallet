@@ -40,7 +40,11 @@ jobs:
       # `manifest` job stitches a single multi-arch image. So this list stays
       # amd64-only (it drives ONLY the StageX container job).
       PLATFORM_LIST: linux/amd64
-      SMOKE_TEST_DISTRO: bullseye
+      # bookworm, not bullseye: Debian has retired bullseye's security archive
+      # from deb.debian.org (its index still lists packages whose files 404), so
+      # `apt-get install` fails in a bullseye container. The binaries are static
+      # musl builds, so the smoke test is as meaningful on any supported release.
+      SMOKE_TEST_DISTRO: bookworm
       APT_DISTRIBUTIONS: bullseye,bookworm # TODO bullseye,bookworm,trixie
     steps:
       - id: version_step
