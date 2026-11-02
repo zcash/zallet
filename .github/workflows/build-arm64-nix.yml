@@ -225,9 +225,24 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -Eeuo pipefail
-          cosign sign --yes "${REF}@${DIGEST}"
+          # A Rekor upload can be committed while its response is lost; cosign's
+          # own retry then fails with 409 "an equivalent entry already exists"
+          # (v0.1.0-beta.4, run 41461526245). A new cosign call signs with a fresh
+          # Fulcio certificate, so retrying the whole call cannot hit that 409.
+          retry() {
+            local n
+            for n in 1 2 3; do
+              "$@" && return 0
+              if [[ $n -lt 3 ]]; then
+                echo "::warning::$1 $2 failed (attempt $n of 3), retrying in $((n * 15)) s" >&2
+                sleep $((n * 15))
+              fi
+            done
+            return 1
+          }
+          retry cosign sign --yes "${REF}@${DIGEST}"
           syft "${REF}@${DIGEST}" --platform linux/arm64 -o spdx-json > /tmp/arm64.sbom.spdx.json
-          cosign attest --yes --type spdxjson --predicate /tmp/arm64.sbom.spdx.json "${REF}@${DIGEST}"
+          retry cosign attest --yes --type spdxjson --predicate /tmp/arm64.sbom.spdx.json "${REF}@${DIGEST}"
 
       # Distinct per-arch name (v4+ artifacts are immutable; same-name uploads
       # do NOT merge). The deb job downloads `<name>-*` with merge-multiple.
