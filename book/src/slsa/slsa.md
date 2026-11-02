@@ -147,8 +147,12 @@ export BIN_WORKFLOW="https://github.com/${REPO}/.github/workflows/binaries-and-d
 export BIN_SIGNER_WORKFLOW="github.com/${REPO}/.github/workflows/binaries-and-deb-release.yml@refs/heads/release/${VERSION}"
 ```
 
-The released source is still the tagged commit; the branch adds only the
-workflow fix. Step 1 below validates the tag as usual.
+The released source is the tagged commit; the branch adds only workflow and
+book changes. The provenance names the branch commit, so in step 6
+`gitCommit` is that commit and the workflow ref is
+`refs/heads/release/${VERSION}`. Check that it differs from the tag only
+outside the source tree: `git diff --stat "${VERSION}" <gitCommit>` should
+list only `.github/` and `book/` files. Step 1 below validates the tag as usual.
 
 ### 1. Validate the git tag
 
