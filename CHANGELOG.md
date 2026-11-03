@@ -26,6 +26,13 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- `zallet rpc` now accepts bare values for known string parameters, preserves
+  JSON-quoted strings, and validates known methods' positional argument counts
+  locally. Methods unknown to this Zallet binary retain JSON-only parameter
+  parsing without a local count check.
+
 ## [0.1.0-beta.4] - 2026-11-01
 
 ### Added
@@ -201,10 +208,6 @@ be considered breaking changes.
 
 ### Changed
 
-- `zallet rpc` now accepts bare values for known string parameters, preserves
-  JSON-quoted strings, and validates known methods' positional argument counts
-  locally. Methods unknown to this Zallet binary retain JSON-only parameter
-  parsing without a local count check.
 - `zallet start` now completes chain-backend construction and consensus checks
   before opening or migrating the wallet database. If startup exits or is
   cancelled, tasks started by the backend, RPC server, or wallet sync engine
