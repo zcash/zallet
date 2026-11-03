@@ -2,7 +2,7 @@ use base64ct::{Base64, Encoding};
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use schemars::JsonSchema;
-use secp256k1::{Message, SECP256K1};
+use secp256k1::{Message, ecdsa::RecoverableSignature};
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
@@ -44,7 +44,7 @@ pub(crate) async fn call(
 
     // The key is re-derived from stored metadata rather than looked up by key ID, so
     // confirm that it actually controls the requested address before signing with it.
-    let pubkey = secret_key.public_key(SECP256K1);
+    let pubkey = secret_key.public_key();
     if TransparentAddress::from_pubkey(&pubkey) != transparent_addr {
         return Err(LegacyCode::InvalidAddressOrKey.with_static("Sign failed"));
     }
@@ -142,14 +142,14 @@ fn map_wallet_locked_error(e: crate::error::Error) -> jsonrpsee::types::ErrorObj
 /// Signs a message with a secret key, returning the base64-encoded signature.
 fn sign_message_with_key(secret_key: &secp256k1::SecretKey, message: &str) -> String {
     let hash = verify_message::message_hash(message);
-    let msg = Message::from_digest_slice(&hash).expect("message_hash always returns 32 bytes");
+    let msg = Message::from_digest(hash);
 
-    let recoverable_sig = SECP256K1.sign_ecdsa_recoverable(&msg, secret_key);
+    let recoverable_sig = RecoverableSignature::sign_ecdsa_recoverable(msg, secret_key);
     let (recovery_id, sig_bytes) = recoverable_sig.serialize_compact();
 
     // Header byte is 31 + recovery_id for compressed pubkey signatures.
     // <https://github.com/zcash/zcash/blob/v6.11.0/src/pubkey.cpp#L227>
-    let header = 31 + recovery_id.to_i32() as u8;
+    let header = 31 + recovery_id.to_u8();
     let mut signature = [0u8; 65];
     signature[0] = header;
     signature[1..65].copy_from_slice(&sig_bytes);
@@ -169,12 +169,12 @@ mod tests {
 
     /// Helper to create a random keypair for testing.
     fn test_keypair() -> (secp256k1::SecretKey, secp256k1::PublicKey) {
-        use rand::RngCore;
+        use rand::Rng;
         let mut secret_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut secret_bytes);
-        let secret_key = secp256k1::SecretKey::from_slice(&secret_bytes)
+        rand::rng().fill_bytes(&mut secret_bytes);
+        let secret_key = secp256k1::SecretKey::from_secret_bytes(secret_bytes)
             .expect("32 random bytes should be a valid secret key");
-        let public_key = secp256k1::PublicKey::from_secret_key(SECP256K1, &secret_key);
+        let public_key = secp256k1::PublicKey::from_secret_key(&secret_key);
         (secret_key, public_key)
     }
 

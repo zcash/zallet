@@ -11,9 +11,14 @@ Only one Zallet process can use a datadir at a time. Another Zallet command (or
 a running `zallet start`) holds the lock. Stop the other process, or point this
 one at a different `--datadir`.
 
+This also applies to `zallet migrate-zcashd-wallet`, which holds the lock for
+the whole migration because it writes into the same wallet database that
+`zallet start` uses: stop Zallet before migrating, and do not start it until
+the migration has finished.
+
 ## "The config file selects the '…' chain backend, but this binary provides the '…' backend"
 
-You invoked a backend binary (e.g. `zallet-zaino`) directly against a config
+You invoked a backend binary (e.g. `zallet-zebra`) directly against a config
 whose `backend` key names a different backend. Run the `zallet` launcher (which
 dispatches on the config), run the matching backend binary, or change the
 config's `backend` key. See
@@ -30,8 +35,7 @@ the service's `PATH` includes it.
 
 The default `zebra` backend reads chain state directly from a co-located
 `zebrad` and cannot start without the `[indexer.read_state_service]` section.
-Add it (see [Wallet setup](guide/setup.md#reading-chain-state-from-a-local-zebrad)),
-or switch to the `zaino` backend if you cannot co-locate `zebrad`.
+Add it (see [Wallet setup](guide/setup.md#reading-chain-state-from-a-local-zebrad)).
 
 ## "no zebra-state v… database found under '…'"
 
@@ -83,3 +87,47 @@ bind = ["127.0.0.1:28232"]
 
 and restart. Also check that the wallet is actually running and that you are
 pointing `zallet rpc` at the same datadir/config as the running instance.
+
+## "The zcashd wallet being imported is for the '…' network, but this zallet instance is configured for '…'"
+
+`zallet migrate-zcashd-wallet` refuses a `wallet.dat` from a different network
+than the `consensus.network` in your `zallet.toml`. The default is mainnet, so
+a testnet or regtest wallet fails this way until the config says
+`network = "test"` or `network = "regtest"`. Generating the config from the
+same `zcashd` datadir with `zallet migrate-zcash-conf` (step 3 of
+[Migrating from `zcashd`](zcashd/README.md#migration-steps)) sets it correctly.
+
+## "The wallet contains a mnemonic seed phrase using a wordlist other than English"
+
+Zallet imports only English BIP 39 mnemonics. A `wallet.dat` whose mnemonic
+was recorded with another wordlist cannot currently be migrated, and its funds
+remain accessible only through `zcashd` and that `wallet.dat`. Keep the file
+safe.
+
+## "Consensus branch ID not known, cannot parse this transaction until it is mined"
+
+Raised in the middle of `zallet migrate-zcashd-wallet` by releases before
+0.1.0-beta.3 in two situations:
+
+- the `zcashd` wallet held a transaction with neither a mined height nor a
+  non-zero expiry height, such as a pre-NU5 coinbase transaction or one whose
+  sender disabled expiry;
+- on regtest, the wallet held a transaction mined under NU6.3 (Ironwood).
+
+Both are fixed in 0.1.0-beta.3. Upgrade and run the migration again.
+
+## "Invalid chain data was encountered in wallet migration … 'missing tree state for height …'"
+
+The chain backend could not supply the note commitment tree state for the
+block just before the wallet's birthday. The migration caps the birthday at
+the backend's chain tip, so that block is one the node already has, and
+syncing further does not help. The one exception is a node still at genesis,
+which has no tip to cap against: let it sync, then run the migration again.
+The lookup happens before anything is written to the wallet database or the
+keystore, so re-running is always safe. If the error persists against a node
+that has synced past genesis, report it as a bug.
+
+This error is not the main risk of migrating against a partially synced node:
+such a node can silently produce a birthday later than the wallet's history,
+with no error at all. Let `zebrad` reach the chain tip before migrating (see
+[How the wallet birthday is chosen](cli/migrate-zcashd-wallet.md#how-the-wallet-birthday-is-chosen)).

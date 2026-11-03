@@ -4,12 +4,12 @@
 #
 #   utils/bump-version.sh 0.1.0-beta.2
 #
-# Four packages ship as one release and MUST carry one identical version: the
-# `zallet` launcher, `zallet-core`, and the two backends (`zallet-zebra`,
-# `zallet-zaino`). They live in three separate workspaces (zcash/zallet#540), so
-# no single `cargo` invocation can bump them together, and a hand-edit that
-# misses one is only caught later by utils/check-lockstep.sh. This script edits
-# all four, plus the derived artefacts that embed the version:
+# Three packages ship as one release and MUST carry one identical version: the
+# `zallet` launcher, `zallet-core`, and the backend (`zallet-zebra`). They live
+# in separate workspaces (zcash/zallet#540), so no single `cargo` invocation can
+# bump them together, and a hand-edit that misses one is only caught later by
+# utils/check-lockstep.sh. This script edits all three, plus the derived
+# artefacts that embed the version:
 #
 #   - the trycmd fixtures, whose `as_of_version` is the backend's
 #     CARGO_PKG_VERSION (see backends/zebra/tests/acceptance.rs);
@@ -19,7 +19,7 @@
 #     before the release date is known; --date sets a real one). A component with
 #     no changes for its own audience gets an empty section, which is expected;
 #     the packages ship in lockstep, so every file carries every release heading;
-#   - the three lockfiles, via utils/sync-lockfiles.sh.
+#   - every workspace lockfile, via utils/sync-lockfiles.sh.
 #
 # `tools/gen-copyright` is deliberately NOT bumped: it is a build-time tool with
 # its own version, not part of the shipped release.
@@ -35,7 +35,6 @@ PACKAGES=(
   zallet/Cargo.toml
   zallet-core/Cargo.toml
   backends/zebra/Cargo.toml
-  backends/zaino/Cargo.toml
 )
 
 # Trees searched for prose that names the current release version.
@@ -48,7 +47,6 @@ CHANGELOGS=(
   CHANGELOG.md
   zallet-core/CHANGELOG.md
   backends/zebra/CHANGELOG.md
-  backends/zaino/CHANGELOG.md
 )
 
 # The release date is not known when the version is bumped: the bump lands on a
@@ -308,7 +306,7 @@ fi
 
 # --- 5. Lockfiles ------------------------------------------------------------
 
-# The three lockfiles each record the bumped packages' versions, so they must be
+# The workspace lockfiles each record the bumped packages' versions, so they must be
 # reconciled before the tree builds. sync-lockfiles.sh finishes by running
 # check-lockstep.sh, which is what catches a manifest this script failed to bump.
 if [[ "$DO_LOCKFILES" -eq 1 ]]; then
@@ -330,7 +328,7 @@ Bumped to $NEW. Remaining release steps, which need a human decision:
     bump to $NEW only if this release changes the wallet database in a way
     older Zallet versions cannot read. Its tests encode the current value.
   * cargo vet: if the lockfile regeneration pulled in new dependencies, run
-    \`cargo vet\` in each of ., backends/zebra, and backends/zaino.
+    \`cargo vet\` in each of . and backends/zebra.
   * Commit the result, then tag \`v$NEW\` to trigger .github/workflows/release.yml.
 EOF
 

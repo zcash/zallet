@@ -18,9 +18,8 @@
 # the name `foo` dispatches to the `zallet-foo` binary found next to the
 # launcher (or on the PATH). Each backend binary refuses to run against a config
 # that names a backend other than the one it provides, since all backends
-# operate on the same wallet database. The backends shipped with Zallet are
-# `"zebra"` (the launcher's default when this key is unset) and
-# `"zaino"`.
+# operate on the same wallet database. The backend shipped with Zallet is
+# `"zebra"` (the launcher's default when this key is unset).
 #
 # When this key is unset, a directly-invoked backend binary accepts the config:
 # choosing the binary is already an explicit choice of backend.
@@ -174,7 +173,7 @@ network = "main"
 # features. If this version is not compatible with `zallet --version`, most Zallet
 # commands will error and print out information about how to upgrade your wallet,
 # along with any changes you need to make to your usage of Zallet.
-as_of_version = "0.1.0-beta.2"
+as_of_version = "0.1.0-beta.4"
 
 # Enable "legacy `zcashd` pool of funds" semantics for the given seed.
 #
@@ -242,15 +241,14 @@ as_of_version = "0.1.0-beta.2"
 
 
 #
-# Settings for the Zaino chain indexer.
+# Settings for connecting to the backing full node.
 #
 [indexer]
 
 # IP address and port of the JSON-RPC interface for the full node / validator being
 # used as a data source.
 #
-# If unset, connects on localhost to the standard JSON-RPC port for mainnet or
-# testnet (as appropriate).
+# This setting is required.
 #validator_address = UNSET
 
 # Path to the validator cookie file.
@@ -263,13 +261,6 @@ as_of_version = "0.1.0-beta.2"
 
 # Full node / validator Password.
 #validator_password = UNSET
-
-# Path to the folder where the indexer maintains its state.
-#
-# This can be either an absolute path, or a path relative to the data directory.
-# Note that on Windows, you must either use single quotes for this field's value, or
-# replace all backslashes `/` with forward slashes `/`.
-#db_path = "zaino"
 
 
 #

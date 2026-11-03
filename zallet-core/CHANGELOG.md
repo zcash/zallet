@@ -21,6 +21,28 @@ should be considered breaking changes.
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-11-01
+
+### Changed
+
+- Migrated to the librustzcash NU7 release cohort: `zcash_protocol` 0.11,
+  `zcash_address` 0.14, `zcash_transparent` 0.11, `zcash_primitives` and
+  `zcash_proofs` 0.31, `zcash_keys` 0.17, `pczt` 0.10, `zcash_client_backend`
+  0.25 and `zcash_client_sqlite` 0.23, together with `orchard` 0.16,
+  `sapling-crypto` 0.9, `incrementalmerkletree` 0.9, `shardtree` 0.8 and
+  `zip32` 0.3. These replace
+  the `[patch.crates-io]` git pin of the 0.30 cohort. A backend workspace must
+  resolve the same versions so that every lockfile resolves the cohort
+  identically.
+- `NU7` is no longer gated behind `cfg(zcash_unstable = "nu7")`: the regtest
+  `LocalNetwork` and the recognized network-upgrade set always include it.
+
+### Removed
+
+- `ZalletConfig::indexer_db_path`.
+
+## [0.1.0-beta.3] - 2026-08-24
+
 ### Added
 
 - `ChainRuntime::run_import_address` (in wallet builds with the
@@ -55,6 +77,13 @@ should be considered breaking changes.
   `WalletWrite::import_standalone_transparent_address`
   (zcash/librustzcash#2941); a backend workspace must carry the same patch
   so the cohort resolves to a single source.
+- Chain backends can now report `ChainError::ViewExpired` when a fixed-history
+  view has been invalidated. Wallet sync reacquires a view only for this
+  precise condition instead of conflating it with general source
+  unavailability.
+- `ChainView::get_mempool_stream` now yields fallible transaction items.
+  Steady-state sync propagates an item error instead of treating that item as
+  ordinary stream completion. Existing backend error classification is unchanged.
 
 ### Removed
 

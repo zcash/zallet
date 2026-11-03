@@ -21,6 +21,7 @@ use crate::{
 };
 
 mod add_rpc_user;
+mod backup;
 mod example_config;
 mod regtest;
 mod repair;

@@ -1,4 +1,4 @@
-use rand::rngs::OsRng;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use rusqlite::{Connection, OptionalExtension, named_params};
 use shardtree::error::ShardTreeError;
 use tempfile::tempdir;
@@ -18,7 +18,7 @@ fn verify_schema() {
         &mut conn,
         Network::Consensus(consensus::Network::MainNetwork),
         SystemClock,
-        OsRng,
+        UnwrapErr(SysRng),
     );
 
     WalletMigrator::new()
@@ -324,7 +324,7 @@ fn create_wallet_db_for_network(
     versions: &[&str],
 ) {
     let mut conn = Connection::open(path).unwrap();
-    let mut db_data = WalletDb::from_connection(&mut conn, network, SystemClock, OsRng);
+    let mut db_data = WalletDb::from_connection(&mut conn, network, SystemClock, UnwrapErr(SysRng));
 
     WalletMigrator::new()
         .with_external_migrations(database::all_external_migrations(

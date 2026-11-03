@@ -13,10 +13,11 @@ affect:
   the backend binaries, for anyone implementing a chain backend against it.
 - [`backends/zebra/CHANGELOG.md`](backends/zebra/CHANGELOG.md) — the
   `zallet-zebra` binary, for operators running the Zebra read-state backend.
-- [`backends/zaino/CHANGELOG.md`](backends/zaino/CHANGELOG.md) — the
-  `zallet-zaino` binary, for operators running the Zaino indexer backend.
 
-All four packages move in release lockstep and share one version number, so the
+The removed `zallet-zaino` binary's changelog, as of its last release, is at
+[`v0.1.0-beta.3`](https://github.com/zcash/zallet/blob/v0.1.0-beta.3/backends/zaino/CHANGELOG.md).
+
+All packages move in release lockstep and share one version number, so the
 same release heading appears in each file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -24,6 +25,115 @@ Prior to the 1.0.0 release, no Semantic Versioning is followed; all releases sho
 be considered breaking changes.
 
 ## [Unreleased]
+
+## [0.1.0-beta.4] - 2026-11-01
+
+### Added
+
+- The `zallet backup` command writes a consistent, integrity-checked snapshot
+  of the wallet database to a backup file using SQLite's Online Backup API
+  (the manual backup command contemplated by #49 and #195). It works whether
+  or not the wallet is running: a backup of a running wallet is a
+  transaction-consistent snapshot taken without blocking it, and the command
+  fails loudly rather than running forever if sustained wallet writes keep
+  the copy from completing. Scheduled periodic backups from inside the
+  running process remain tracked in #195.
+- NU7 support in ordinary builds. Zallet follows the NU7 network upgrade on
+  Mainnet (height 3,543,405) and Testnet (height 4,465,026), and
+  `regtest_nuparams` accepts the NU7 consensus branch ID without building with
+  `--cfg zcash_unstable="nu7"`. Upgrade before the network you run on reaches
+  its activation height, together with a `zebrad` that also follows NU7.
+
+### Changed
+
+- JSON-RPC responses still give unified addresses and viewing keys in their
+  ZIP 316 Revision 0 form (`u1…`, `uview1…`, `uivk1…`). A unified address or
+  viewing key that Revision 0 cannot represent — one with no shielded
+  component, one carrying metadata such as an expiry, or a viewing key with a
+  P2SH item — is given in its Revision 2 form (`zu…`/`tu…`, `uvf…`, `uvi…`)
+  instead. Both revisions are accepted as input.
+- `z_sendmany` rejects a Sprout recipient address with
+  `RPC_INVALID_PARAMETER` ("Sending funds into the Sprout pool is no longer
+  supported."), as `zcashd` did, when it builds the payment request.
+- `z_sendmany` fails for a recipient unified address that has expired, or whose
+  ZIP 316 Revision 2 expiry height is earlier than the expiry height of the
+  transaction that would pay it.
+- `zallet generate-encryption-identity` now creates the identity file with a
+  protected owner-only ACL on Windows, matching the owner-only permissions it
+  already used on Unix (previously the file inherited the destination
+  directory's access control there), and publishes it with a write-through
+  rename on Windows, so the identity is durable before the command reports
+  success.
+
+### Deprecated
+
+- `indexer.db_path`. It has no effect, and Zallet logs a warning when it is set.
+
+### Removed
+
+- The `zaino` chain backend and its `zallet-zaino` binary. The release
+  tarballs, Debian packages, and Docker images no longer contain it. A config
+  file with `backend = "zaino"` must change to `backend = "zebra"`. The `zebra`
+  backend requires a `zebrad` built with the `indexer` feature, an
+  `[indexer.read_state_service]` config section, and `zebrad`'s state directory
+  on the same host. The wallet database needs no migration. The `zaino`
+  directory in the data directory is no longer used, and you can delete it.
+- No chain backend currently runs on macOS or Windows, because the `zebra`
+  backend is Linux-only.
+
+
+### Fixed
+
+- `z_viewtransaction` no longer panics when it cannot find the output
+  that a transparent input spends: the previous transaction is unknown to the
+  node, or has no output at that index. That input is left out of `spends`,
+  and `fee` is omitted. A failed lookup of the previous transaction now returns
+  an RPC error.
+- `migrate-zcashd-wallet` now includes un-mined transactions when estimating
+  the wallet birthday. An expired or conflicted transaction still shows that
+  the wallet's addresses were in use around its expiry height, so history near
+  such a transaction is no longer at risk of being skipped by the post-import
+  scan.
+- `migrate-zcashd-wallet` no longer raises the wallet birthday to the Sapling
+  activation height. A zcashd wallet may predate Sapling, so evidence of
+  earlier activity now sets the birthday directly, and a wallet with no usable
+  evidence at all falls back to the genesis height instead of Sapling
+  activation.
+- `migrate-zcashd-wallet --help` no longer says that a local `zcashd`
+  installation is required. The `--zcashd-install-dir` flag is optional: by
+  default Zallet uses the Berkeley DB 6.2 `db_dump` it vendors, falling back to
+  one on the `PATH`.
+- Fixed a race that could leave wallet data requests unprocessed. The sync task
+  now signals data-request processing after new blocks are stored. It also
+  signals after each mempool transaction is stored.
+- `z_listunspent` no longer fails the entire request when a note's memo cannot
+  be read — because the stored memo cannot be decoded (for example a text memo
+  containing invalid UTF-8), or because the database layer does not support
+  memo lookups for the note's pool. The note is reported with its `memo` and
+  `memoStr` fields omitted, and a warning identifying the note is logged. A
+  note whose memo the wallet has not yet fetched likewise omits the memo
+  fields, instead of reporting the placeholder text `TODO: Always enhance
+  every note` in the `memo` field (which is documented as hexadecimal).
+- `migrate-zcashd-wallet` now records the P2SH addresses of the redeem scripts it
+  imports (from zcashd's `importaddress <redeemscript>` and
+  `addmultisigaddress`) as exposed. Such an address was in use outside the wallet
+  before it was imported, but it has no derivation, so it was reached by neither
+  the exposures recorded in the migrated wallet nor the gap-limit inference that
+  covers derived receivers; one that had never appeared in a wallet transaction
+  was left with no exposure height at all. One consequence is that
+  `listaddresses`, which reports only exposed addresses, did not surface it where
+  `zcashd` did.
+- `migrate-zcashd-wallet` no longer aborts when a `zcashd` wallet's watch-only
+  pubkeys (from `importpubkey`) include one whose address the Zallet wallet already
+  tracks. Every such pubkey was registered regardless, and the wallet rejects an
+  import of key material another account holds, so migrating a second `zcashd`
+  wallet that shared a watched key failed with a database error *after* the import
+  had committed. A pubkey whose address *another* account already holds is now
+  left alone. One the importing account itself holds is still registered, which
+  upgrades a row imported by address alone -- as `zallet import-address` creates
+  -- with its public key, and exposes it.
+
+## [0.1.0-beta.3] - 2026-08-24
 
 ### Added
 
@@ -343,6 +453,11 @@ be considered breaking changes.
   `walletpassphrase` unlocks a running server’s identities rather than this
   process’s, which cannot run concurrently with it in any case. The regtest
   account command is fixed the same way.
+
+- Wallet sync now loads a complete block range from one fixed-history view
+  before queueing decryption or database work. If the view expires partway
+  through the range, the partial batch is discarded and the entire range is
+  retried against a fresh view, including during history recovery.
 
 ## [0.1.0-beta.2] - 2026-07-28
 

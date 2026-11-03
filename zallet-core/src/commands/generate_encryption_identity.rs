@@ -1,7 +1,5 @@
 //! `generate-encryption-identity` subcommand
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::{fmt::Write as _, io::Write as _, path::Path};
 
 use abscissa_core::Runnable;
@@ -17,6 +15,7 @@ use crate::{
     commands::AsyncRunnable,
     error::{Error, ErrorKind},
     fl,
+    fs::{Publish, PublishError, write_private_file},
     prelude::*,
 };
 
@@ -104,53 +103,56 @@ impl AsyncRunnable for GenerateEncryptionIdentityCmd {
 
 /// Writes the identity file without overwriting any existing identity.
 ///
-/// The body is key material, so it is staged in a temporary file alongside the
-/// destination, fully written and `fsync`ed, then atomically renamed into place.
-/// This ensures the destination only ever observes a complete, durable file: an
-/// interruption mid-write leaves the temporary file (which is cleaned up) rather
-/// than a truncated identity at `path`.
+/// The body is key material, so it is staged in an owner-only temporary file
+/// alongside the destination, fully written and `fsync`ed, then published.
+/// This ensures the destination only ever observes a complete, durable file:
+/// an interruption mid-write leaves the temporary file (which is cleaned up)
+/// rather than a truncated identity at `path`.
 ///
-/// An existing identity is never overwritten. `persist_noclobber` refuses to
-/// replace an existing file, since clobbering would risk irrecoverable loss of
-/// an in-use wallet's key material; the file must be removed deliberately to
-/// regenerate.
+/// An existing identity is never overwritten, since clobbering would risk
+/// irrecoverable loss of an in-use wallet's key material; the file must be
+/// removed deliberately to regenerate. [`Publish::NoClobberStrict`] fails
+/// closed on filesystems that cannot refuse atomically, so that promise holds
+/// everywhere.
 fn write_identity_file(path: &Path, body: &[u8]) -> Result<(), Error> {
-    // The temporary file must live in the destination's parent directory so that
-    // the final `persist_noclobber` is an atomic same-filesystem rename.
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-
-    let mut f = tempfile::NamedTempFile::new_in(parent).map_err(|e| write_failed(path, e))?;
-    // Create the identity readable only by the owner (mode 0600 on Unix).
-    // `set_permissions` is an `fchmod`, so this holds regardless of the process
-    // umask, and the mode is preserved across the rename below.
-    #[cfg(unix)]
-    f.as_file()
-        .set_permissions(std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| write_failed(path, e))?;
-
-    f.write_all(body).map_err(|e| write_failed(path, e))?;
-    f.flush().map_err(|e| write_failed(path, e))?;
-    f.as_file().sync_all().map_err(|e| write_failed(path, e))?;
-    f.persist_noclobber(path).map_err(|e| {
-        // `persist_noclobber` fails with `AlreadyExists` when an identity is
-        // already present; surface a dedicated, actionable message rather than
-        // the generic write failure, since overwriting would risk key loss.
-        if e.error.kind() == io::ErrorKind::AlreadyExists {
-            ErrorKind::Init
-                .context(fl!(
-                    "cmd-generate-encryption-identity-exists",
-                    path = path.display().to_string(),
-                ))
-                .into()
-        } else {
-            write_failed(path, e.error)
-        }
-    })?;
-
-    Ok(())
+    write_private_file(path, Publish::NoClobberStrict, body).map_err(|e| match e {
+        // Surface a dedicated, actionable message for an identity that is
+        // already present rather than the generic write failure.
+        PublishError::DestinationExists => ErrorKind::Init
+            .context(fl!(
+                "cmd-generate-encryption-identity-exists",
+                path = path.display().to_string(),
+            ))
+            .into(),
+        // A failure after the identity is already visible at `path` must not
+        // read as "nothing was written": a retry would be refused, and the
+        // generic message would invite deleting a complete identity. When a
+        // temporary twin (holding the same key material) remains, name it so
+        // the operator can remove exactly that file.
+        PublishError::PostPublish {
+            leftover_temp: Some(twin),
+            source,
+        } => ErrorKind::Init
+            .context(fl!(
+                "cmd-generate-encryption-identity-post-publication-twin",
+                path = path.display().to_string(),
+                twin = twin.display().to_string(),
+                error = source.to_string(),
+            ))
+            .into(),
+        PublishError::PostPublish {
+            leftover_temp: None,
+            source,
+        } => ErrorKind::Init
+            .context(fl!(
+                "cmd-generate-encryption-identity-post-publication",
+                path = path.display().to_string(),
+                error = source.to_string(),
+            ))
+            .into(),
+        PublishError::Create { source, .. } => write_failed(path, source),
+        PublishError::Fill(e) | PublishError::Publish(e) => write_failed(path, e),
+    })
 }
 
 fn write_failed(path: &Path, error: impl ToString) -> Error {

@@ -28,8 +28,7 @@ use {
 /// which backends exist. A name is nonempty, lowercase alphanumeric plus hyphens; the
 /// `zallet` launcher maps a name to the `zallet-<name>` sibling binary, and each
 /// backend binary refuses to run against a config that names a backend other than the
-/// one it provides. The backends shipped in this repository are `zebra` and
-/// `zaino`.
+/// one it provides. The backend shipped in this repository is `zebra`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct BackendName(String);
@@ -106,9 +105,8 @@ pub struct ZalletConfig {
     /// the name `foo` dispatches to the `zallet-foo` binary found next to the
     /// launcher (or on the PATH). Each backend binary refuses to run against a config
     /// that names a backend other than the one it provides, since all backends
-    /// operate on the same wallet database. The backends shipped with Zallet are
-    /// `"zebra"` (the launcher's default when this key is unset) and
-    /// `"zaino"`.
+    /// operate on the same wallet database. The backend shipped with Zallet is
+    /// `"zebra"` (the launcher's default when this key is unset).
     ///
     /// When this key is unset, a directly-invoked backend binary accepts the config:
     /// choosing the binary is already an explicit choice of backend.
@@ -129,7 +127,7 @@ pub struct ZalletConfig {
     /// Settings for Zallet features.
     pub features: FeaturesSection,
 
-    /// Settings for the Zaino chain indexer.
+    /// Settings for connecting to the backing full node.
     pub indexer: IndexerSection,
 
     /// Settings for the key store.
@@ -193,11 +191,6 @@ impl ZalletConfig {
         self.keystore
             .require_backup
             .unwrap_or(!matches!(self.consensus.network, NetworkType::Regtest))
-    }
-
-    /// Returns the path to the indexer's database.
-    pub fn indexer_db_path(&self) -> PathBuf {
-        resolve_datadir_path(self.datadir(), self.indexer.db_path())
     }
 
     /// Returns the path to the wallet database.
@@ -592,15 +585,14 @@ pub struct ExperimentalFeaturesSection {
     pub other: BTreeMap<String, toml::Value>,
 }
 
-/// Settings for the Zaino chain indexer.
+/// Settings for connecting to the backing full node.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct IndexerSection {
     /// IP address and port of the JSON-RPC interface for the full node / validator being
     /// used as a data source.
     ///
-    /// If unset, connects on localhost to the standard JSON-RPC port for mainnet or
-    /// testnet (as appropriate).
+    /// This setting is required.
     pub validator_address: Option<String>,
 
     /// Path to the validator cookie file.
@@ -614,11 +606,7 @@ pub struct IndexerSection {
     /// Full node / validator Password.
     pub validator_password: Option<String>,
 
-    /// Path to the folder where the indexer maintains its state.
-    ///
-    /// This can be either an absolute path, or a path relative to the data directory.
-    /// Note that on Windows, you must either use single quotes for this field's value, or
-    /// replace all backslashes `\` with forward slashes `/`.
+    /// Deprecated and ignored. Formerly the Zaino indexer's state directory.
     pub db_path: Option<PathBuf>,
 
     /// Settings for reading chain state directly from a local zebrad's state database
@@ -629,25 +617,9 @@ pub struct IndexerSection {
     /// tip via zebrad's gRPC indexer interface. The JSON-RPC `[indexer]` settings above
     /// are still required, for the mempool and transaction submission.
     ///
-    /// Handling of non-best-chain (side-chain) blocks depends on the backend. The
-    /// `zebra` backend serves them from the local state (it issues any-chain read
-    /// requests, which zebrad's state answers directly). The `zaino` backend serves
-    /// only the best chain from the local state and falls back to JSON-RPC for
-    /// non-best-chain blocks.
+    /// Non-best-chain (side-chain) blocks are served from the local state, which
+    /// answers any-chain read requests directly.
     pub read_state_service: Option<ReadStateServiceSection>,
-}
-
-impl IndexerSection {
-    /// Path to the folder where the indexer maintains its state.
-    ///
-    /// This can be either an absolute path, or a path relative to the data directory.
-    ///
-    /// Default is `zaino`.
-    fn db_path(&self) -> &Path {
-        self.db_path
-            .as_deref()
-            .unwrap_or_else(|| Path::new("zaino"))
-    }
 }
 
 /// Settings for the read-state-service indexer backend.
@@ -960,7 +932,6 @@ impl ZalletConfig {
             indexer("validator_cookie_path", &conf.indexer.validator_cookie_path),
             indexer("validator_user", &conf.indexer.validator_user),
             indexer("validator_password", &conf.indexer.validator_password),
-            indexer("db_path", conf.indexer.db_path()),
             read_state_service("grpc_address", "127.0.0.1:8230"),
             read_state_service("zebra_state_path", "/home/<username>/.cache/zebra"),
             #[cfg(zallet_build = "wallet")]
@@ -1229,6 +1200,8 @@ impl ZalletConfig {
                     ),
                     // Ignore flattened fields (present to support parsing old configs).
                     (FEATURES_DEPRECATED, "other") | (FEATURES_EXPERIMENTAL, "other") => (),
+                    // Deprecated and ignored; still parsed so that old configs load.
+                    (INDEXER, "db_path") => (),
                     // Render section field.
                     _ => write_field::<T>(
                         config,
@@ -1273,7 +1246,8 @@ impl ZalletConfig {
             .unwrap();
             match field_default {
                 Some(present) => {
-                    Serialize::serialize(&present, toml::ser::ValueSerializer::new(config)).unwrap()
+                    Serialize::serialize(&present, toml::ser::ValueSerializer::new(config))
+                        .unwrap();
                 }
                 None => write!(config, "UNSET").unwrap(),
             }
@@ -1318,13 +1292,11 @@ impl ZalletConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::BackendName;
+    use super::{BackendName, ZalletConfig};
+    use zcash_protocol::consensus::NetworkType;
 
     #[cfg(zallet_build = "wallet")]
-    use {
-        super::{ConsensusSection, KeyStoreSection, ZalletConfig},
-        zcash_protocol::consensus::NetworkType,
-    };
+    use super::{ConsensusSection, KeyStoreSection};
 
     /// Builds a config whose only interesting content is the network and the
     /// `keystore.require_backup` setting.
@@ -1365,6 +1337,15 @@ mod tests {
     }
 
     #[test]
+    fn generated_example_is_a_valid_config_document() {
+        let document = ZalletConfig::generate_example();
+        let config: ZalletConfig =
+            toml::from_str(&document).expect("generated example is a complete config document");
+        assert_eq!(config.consensus.network, NetworkType::Main);
+        assert_eq!(config.features.as_of_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
     fn backend_key_parses() {
         /// Stands in for `ZalletConfig`, which cannot be deserialized piecemeal (all
         /// sections are required fields).
@@ -1392,7 +1373,7 @@ mod tests {
 
         // Malformed names (charset violations) are rejected at parse time; the
         // charset keeps names safe to embed in the `zallet-<name>` binary name.
-        for bad in ["", "Zebra-State", "zebra state", "../evil", "zaino\n"] {
+        for bad in ["", "Zebra-State", "zebra state", "../evil", "zebra\n"] {
             assert!(
                 toml::from_str::<TopLevel>(&format!("backend = {}", toml::Value::from(bad)))
                     .is_err(),

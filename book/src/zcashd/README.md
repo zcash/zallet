@@ -14,9 +14,18 @@ you need.
 
 ## Migration steps
 
-1. **Run a `zebrad` node.** Zallet reads chain data from `zebrad` via one of its two
+1. **Run a `zebrad` node, and let it sync to the chain tip.** Zallet reads chain data
+   from `zebrad` via one of its two
    [chain backends](../guide/installation/README.md#choosing-a-chain-backend); the
    backend you choose determines how `zebrad` needs to be built and configured.
+
+   Do not run the wallet migration (step 5) until `zebrad` has caught up: the migration
+   sets each account's birthday from the earliest activity it can place on the chain,
+   and for transactions with no expiry height (pre-NU5 coinbase, or anything from
+   before Overwinter) it can only do that through blocks the node has already synced. An
+   unsynced node can therefore silently produce a birthday later than your wallet's
+   history, and the scan then never finds the earlier funds. See
+   [How the wallet birthday is chosen](../cli/migrate-zcashd-wallet.md#how-the-wallet-birthday-is-chosen).
 
 2. **Install Zallet.** See [Installation](../guide/installation/README.md).
 
@@ -48,20 +57,82 @@ you need.
    This imports the wallet's key material and creates corresponding Zallet accounts. If
    you have several `wallet.dat` files, run it once per file (subsequent runs need
    `--allow-multiple-wallet-imports`); each wallet becomes a distinct set of accounts.
+   If the wallet's key material is encrypted, the command prompts for the `zcashd`
+   wallet passphrase; see
+   [Encrypted wallets](../cli/migrate-zcashd-wallet.md#encrypted-wallets).
+
+   **Decide before the first run whether to pass `--allow-partial-import`.** Without it,
+   the migration fails if any account or transparent spending key could not be imported,
+   listing what was left behind. That failure happens *after* the importable accounts
+   have been written, so a second run against the same wallet database is refused
+   because the database already holds an imported `zcashd` wallet. **Do not get past
+   that refusal with `--allow-multiple-wallet-imports`**, even though its message
+   suggests the flag: that flag is for importing a *different* `wallet.dat`. Its
+   duplicate check compares only mnemonic fingerprints, and a wallet with no HD seed
+   gets a freshly generated mnemonic on every run, so re-running such a wallet would
+   import it a second time on top of the first. Recovering from a partial-import
+   failure means starting over instead: delete `wallet.db`, re-run
+   `zallet init-wallet-encryption` (the identity file can stay), and migrate again with
+   the flag. Anything the flag lets the migration skip remains accessible only through
+   the original `wallet.dat`.
 
    > [Reference](../cli/migrate-zcashd-wallet.md)
 
-6. **Start Zallet and let it sync:**
+6. **Confirm the backup of each migrated mnemonic.** Zallet will not derive new
+   accounts or addresses from a mnemonic until you have confirmed that you hold a copy
+   of it: while `keystore.require_backup` is in effect (the default on mainnet and
+   testnet), `z_getnewaccount`, `z_getaddressforaccount` and `z_recoveraccounts` return
+   error `-18` for an unconfirmed mnemonic. A mnemonic brought in by the migration
+   always starts out unconfirmed, whatever `zcashd` had recorded, so a migrated wallet
+   cannot hand out new deposit addresses until this step is done. For each mnemonic
+   (the migration printed its fingerprint):
+
+   ```
+   $ zallet export-mnemonic --seedfp <fingerprint> >mnemonic.age
+   $ zallet confirm-backup --seedfp <fingerprint>
+   ```
+
+   Decrypt the export with your age identity, write the phrase down, and answer the
+   three words `confirm-backup` asks for from that written copy. If you deliberately do
+   not want this gate, set `keystore.require_backup = false` in `zallet.toml` instead.
+
+   > [Reference](../cli/confirm-backup.md)
+
+7. **Decide whether to enable the legacy transparent pool.** The migration printed the
+   seed fingerprint of the account holding your `zcashd` wallet's legacy material (the
+   account at the special ZIP 32 index `zcashd` used for `getnewaddress` and
+   `z_getnewaddress`). If your tooling relied on `zcashd`'s single-pool transparent
+   spending (`z_sendmany` from `ANY_TADDR`), or if you will use
+   [`zallet import-address`](../cli/import-address.md) without naming an account, set
+   that fingerprint in `zallet.toml` before starting. (Wallet-wide legacy transparent
+   balances are not reported yet, whether or not the option is set; see
+   [#384](https://github.com/zcash/zallet/issues/384).)
+
+   ```toml
+   [features]
+   legacy_pool_seed_fingerprint = "<fingerprint>"
+   ```
+
+   Only one migrated wallet can be the legacy pool, and what it re-enables is a
+   migration bridge rather than a destination; see
+   [The legacy transparent pool](../concepts/legacy-pool.md) for what changes and why
+   to move off it. Leave the option unset otherwise.
+
+8. **Start Zallet and let it sync:**
 
    ```
    $ zallet start
    ```
 
-   Transaction history is recovered by scanning the chain, so the wallet needs to sync
-   before balances are complete. Use `zallet rpc getwalletstatus` to observe sync
+   Your transaction history is already present: the migration imports every transaction
+   from `wallet.dat` directly, including sends that were never mined and transactions
+   that ended up on a non-main-chain block, which a chain scan alone could not recover.
+   What the scan adds is the note commitment tree positions of your notes (and the
+   mined heights of any transactions the migration could not place), and balances are
+   not spendable until it has done so. Use `zallet rpc getwalletstatus` to observe sync
    progress, then verify your balances against `zcashd` before decommissioning it.
 
-7. **Update your RPC clients.** Zallet implements a subset of the `zcashd` wallet
+9. **Update your RPC clients.** Zallet implements a subset of the `zcashd` wallet
    JSON-RPC methods, some with [altered semantics](json_rpc.md), and some `zcashd`
    methods are [intentionally omitted](json_rpc.md#omitted-rpc-methods). Check
    every method you use against the [method status matrix](rpc_status.md). The
@@ -77,15 +148,32 @@ you need.
 
 ## What is not migrated
 
-The migration reports these (with counts) instead of importing them:
+The migration logs each of these with a count instead of importing it, except the last,
+which is dropped silently:
 
 - **Sprout spending keys and funds.** Zallet does not support the Sprout pool. Move any
   Sprout funds (e.g. to Sapling, using `zcashd`'s migration or a Sprout-capable tool)
   *before* retiring `zcashd`.
-- Address book entries.
-- Watch-only entries recorded without their public key or redeem script, and entries
-  with uncompressed public keys.
-- Regtest wallets (not currently supported).
+- **Address book entries.** Zallet has no store for them yet ([#774] tracks preserving
+  them); the labels exist only in `wallet.dat`.
+- **Watch-only entries recorded without their public key or redeem script**, and
+  watch-only public keys that are uncompressed or malformed.
+- **Watch-only redeem scripts the wallet cannot represent.** Only multisig scripts
+  within the P2SH size limit are imported; any other watched script is dropped.
+- **Standalone copies of unified spending keys.** The unified accounts themselves are
+  re-derived from the mnemonic, so this loses nothing.
+- **Transactions that carry no raw transaction data.** If such a transaction was mined,
+  the post-migration scan recovers it.
+- **Records of a kind the wallet parser does not recognise.** These are discarded with
+  no warning at all, so a `wallet.dat` written by an unusual `zcashd` build may lose
+  data without any sign of it in the log.
+
+[#774]: https://github.com/zcash/zallet/issues/774
+
+Not every skip is merely reported. A transparent *spending* key that cannot be imported
+(one whose public key is uncompressed, or whose address appears under none of the
+imported accounts) fails the migration unless `--allow-partial-import` is passed; see
+step 5 above for why that decision has to be made before the first run.
 
 ## Back up the migrated wallet
 
@@ -94,3 +182,26 @@ in the wallet database. Keep secure copies of the wallet database (`wallet.db`),
 encryption identity file, *and* your mnemonic phrase(s) — and keep the original
 `wallet.dat`. See the warning in the
 [`migrate-zcashd-wallet` reference](../cli/migrate-zcashd-wallet.md) for details.
+
+Two kinds of `wallet.dat` also leave you holding a mnemonic phrase you have never seen.
+Only the first is announced in the migration's output; recognise the second by the
+`zcashd` version that last used the wallet:
+
+- **A minted mnemonic.** If the wallet had no HD seed at all (one created before
+  `zcashd` had HD key derivation, holding only standalone keys and watch-only
+  addresses), the migration generates a fresh 24-word BIP 39 mnemonic and makes it the
+  derivation root of the account that holds those keys. It prints a warning saying so,
+  with the mnemonic's fingerprint. **This phrase never existed in `zcashd`: no backup of
+  `wallet.dat` covers it, nor any address Zallet later derives from it.** Export it
+  (`zallet export-mnemonic --seedfp <fingerprint>`), decrypt the export with your age
+  identity, and record the phrase as you would any other.
+- **A reconstructed mnemonic.** If the wallet was last used with a `zcashd` older than
+  4.7.0, it has a legacy HD seed but no mnemonic. The migration derives the mnemonic
+  that `zcashd` itself would have created on upgrading, exactly as `zcashd` did, so this
+  one *is* recoverable from `wallet.dat`. The migration prints only the usual seed
+  fingerprint line for it, the same as for a wallet that already had a mnemonic. You
+  have still never held the phrase, though, so export and record it now rather than
+  relying on the `zcashd` file.
+
+In both cases the phrase must also be confirmed with `zallet confirm-backup` (step 6)
+before Zallet will derive new accounts or addresses from it.

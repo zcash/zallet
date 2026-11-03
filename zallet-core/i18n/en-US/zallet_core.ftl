@@ -59,6 +59,14 @@ cmd-generate-encryption-identity-public-key = Public key: {$pubkey}
 cmd-generate-encryption-identity-written = Encryption identity written to {$path}
 cmd-generate-encryption-identity-write-failed = Failed to write encryption identity to {$path}: {$error}
 cmd-generate-encryption-identity-exists = An encryption identity already exists at {$path}; refusing to overwrite it to avoid irrecoverable key loss.
+cmd-generate-encryption-identity-post-publication =
+    The encryption identity at {$path} was written and published, but a step after
+    publishing it failed: {$error}. The identity itself is complete; do not delete
+    it.
+cmd-generate-encryption-identity-post-publication-twin =
+    The encryption identity at {$path} was written and published, but its temporary
+    twin at {$twin} could not be removed: {$error}. The identity itself is complete;
+    do not delete it. The twin holds the same key material and should be deleted.
 cmd-generate-encryption-identity-passphrase-prompt = Enter passphrase to encrypt the identity:
 cmd-generate-encryption-identity-passphrase-confirm = Confirm passphrase:
 cmd-generate-encryption-identity-passphrase-mismatch = Passphrases do not match
@@ -69,6 +77,13 @@ cmd-generate-mnemonic-confirm-backup-next =
     This phrase exists nowhere but this wallet. Run '{-zallet} confirm-backup' to record
     it somewhere durable; until you do, {-zallet} will not derive accounts or addresses
     from it.
+
+cmd-backup-complete = Wallet database backed up to {$path} ({$pages} pages).
+cmd-backup-identity-reminder =
+    Reminder: restoring this backup also requires the age encryption identity at
+    {$identity}. It never changes, so back it up once, in a different location
+    from the wallet database backup; anyone holding both can decrypt the wallet's
+    key material.
 
 cmd-confirm-backup-already-confirmed = This phrase’s backup has already been confirmed.
 cmd-confirm-backup-how-to-obtain =
@@ -95,6 +110,7 @@ cmd-migrate-wallet-passphrase-wrong = The passphrase was incorrect; please try a
 ## Startup messages
 
 warn-config-unused = Config option '{$option}' is not yet implemented in {-zallet}; ignoring its value.
+warn-config-deprecated-ignored = Config option '{$option}' is deprecated and has no effect; remove it from your config.
 
 rpc-bare-password-auth-info = Using '{-cfg-rpc-auth-password}' authorization
 rpc-bare-password-auth-warn =
@@ -269,6 +285,40 @@ err-seed-selection-seedfp-required =
     The wallet holds more than one mnemonic phrase; pass --seedfp to choose which one.
 err-seed-selection-unknown-seedfp =
     The given seed fingerprint does not match any mnemonic phrase in the wallet.
+
+## `backup` command errors
+
+err-backup-cannot-create = The backup file could not be created at {$path}: {$error}
+err-backup-destination-exists =
+    A file already exists at {$path}; refusing to overwrite it, since it may be a
+    previous backup. Choose a different path, or pass a directory to get a
+    timestamped file name.
+err-backup-integrity = The backup failed its integrity check ({$detail}) and was discarded.
+err-backup-needs-recovery =
+    The wallet database was not shut down cleanly and needs recovery, which this
+    read-only backup cannot perform. Start {-zallet} once and stop it cleanly to
+    recover the database, then retry the backup.
+err-backup-no-wallet = No wallet database exists at {$path}, so there is nothing to back up.
+err-backup-not-completing =
+    The backup did not complete within {$seconds} seconds because ongoing wallet
+    writes keep restarting the copy. Retry when the wallet is less busy (for
+    example, once initial sync has finished), or stop the wallet and retry.
+err-backup-partial-in-the-way =
+    An in-progress backup file already exists at {$path}. Either another backup is
+    currently running to the same destination, or an interrupted backup left it
+    behind; if no backup is running, delete that file and retry.
+err-backup-post-publication =
+    The backup at {$path} is complete and verified, but a step after publishing
+    it failed: {$error}. The backup itself is usable; its in-progress twin file
+    may remain beside it, or its directory entry may not yet be durable against
+    a crash. Do not delete the backup over this.
+err-backup-source-busy =
+    The backup failed because the wallet database stayed continuously locked for
+    {$seconds} seconds. Something other than a healthy {-zallet} is holding the
+    database (an abandoned transaction, or another process); close it and retry.
+err-backup-timestamp-collision =
+    A backup taken within the same second already created {$path}. Retry in a
+    moment to get a new timestamped file name.
 
 ## Backup confirmation errors
 
@@ -462,10 +512,6 @@ err-migrate-wallet-db-dump-not-found =
     is available on the system `$PATH`.
 err-migrate-wallet-db-dump =
     An error occurred in extracting wallet data from '{$path}': '{$err}'
-err-migrate-wallet-seed-absent =
-    The {-zcashd} wallet file did not contain HD seed information. Wallets from
-    prior to the Sapling network upgrade are not supported by this migration
-    tool.
 err-migrate-wallet-invalid-mnemonic =
     The {-zcashd} wallet file contained invalid mnemonic seed phrase data and
     may be corrupt: '{$err}'

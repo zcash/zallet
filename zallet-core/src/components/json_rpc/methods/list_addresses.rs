@@ -14,7 +14,10 @@ use zcash_client_backend::data_api::{
 use zcash_keys::address::Address;
 use zcash_protocol::consensus::NetworkConstants;
 
-use crate::components::{database::DbConnection, json_rpc::server::LegacyCode};
+use crate::components::{
+    database::DbConnection,
+    json_rpc::{server::LegacyCode, unified_encoding::encode_unified_address},
+};
 
 /// Response to a `listaddresses` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -181,7 +184,7 @@ pub(crate) fn call(wallet: &DbConnection) -> Response {
                 }
                 Address::Sapling(_) => sapling_addresses.push(addr.encode(wallet.params())),
                 Address::Unified(addr) => {
-                    let address = addr.encode(wallet.params());
+                    let address = encode_unified_address(addr, wallet.params());
                     unified_addresses.push(UnifiedAddress {
                         diversifier_index: match address_info.source() {
                             zcash_client_backend::data_api::AddressSource::Derived {
@@ -201,13 +204,11 @@ pub(crate) fn call(wallet: &DbConnection) -> Response {
                             .receiver_types()
                             .into_iter()
                             .map(|r| match r {
-                                unified::Typecode::P2pkh => "p2pkh".into(),
-                                unified::Typecode::P2sh => "p2sh".into(),
-                                unified::Typecode::Sapling => "sapling".into(),
-                                unified::Typecode::Orchard => "orchard".into(),
-                                unified::Typecode::Unknown(typecode) => {
-                                    format!("unknown({typecode})")
-                                }
+                                unified::Typecode::P2PKH => "p2pkh".into(),
+                                unified::Typecode::P2SH => "p2sh".into(),
+                                unified::Typecode::SAPLING => "sapling".into(),
+                                unified::Typecode::ORCHARD => "orchard".into(),
+                                other => format!("unknown({})", u32::from(other)),
                             })
                             .collect(),
                         address,

@@ -14,7 +14,7 @@ use jsonrpsee::{
     core::BoxError,
     server::{HttpBody, HttpRequest, HttpResponse},
 };
-use rand::{Rng, rngs::OsRng};
+use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::{ExposeSecret, SecretString};
 #[allow(deprecated)]
 use sha2::{
@@ -97,7 +97,7 @@ impl fmt::Display for PasswordHash {
 
 impl PasswordHash {
     pub(crate) fn from_bare(password: &str) -> Self {
-        let salt: [u8; 16] = OsRng.r#gen();
+        let salt: [u8; 16] = UnwrapErr(SysRng).random();
         let salt = hex::encode(salt);
         let hash = hash_password(password, &salt);
         Self { salt, hash }
