@@ -29,7 +29,7 @@ shadow-rs = { version = "1.2", default-features = false }
 # Documentation
 documented = "0.9"
 phf = { version = "0.12", features = ["macros"] }
-openrpsee = "0.2" # `rpc.discover` RPC method
+openrpsee = "0.3" # `rpc.discover` RPC method
 quote = "1"
 syn = "2"
 

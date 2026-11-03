@@ -854,7 +854,7 @@ version = "1.70.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.openrpsee]]
-version = "0.2.0"
+version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.optfield]]
