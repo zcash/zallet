@@ -52,4 +52,7 @@ Treat it as a migration bridge, not a destination. These semantics are
 deprecated — they reveal more on-chain than the per-account model, and are not
 how new wallets should operate. Prefer moving funds into a unified account and
 using the account-scoped methods (`z_getbalanceforaccount`, and
-`z_sendfromaccount` once available) going forward.
+`z_sendfromaccount`) going forward. Gathering an account's own transparent funds
+does not require the legacy pool: pass that account's UUID as `z_sendmany`'s
+`fromaddress`, or use `z_sendfromaccount` with the `any_transparent` fund
+source.
