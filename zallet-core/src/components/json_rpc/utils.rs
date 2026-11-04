@@ -36,7 +36,7 @@ use {
     zcash_client_backend::{
         fees::StandardFeeRule, proposal::Proposal, wallet::TransparentAddressSource,
     },
-    zcash_script::script,
+    zcash_script::{script, solver, solver::ScriptKind},
 };
 
 /// The account identifier used for HD derivation of transparent and Sapling addresses via
@@ -85,11 +85,12 @@ pub(super) async fn ensure_seed_is_backed_up(
 /// Collects the standalone (non-HD) transparent spending keys required to sign the
 /// transparent inputs of `proposal`.
 ///
-/// Determines which transparent receivers in this account were imported standalone
-/// (vs. HD-derived). Only those have an associated entry in the keystore's
-/// standalone-key table; HD-derived receivers are signed for using `usk` and must not
-/// be looked up via `decrypt_standalone_transparent_key` (which would error with
-/// `QueryReturnedNoRows`).
+/// The keystore keys standalone transparent spending material by public key, so this maps
+/// each standalone address in the proposal to those keys: a P2PKH import supplies its own
+/// public key, and a P2SH import supplies the members of its multisig redeem script. Keys
+/// the keystore does not hold are omitted; whether the ones it does hold reach the
+/// address's signature threshold is determined when the proposal is signed. HD-derived
+/// receivers are signed for using `usk` and are absent from the result.
 ///
 /// Gated on `zcashd-import` because its only callers (`z_send_many` and
 /// `z_shieldcoinbase`) sign for standalone keys under that feature, and on the
@@ -102,33 +103,34 @@ pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
     account_id: AccountUuid,
     proposal: &Proposal<StandardFeeRule, NoteRef>,
 ) -> RpcResult<HashMap<TransparentAddress, Vec<secp256k1::SecretKey>>> {
-    let standalone_addrs: HashSet<TransparentAddress> = wallet
+    let standalone_pubkeys: HashMap<TransparentAddress, Vec<secp256k1::PublicKey>> = wallet
         .get_transparent_receivers(account_id, true, true)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
         .into_iter()
-        .filter_map(|(addr, metadata)| match metadata.source() {
-            TransparentAddressSource::StandalonePubkey(_)
-            | TransparentAddressSource::StandaloneScript(_) => Some(addr),
-            // No key material exists for an address-only import, so there is no
-            // standalone key to collect; spends from it are rejected upstream.
-            TransparentAddressSource::StandaloneAddress => None,
-            TransparentAddressSource::Derived { .. } => None,
+        .filter_map(|(addr, metadata)| {
+            standalone_address_pubkeys(metadata.source()).map(|pubkeys| (addr, pubkeys))
         })
         .collect();
 
     let mut keys: HashMap<TransparentAddress, Vec<secp256k1::SecretKey>> = HashMap::new();
     for step in proposal.steps() {
         for input in step.transparent_inputs() {
-            if let Some(address) = script::FromChain::parse(&input.txout().script_pubkey().0)
+            let Some(address) = script::FromChain::parse(&input.txout().script_pubkey().0)
                 .ok()
                 .as_ref()
                 .and_then(TransparentAddress::from_script_from_chain)
-            {
-                if !standalone_addrs.contains(&address) {
-                    continue;
-                }
-                let secret_key = keystore
-                    .decrypt_standalone_transparent_key(&address)
+            else {
+                continue;
+            };
+
+            // Look each address up once, no matter how many inputs it contributes.
+            if keys.contains_key(&address) {
+                continue;
+            }
+
+            if let Some(pubkeys) = standalone_pubkeys.get(&address) {
+                let secret_keys = keystore
+                    .decrypt_standalone_transparent_keys(pubkeys)
                     .await
                     .map_err(|e| match e.kind() {
                         // TODO: Improve internal error types.
@@ -137,11 +139,40 @@ pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
                         }
                         _ => LegacyCode::Database.with_message(e.to_string()),
                     })?;
-                keys.entry(address).or_default().push(secret_key);
+                keys.insert(address, secret_keys);
             }
         }
     }
     Ok(keys)
+}
+
+/// Returns the public keys whose keystore entries can spend from an address with the given
+/// source, or `None` if the source carries no standalone key material.
+#[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+fn standalone_address_pubkeys(
+    source: &TransparentAddressSource,
+) -> Option<Vec<secp256k1::PublicKey>> {
+    match source {
+        TransparentAddressSource::StandalonePubkey(pubkey) => Some(vec![*pubkey]),
+        TransparentAddressSource::StandaloneScript(redeem) => Some(multisig_pubkeys(redeem)),
+        // No key material exists for an address-only import, so there is no standalone key
+        // to collect; spends from it are rejected upstream.
+        TransparentAddressSource::StandaloneAddress => None,
+        TransparentAddressSource::Derived { .. } => None,
+    }
+}
+
+/// Returns the member public keys of a multisig redeem script, or an empty list if the
+/// script is not multisig.
+#[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+fn multisig_pubkeys(redeem: &script::Redeem) -> Vec<secp256k1::PublicKey> {
+    match solver::standard(redeem) {
+        Some(ScriptKind::MultiSig { pubkeys, .. }) => pubkeys
+            .iter()
+            .filter_map(|pubkey| secp256k1::PublicKey::from_slice(pubkey.as_slice()).ok())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Builds an [`AccountBirthday`] by fetching the treestate at the given height.
@@ -844,5 +875,80 @@ mod tests {
         assert_eq!(parse_fixed_point("1.1e", 8), None);
         assert_eq!(parse_fixed_point("1.1e-", 8), None);
         assert_eq!(parse_fixed_point("1.", 8), None);
+    }
+
+    /// A standalone P2PKH import supplies its own public key, and a P2SH import supplies
+    /// the members of its multisig redeem script. A source without key material supplies
+    /// none.
+    #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+    #[test]
+    fn standalone_address_pubkeys_covers_every_key_source() {
+        use transparent::keys::{NonHardenedChildIndex, TransparentKeyScope};
+        use zcash_client_backend::wallet::TransparentAddressSource;
+        use zcash_script::{Opcode, op, pv, script::Component};
+
+        use super::standalone_address_pubkeys;
+
+        /// Builds an n-of-n multisig redeem script over `pubkeys`.
+        fn multisig_redeem_script(pubkeys: &[secp256k1::PublicKey]) -> Component<Opcode> {
+            let n = match pubkeys.len() {
+                1 => pv::_1,
+                2 => pv::_2,
+                3 => pv::_3,
+                _ => unreachable!("this test only builds one- to three-member scripts"),
+            };
+
+            let mut ops = vec![Opcode::PushValue(n.clone())];
+            ops.extend(pubkeys.iter().map(|pubkey| {
+                Opcode::PushValue(pv::push_value(&pubkey.serialize()).expect("a key fits"))
+            }));
+            ops.push(Opcode::PushValue(n));
+            ops.push(op::CHECKMULTISIG);
+
+            Component(ops)
+        }
+
+        let key = |seed: u8| {
+            secp256k1::SecretKey::from_secret_bytes([seed; 32])
+                .expect("a non-zero seed is a valid secret key")
+                .public_key()
+        };
+        let members = [key(1), key(2), key(3)];
+
+        // A P2PKH import carries its own public key.
+        assert_eq!(
+            standalone_address_pubkeys(&TransparentAddressSource::StandalonePubkey(members[0])),
+            Some(vec![members[0]]),
+        );
+
+        // A P2SH import carries the members of its redeem script.
+        assert_eq!(
+            standalone_address_pubkeys(&TransparentAddressSource::StandaloneScript(
+                multisig_redeem_script(&members),
+            )),
+            Some(members.to_vec()),
+        );
+
+        // A redeem script that is not multisig has no member keys to look up.
+        assert_eq!(
+            standalone_address_pubkeys(&TransparentAddressSource::StandaloneScript(Component(
+                vec![Opcode::PushValue(pv::_1)],
+            ))),
+            Some(vec![]),
+        );
+
+        // Address-only imports and HD-derived addresses have no standalone key material.
+        assert_eq!(
+            standalone_address_pubkeys(&TransparentAddressSource::StandaloneAddress),
+            None,
+        );
+        assert_eq!(
+            standalone_address_pubkeys(&TransparentAddressSource::Derived {
+                scope: TransparentKeyScope::EXTERNAL,
+                address_index: NonHardenedChildIndex::from_index(0)
+                    .expect("zero is a valid non-hardened index"),
+            }),
+            None,
+        );
     }
 }

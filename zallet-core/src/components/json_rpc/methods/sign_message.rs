@@ -9,6 +9,7 @@ use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
 use zcash_client_backend::{
     data_api::{Account as _, WalletRead},
     keys::UnifiedSpendingKey,
+    wallet::TransparentAddressSource,
 };
 use zcash_keys::encoding::AddressCodec;
 
@@ -82,12 +83,15 @@ async fn get_transparent_secret_key(
     };
 
     // Derive/decrypt based on address source.
-    match (metadata.source().scope(), metadata.source().address_index()) {
+    match metadata.source() {
         // HD: derive from seed.
-        (Some(scope), Some(address_index)) => {
+        TransparentAddressSource::Derived {
+            scope,
+            address_index,
+        } => {
             // Ephemeral (ZIP 320) addresses are internal to transaction construction;
             // refuse to prove ownership of them.
-            if scope == TransparentKeyScope::EPHEMERAL {
+            if *scope == TransparentKeyScope::EPHEMERAL {
                 return Err(LegacyCode::Wallet.with_static("Private key not available"));
             }
 
@@ -109,19 +113,26 @@ async fn get_transparent_secret_key(
             .map_err(|e| LegacyCode::Wallet.with_message(e.to_string()))?;
 
             usk.transparent()
-                .derive_secret_key(scope, address_index)
+                .derive_secret_key(*scope, *address_index)
                 .map_err(|e| LegacyCode::Wallet.with_message(e.to_string()))
         }
-        // Standalone imported key.
+        // Standalone imported key. A signature is requested by public key, of which a
+        // P2PKH import holds exactly one.
         #[cfg(feature = "transparent-key-import")]
-        (None, None) => keystore
-            .decrypt_standalone_transparent_key(address)
+        TransparentAddressSource::StandalonePubkey(pubkey) => keystore
+            .decrypt_standalone_transparent_keys(std::slice::from_ref(pubkey))
             .await
-            .map_err(map_wallet_locked_error),
-        #[cfg(not(feature = "transparent-key-import"))]
-        (None, None) => Err(LegacyCode::Wallet.with_static("Private key not available")),
-        // Invalid state: scope and address_index should both be Some or both be None.
-        _ => Err(LegacyCode::Wallet.with_static("Private key not available")),
+            .map_err(map_wallet_locked_error)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| LegacyCode::Wallet.with_static("Private key not available")),
+        // A P2SH address is refused before reaching here, and an address-only import
+        // carries no key material.
+        #[cfg(feature = "transparent-key-import")]
+        TransparentAddressSource::StandaloneScript(_)
+        | TransparentAddressSource::StandaloneAddress => {
+            Err(LegacyCode::Wallet.with_static("Private key not available"))
+        }
     }
 }
 
