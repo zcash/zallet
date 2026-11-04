@@ -1462,6 +1462,12 @@ mod tests {
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
 
+    /// Upper bound on how long a failed wallet sync startup may take to stop its batch
+    /// decryptor. The abort lands at the engine task's next yield point, so this only has to
+    /// absorb scheduling noise on a slow runner; a decryptor that is genuinely left running
+    /// fails the test here instead of hanging until the CI job timeout.
+    const DECRYPTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
     struct TaskCancellationProbe(mpsc::Sender<()>);
 
     impl Drop for TaskCancellationProbe {
@@ -1723,17 +1729,16 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "mock chain rejects wallet sync startup");
-        // `reload_keys` returns `None` only when the decryptor handle has no engine to
-        // reload, which itself indicates the engine was dropped during the failed
-        // startup. Either outcome proves the batch decryptor is not left running;
-        // assert the `Some` case explicitly, and accept `None` as equivalent shutdown.
-        if let Some(reload_finished) = decryptor_observer.reload_keys().await {
-            assert!(
-                reload_finished.await.is_err(),
-                "failed wallet sync startup must not leave its batch decryptor running",
-            );
-        }
-        // `None` means there is no engine to reload — the decryptor is already down.
+        // The failed startup aborts the batch decryptor task, which owns the engine, so the
+        // engine's queue receiver is dropped once the abort lands. `Handle::closed` resolves
+        // when the receiver is gone, which is the crate's liveness signal for the engine; a
+        // queued `reload_keys` cannot witness it, because a send can win its queue slot
+        // concurrently with the engine dropping (zallet#766). Bound the wait so a decryptor
+        // that genuinely is left running fails here instead of hanging until the CI job
+        // timeout.
+        tokio::time::timeout(DECRYPTOR_SHUTDOWN_TIMEOUT, decryptor_observer.closed())
+            .await
+            .expect("failed wallet sync startup must not leave its batch decryptor running");
     }
 
     // Regression for zallet#136: when a sibling task fails and `steady_state` is
