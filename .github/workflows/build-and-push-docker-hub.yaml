@@ -293,8 +293,23 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
+          # A Rekor upload can be committed while its response is lost; cosign's
+          # own retry then fails with 409 "an equivalent entry already exists"
+          # (v0.1.0-beta.4, run 41461526245). A new cosign call signs with a fresh
+          # Fulcio certificate, so retrying the whole call cannot hit that 409.
+          retry() {
+            local n
+            for n in 1 2 3; do
+              "$@" && return 0
+              if [[ $n -lt 3 ]]; then
+                echo "::warning::$1 $2 failed (attempt $n of 3), retrying in $((n * 15)) s" >&2
+                sleep $((n * 15))
+              fi
+            done
+            return 1
+          }
           echo "Signing $IMAGE_REF@$DIGEST"
-          cosign sign --yes "$IMAGE_REF@$DIGEST"
+          retry cosign sign --yes "$IMAGE_REF@$DIGEST"
 
       - name: Generate per-platform SPDX SBOMs
         id: sbom
@@ -323,6 +338,21 @@ jobs:
           PLATFORMS: ${{ steps.platforms.outputs.platforms }}
         run: |
           set -euo pipefail
+          # A Rekor upload can be committed while its response is lost; cosign's
+          # own retry then fails with 409 "an equivalent entry already exists"
+          # (v0.1.0-beta.4, run 41461526245). A new cosign call signs with a fresh
+          # Fulcio certificate, so retrying the whole call cannot hit that 409.
+          retry() {
+            local n
+            for n in 1 2 3; do
+              "$@" && return 0
+              if [[ $n -lt 3 ]]; then
+                echo "::warning::$1 $2 failed (attempt $n of 3), retrying in $((n * 15)) s" >&2
+                sleep $((n * 15))
+              fi
+            done
+            return 1
+          }
           IFS=',' read -ra plats <<< "${PLATFORMS}"
           for platform in "${plats[@]}"; do
             plat="$(echo "$platform" | xargs)"
@@ -334,7 +364,7 @@ jobs:
               exit 1
             fi
             echo "Attesting SBOM for $plat"
-            cosign attest --yes \
+            retry cosign attest --yes \
               --type spdxjson \
               --predicate "$predicate" \
               "$IMAGE_REF@$DIGEST"
