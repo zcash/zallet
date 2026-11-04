@@ -1844,4 +1844,92 @@ mod tests {
             )),
         );
     }
+
+    /// A member key is retrievable even when the wallet records only its P2SH script,
+    /// with no corresponding standalone P2PKH address.
+    #[cfg(feature = "zcashd-import")]
+    #[test]
+    fn standalone_p2sh_member_key_is_retrievable() {
+        use zcash_client_backend::{
+            data_api::{AccountBirthday, WalletRead, WalletWrite, chain::ChainState},
+            wallet::TransparentAddressSource,
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::consensus::BlockHeight;
+        use zcash_script::{pattern::check_multisig, script::Component};
+
+        use super::{
+            EncryptedStandaloneTransparentKey, testing::keystore_and_database_with_config,
+        };
+
+        let datadir = tempdir().unwrap();
+
+        run_async(|| async {
+            let (keystore, database) = keystore_and_database_with_config(
+                &datadir,
+                Some(std::num::NonZeroUsize::MIN),
+                |_| {},
+            )
+            .await;
+
+            let birthday = AccountBirthday::from_parts(
+                ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
+                None,
+            );
+            let seed = secrecy::SecretVec::new(vec![0; 32]);
+            let (account_id, _) = database
+                .handle()
+                .await
+                .unwrap()
+                .create_account("test", &seed, &birthday, None)
+                .unwrap();
+
+            // Store the standalone spending key of one multisig member.
+            let member_secret_key = secp256k1::SecretKey::from_secret_bytes([1; 32]).unwrap();
+            let member_pubkey = member_secret_key.public_key();
+            let encrypted_key_bytes = keystore
+                .encryptor()
+                .await
+                .unwrap()
+                .encrypt_standalone_transparent_privkey(&member_secret_key)
+                .unwrap();
+            keystore
+                .store_encrypted_standalone_transparent_keys(&[EncryptedStandaloneTransparentKey {
+                    pubkey: member_pubkey,
+                    encrypted_key_bytes,
+                }])
+                .await
+                .unwrap();
+
+            // Import a 1-of-1 multisig redeem script naming that member.
+            let address = {
+                let mut db = database.handle().await.unwrap();
+                db.import_standalone_transparent_script(
+                    account_id,
+                    Component(check_multisig(1, &[&member_pubkey.serialize()], false).unwrap()),
+                )
+                .unwrap();
+
+                db.get_transparent_receivers(account_id, true, true)
+                    .unwrap()
+                    .into_iter()
+                    .find(|(_, metadata)| {
+                        matches!(
+                            metadata.source(),
+                            TransparentAddressSource::StandaloneScript(_)
+                        )
+                    })
+                    .map(|(address, _)| address)
+                    .expect("the imported redeem script must be a standalone transparent receiver")
+            };
+
+            assert_eq!(
+                keystore
+                    .decrypt_standalone_transparent_key(&address)
+                    .await
+                    .unwrap(),
+                member_secret_key,
+            );
+        });
+    }
 }
