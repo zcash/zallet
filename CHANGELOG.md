@@ -26,6 +26,17 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- `z_sendmany` and `z_shieldcoinbase` can spend transparent outputs held by a
+  P2SH address imported from a multisig redeem script. The lookup of the
+  address's standalone spending keys previously joined the keystore to the
+  wallet's address table on a column that is NULL for P2SH rows, so the spend
+  failed with "Error: Query returned no rows". The member keys are now looked
+  up by public key, and an address whose member keys the wallet only partly
+  holds fails during transaction construction (with a missing-signing-key
+  error) rather than with an opaque database error.
+
 ## [0.1.0-beta.4] - 2026-11-01
 
 ### Added

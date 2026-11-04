@@ -139,9 +139,6 @@ use crate::fl;
 
 use sapling::zip32::{DiversifiableFullViewingKey, ExtendedSpendingKey};
 
-#[cfg(feature = "transparent-key-import")]
-use {transparent::address::TransparentAddress, zcash_keys::address::Address};
-
 pub(super) mod db;
 
 mod error;
@@ -1110,54 +1107,73 @@ impl KeyStore {
         Ok(None)
     }
 
+    /// Decrypts the standalone (non-HD) transparent spending keys corresponding to the
+    /// given public keys.
+    ///
+    /// A public key the keystore does not hold is omitted from the result rather than
+    /// being reported as an error: for a multisig address another party may hold some of
+    /// the members, and whether the keys we do hold are sufficient to reach the address's
+    /// threshold is determined when its inputs are signed.
+    ///
+    /// The keystore is keyed by public key, so callers must supply the keys they expect to
+    /// find: a P2PKH address's own public key, or the members of a P2SH address's multisig
+    /// redeem script.
     #[cfg(feature = "transparent-key-import")]
-    pub(crate) async fn decrypt_standalone_transparent_key(
+    pub(crate) async fn decrypt_standalone_transparent_keys(
         &self,
-        address: &TransparentAddress,
-    ) -> Result<secp256k1::SecretKey, Error> {
+        pubkeys: &[secp256k1::PublicKey],
+    ) -> Result<Vec<secp256k1::SecretKey>, Error> {
         // Acquire a read lock on the identities for decryption.
         let identities = self.identities.read().await;
         if identities.is_empty() {
             return Err(ErrorKind::Generic.context(fl!("err-wallet-locked")).into());
         }
 
-        let (pubkey_bytes, encrypted_key_bytes) = self
-            .with_db(|conn, network| {
-                let addr_str = Address::Transparent(*address).encode(network);
-                let row = conn
-                    .query_row(
-                        "SELECT ztk.pubkey, encrypted_transparent_privkey
-                         FROM ext_zallet_keystore_standalone_transparent_keys ztk
-                         JOIN addresses a ON ztk.pubkey = a.imported_transparent_receiver_pubkey
-                         WHERE a.cached_transparent_receiver_address = :address",
-                        named_params! {
-                            ":address": addr_str,
-                        },
-                        |row| {
-                            Ok((
-                                row.get::<_, Vec<u8>>("pubkey")?,
-                                row.get::<_, Vec<u8>>("encrypted_transparent_privkey")?,
-                            ))
-                        },
+        let encrypted_keys = self
+            .with_db(|conn, _| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT encrypted_transparent_privkey
+                         FROM ext_zallet_keystore_standalone_transparent_keys
+                         WHERE pubkey = :pubkey",
                     )
                     .map_err(|e| ErrorKind::Generic.context(e))?;
-                Ok(row)
+
+                let mut encrypted_keys = Vec::with_capacity(pubkeys.len());
+                for pubkey in pubkeys {
+                    let encrypted_key = stmt
+                        .query_row(named_params! { ":pubkey": pubkey.serialize() }, |row| {
+                            row.get::<_, Vec<u8>>(0)
+                        })
+                        .optional()
+                        .map_err(|e| ErrorKind::Generic.context(e))?;
+                    encrypted_keys.push(encrypted_key);
+                }
+
+                Ok(encrypted_keys)
             })
             .await?;
 
-        let secret_key =
-            decrypt_standalone_transparent_privkey(&identities, &encrypted_key_bytes[..])?;
+        let mut secret_keys = Vec::with_capacity(pubkeys.len());
+        for (pubkey, encrypted_key) in pubkeys.iter().zip(&encrypted_keys) {
+            let Some(encrypted_key) = encrypted_key else {
+                continue;
+            };
 
-        // The ciphertext is not bound to the pubkey the row is keyed by, so verify that
-        // the decrypted key reproduces the pubkey used for the lookup.
-        let pubkey = secret_key.public_key();
-        if pubkey.serialize()[..] != pubkey_bytes[..] {
-            return Err(ErrorKind::Generic
-                .context(fl!("err-keystore-key-material-mismatch"))
-                .into());
+            let secret_key = decrypt_standalone_transparent_privkey(&identities, encrypted_key)?;
+
+            // The ciphertext is not bound to the pubkey the row is keyed by, so verify
+            // that the decrypted key reproduces the pubkey used for the lookup.
+            if secret_key.public_key() != *pubkey {
+                return Err(ErrorKind::Generic
+                    .context(fl!("err-keystore-key-material-mismatch"))
+                    .into());
+            }
+
+            secret_keys.push(secret_key);
         }
 
-        Ok(secret_key)
+        Ok(secret_keys)
     }
 }
 
@@ -1494,7 +1510,9 @@ pub(crate) mod testing {
         datadir: &TempDir,
         configure: impl FnOnce(&mut ZalletConfig),
     ) -> KeyStore {
-        keystore_and_database_with_config(datadir, configure).await.0
+        keystore_and_database_with_config(datadir, configure)
+            .await
+            .0
     }
 
     /// Builds a keystore and a clone of the wallet database it is backed by.
@@ -1912,25 +1930,38 @@ mod tests {
             )
             .unwrap();
 
-            let address = db
-                .get_transparent_receivers(account_id, true, true)
-                .unwrap()
-                .into_iter()
-                .find(|(_, metadata)| {
-                    matches!(
+            // Confirm the wallet recorded it as a standalone script import.
+            assert!(
+                db.get_transparent_receivers(account_id, true, true)
+                    .unwrap()
+                    .values()
+                    .any(|metadata| matches!(
                         metadata.source(),
                         TransparentAddressSource::StandaloneScript(_)
-                    )
-                })
-                .map(|(address, _)| address)
-                .expect("the imported redeem script must be a standalone transparent receiver");
+                    )),
+                "the imported redeem script must be a standalone transparent receiver",
+            );
 
+            // The member key is reachable by its public key. Looking it up by the P2SH
+            // address instead joins on a NULL `imported_transparent_receiver_pubkey`.
             assert_eq!(
                 keystore
-                    .decrypt_standalone_transparent_key(&address)
+                    .decrypt_standalone_transparent_keys(&[member_pubkey])
                     .await
                     .unwrap(),
-                member_secret_key,
+                vec![member_secret_key],
+            );
+
+            // A member the keystore does not hold is skipped rather than erroring.
+            let absent_pubkey = secp256k1::SecretKey::from_secret_bytes([2; 32])
+                .unwrap()
+                .public_key();
+            assert_eq!(
+                keystore
+                    .decrypt_standalone_transparent_keys(&[absent_pubkey, member_pubkey])
+                    .await
+                    .unwrap(),
+                vec![member_secret_key],
             );
         });
     }
