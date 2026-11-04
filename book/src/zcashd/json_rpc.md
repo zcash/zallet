@@ -180,6 +180,12 @@ Changes to parameters:
 - If the `minconf` field is omitted, the default ZIP 315 confirmation policy
   (3 confirmations for trusted notes, 10 confirmations for untrusted notes)
   is used.
+- `fromaddress` accepts an account UUID in addition to a transparent, Sapling,
+  or unified address. An account UUID selects non-coinbase UTXOs from any of
+  the account's transparent receivers, so a wallet can gather transparent funds
+  it scattered across its own change addresses. `zcashd` had no equivalent for
+  an ordinary account: only `ANY_TADDR`, which in Zallet is confined to a
+  migrated `zcashd` wallet's legacy pool.
 
 Changes to response:
 - New `txids` array field in response.

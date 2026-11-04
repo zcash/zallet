@@ -6,11 +6,12 @@ use jsonrpsee::core::{JsonValue, RpcResult};
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::ExposeSecret;
 use serde_json::json;
+use uuid::Uuid;
 use zcash_client_backend::data_api::wallet::SpendingKeys;
 use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::{
     data_api::{
-        Account,
+        Account, WalletRead,
         wallet::{
             create_proposed_transactions,
             input_selection::{SpendPolicy, TransparentSpendPolicy},
@@ -42,6 +43,7 @@ use crate::{
         keystore::KeyStore,
     },
     fl,
+    network::Network,
     prelude::APP,
 };
 
@@ -62,24 +64,62 @@ pub(super) const PARAM_FEE_DESC: &str = "If set, it must be null.";
 pub(super) const PARAM_PRIVACY_POLICY_DESC: &str =
     "Policy for what information leakage is acceptable.";
 
-/// The sources of funds a transfer from `ANY_TADDR` may draw upon.
+/// The source of funds named by `z_sendmany`'s `fromaddress`.
 ///
-/// `zcashd` treated the transparent addresses of a wallet as a single pool of funds, and
-/// `ANY_TADDR` drew on any of them. Zallet holds that pool in one account (see
-/// [`get_legacy_pool_account`]), and [`TransparentSpendPolicy::any_account_addr`] reproduces
-/// the selection within it: the proposer spends whichever of the account's transparent
-/// receivers cover the request, linking them on-chain when one address does not suffice.
+/// Classified without touching the wallet database, so the parsing rules can be unit-tested;
+/// resolving a variant to a wallet account is [`call`]'s job.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FromAddress {
+    /// The legacy `zcashd` pool of funds, named by the literal string `"ANY_TADDR"`.
+    AnyTaddr,
+    /// An account UUID, naming the account's transparent funds.
+    AccountUuid(AccountUuid),
+    /// A transparent, Sapling, or unified address, naming that address's account.
+    Address(Address),
+}
+
+/// Classifies the string form of `fromaddress`, without touching the wallet database.
+///
+/// The three string forms are disjoint, so the checks cannot shadow one another:
+/// `"ANY_TADDR"` is not a valid address or UUID, a UUID is hex with dashes at fixed
+/// positions, and a Zcash address is base58check (transparent) or bech32 (Sapling, unified).
+pub(super) fn parse_from_address(params: &Network, fromaddress: &str) -> RpcResult<FromAddress> {
+    if fromaddress == "ANY_TADDR" {
+        return Ok(FromAddress::AnyTaddr);
+    }
+    if let Ok(uuid) = Uuid::parse_str(fromaddress) {
+        return Ok(FromAddress::AccountUuid(AccountUuid::from_uuid(uuid)));
+    }
+    Address::decode(params, fromaddress)
+        .map(FromAddress::Address)
+        .ok_or_else(|| {
+            LegacyCode::InvalidAddressOrKey.with_static(
+                "Invalid from address: should be a taddr, zaddr, UA, an account UUID, or the \
+                 string 'ANY_TADDR'.",
+            )
+        })
+}
+
+/// The sources of funds a transfer from a single account's transparent pool may draw upon.
+///
+/// Both `ANY_TADDR` (the legacy `zcashd` pool of funds) and an account UUID name one
+/// account's transparent funds. `zcashd` treated the transparent addresses of a wallet as a
+/// single pool of funds, and `ANY_TADDR` drew on any of them; Zallet holds that pool in one
+/// account (see [`get_legacy_pool_account`]), while an account UUID names the same pool of
+/// any other account. [`TransparentSpendPolicy::any_account_addr`] reproduces the selection
+/// within it: the proposer spends whichever of the account's transparent receivers cover the
+/// request, linking them on-chain when one address does not suffice.
 ///
 /// That linkage is bounded by the caller's privacy policy rather than here: a proposal
 /// spending more than one transparent address is rejected by `enforce_privacy_policy` unless
 /// the caller permitted `AllowLinkingAccountAddresses` (or `NoPrivacy`, when the transaction
 /// also has a transparent output or transparent change).
 ///
-/// Like a bare transparent source, this permits no shielded pool: `ANY_TADDR` names
-/// transparent funds, so it must not become a way to spend the account's notes. Coinbase is
+/// Like a bare transparent source, this permits no shielded pool: both sources name
+/// transparent funds, so neither may become a way to spend the account's notes. Coinbase is
 /// likewise excluded (`CoinbasePolicy::NonCoinbase`), matching `zcashd`, which sent callers
 /// to `z_shieldcoinbase` for coinbase funds.
-fn legacy_pool_spend_policy() -> SpendPolicy {
+fn account_transparent_spend_policy() -> SpendPolicy {
     SpendPolicy::shielded_pools([]).with_transparent(TransparentSpendPolicy::any_account_addr())
 }
 
@@ -107,24 +147,35 @@ pub(crate) async fn call<C: Chain>(
 
     let request = build_request(&amounts)?;
 
-    let (account, spend_policy) = match fromaddress.as_str() {
+    let source = parse_from_address(wallet.params(), &fromaddress)?;
+
+    let (account, spend_policy) = match &source {
         // Select from the legacy transparent address pool, which this wallet holds in a
         // single account. Enabled by `features.legacy_pool_seed_fingerprint`.
-        "ANY_TADDR" => (
+        FromAddress::AnyTaddr => (
             get_legacy_pool_account(wallet.as_ref())?,
-            legacy_pool_spend_policy(),
+            account_transparent_spend_policy(),
         ),
+        // Select the account's transparent funds, wherever among its transparent receivers
+        // they are held. This is how a wallet created from scratch gathers transparent funds
+        // its own earlier payments scattered across change addresses; the account's shielded
+        // funds are not selected, so pass a unified address of the account to spend those.
+        FromAddress::AccountUuid(account_id) => {
+            let account = wallet
+                .as_ref()
+                .get_account(*account_id)
+                .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+                .ok_or_else(|| {
+                    LegacyCode::InvalidParameter.with_message(fl!("err-account-not-found"))
+                })?;
+
+            (account, account_transparent_spend_policy())
+        }
         // Select the account corresponding to the given address.
-        _ => {
-            let address = Address::decode(wallet.params(), &fromaddress).ok_or_else(|| {
-                LegacyCode::InvalidAddressOrKey.with_static(
-                "Invalid from address: should be a taddr, zaddr, UA, or the string 'ANY_TADDR'.",
-            )
-            })?;
+        FromAddress::Address(address) => {
+            let account = get_account_for_address(wallet.as_ref(), address)?;
 
-            let account = get_account_for_address(wallet.as_ref(), &address)?;
-
-            (account, spend_policy_for(&address))
+            (account, spend_policy_for(address))
         }
     };
 
@@ -265,26 +316,35 @@ async fn run<C: Chain>(
 mod tests {
     use proptest::prelude::*;
     use std::collections::BTreeSet;
-
+    use uuid::Uuid;
     use zcash_client_backend::{
         data_api::wallet::input_selection::{CoinbasePolicy, TransparentSource},
         fees::TransparentChangePolicy,
     };
+    use zcash_client_sqlite::AccountUuid;
     use zcash_keys::{
         address::{Address, UnifiedAddress},
+        encoding::AddressCodec,
         keys::{UnifiedAddressRequest, UnifiedSpendingKey},
     };
     use zcash_protocol::{ShieldedPool, consensus::Network};
     use zip32::AccountId;
 
-    use super::{SpendPolicy, legacy_pool_spend_policy};
-    use crate::components::json_rpc::payments::{spend_policy_for, transparent_change_policy_for};
+    use super::{FromAddress, SpendPolicy, account_transparent_spend_policy, parse_from_address};
+    use crate::components::json_rpc::{
+        payments::{spend_policy_for, transparent_change_policy_for},
+        server::LegacyCode,
+    };
+    use crate::network::Network as ZalletNetwork;
+
+    /// A well-formed account UUID, used only as a parse fixture.
+    const TEST_UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
     /// `ANY_TADDR` draws on the legacy pool's transparent funds, on any address within it, and
     /// on nothing else.
     #[test]
     fn legacy_pool_source_spends_any_account_taddr_and_no_shielded_pool() {
-        let policy = legacy_pool_spend_policy();
+        let policy = account_transparent_spend_policy();
 
         // As for a bare transparent source, the empty permitted-pool set says exhaustively
         // that no shielded note can be spent, including from pools added after this was
@@ -315,6 +375,70 @@ mod tests {
             transparent_change_policy_for(&policy),
             TransparentChangePolicy::TransparentChangeAllowed,
         );
+    }
+
+    /// An account UUID is a valid `fromaddress`, classified as an account source rather than
+    /// rejected as an address.
+    ///
+    /// `Address::decode` cannot parse a UUID, so before this form existed a caller had no way
+    /// to name the account whose transparent funds the wallet scattered across its own change
+    /// addresses.
+    #[test]
+    fn parses_an_account_uuid_as_an_account_source() {
+        let params = ZalletNetwork::Consensus(Network::TestNetwork);
+        let uuid = Uuid::parse_str(TEST_UUID).expect("well-formed test UUID");
+
+        assert_eq!(
+            parse_from_address(&params, TEST_UUID).unwrap(),
+            FromAddress::AccountUuid(AccountUuid::from_uuid(uuid)),
+        );
+    }
+
+    /// The `fromaddress` forms are told apart by their encodings: `ANY_TADDR` names the legacy
+    /// pool, a UUID names an account, and anything else must decode as a Zcash address. A
+    /// string that is none of those is rejected with a message naming every accepted form.
+    #[test]
+    fn classifies_each_fromaddress_form_and_rejects_others() {
+        let params = ZalletNetwork::Consensus(Network::TestNetwork);
+
+        assert_eq!(
+            parse_from_address(&params, "ANY_TADDR").unwrap(),
+            FromAddress::AnyTaddr,
+        );
+
+        let (ua, _) =
+            UnifiedSpendingKey::from_seed(&Network::TestNetwork, &[7u8; 32], AccountId::ZERO)
+                .expect("the test seed derives a spending key")
+                .to_unified_full_viewing_key()
+                .default_address(UnifiedAddressRequest::ALLOW_ALL)
+                .expect("the test seed derives a full unified address");
+
+        // A UA carries a transparent receiver, yet it must classify as an address rather than
+        // an account: `spend_policy_for` selects only its shielded receivers' pools, so the
+        // account's transparent pool is reached only through an account UUID (or `ANY_TADDR`).
+        assert!(matches!(
+            parse_from_address(&params, &ua.encode(&params)).unwrap(),
+            FromAddress::Address(Address::Unified(_)),
+        ));
+
+        let taddr = ua
+            .transparent()
+            .copied()
+            .expect("ALLOW_ALL derives a transparent receiver");
+        assert_eq!(
+            parse_from_address(&params, &taddr.encode(&params)).unwrap(),
+            FromAddress::Address(Address::Transparent(taddr)),
+        );
+
+        let err = parse_from_address(&params, "not-an-address").unwrap_err();
+        assert_eq!(err.code(), LegacyCode::InvalidAddressOrKey as i32);
+        for form in ["taddr", "UA", "account UUID", "ANY_TADDR"] {
+            assert!(
+                err.message().contains(form),
+                "the error message should name {form}, got: {}",
+                err.message(),
+            );
+        }
     }
 
     /// A unified address carrying every receiver type, derived from `seed` and `account`.

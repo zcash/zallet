@@ -26,6 +26,20 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `z_sendmany` accepts an account UUID as its `fromaddress`, spending the
+  account's non-coinbase transparent funds from any of its transparent
+  receivers. A wallet created from scratch scatters transparent change across
+  its own internal addresses, and no `fromaddress` could gather them in one
+  transaction; only the legacy-pool `ANY_TADDR`, which is confined to a
+  migrated `zcashd` wallet, could. Covering a payment from more than one of the
+  account's addresses links them on-chain, so such a call requires a
+  `privacy_policy` of `AllowLinkingAccountAddresses` (or `NoPrivacy` if the
+  transaction also has a transparent recipient or change). No shielded funds
+  are selected: pass a unified address of the account, or use
+  `z_sendfromaccount`, to spend those.
+
 ## [0.1.0-beta.4] - 2026-11-01
 
 ### Added

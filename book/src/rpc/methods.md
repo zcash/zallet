@@ -706,6 +706,14 @@ TODO: <https://github.com/zcash/zallet/issues/137>
     `AllowLinkingAccountAddresses` (or of `NoPrivacy`, if it also has a transparent
     recipient or transparent change). Use `z_shieldcoinbase` to shield coinbase
     UTXOs from multiple transparent addresses.
+  - An account UUID: Select non-coinbase UTXOs from any transparent address of the
+    named account. This is the account-scoped equivalent of `ANY_TADDR`, and how a
+    wallet created from scratch spends the transparent funds its own earlier payments
+    scattered across change addresses. Covering the payment from more than one of the
+    account's addresses links them on-chain, so such a call requires a privacy policy
+    of `AllowLinkingAccountAddresses` (or of `NoPrivacy`, if it also has a transparent
+    recipient or transparent change). No shielded funds are selected; pass a unified
+    address of the account, or use `z_sendfromaccount`, to spend those.
   If a unified address is provided for this argument, the TXOs to be spent will be
   selected from those associated with the account corresponding to that unified
   address, from value pools corresponding to the receivers included in the UA.
