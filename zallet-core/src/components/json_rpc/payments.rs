@@ -435,14 +435,16 @@ pub(super) fn propose_and_check(
         // skip the check entirely.
         .ok_or_else(|| LegacyCode::InWarmup.with_static("Wallet sync required"))?;
 
-    // An account holding nothing may be absent from the summary. That is "no funds", not "no
-    // such account": `account_id` was resolved from the caller's `fromaddress` before we got
-    // here, so it exists.
-    let empty = AccountBalance::ZERO;
-    let account_balance = summary
-        .account_balances()
-        .get(&account_id)
-        .unwrap_or(&empty);
+    // The summary has an entry for every account in the wallet, including one holding nothing,
+    // and `account_id` was resolved from that same wallet before we got here. Its absence is
+    // therefore an inconsistency in the wallet, not "no funds", and is reported rather than
+    // read as an empty balance that would refuse every shielded send under a strict policy.
+    let account_balance = summary.account_balances().get(&account_id).ok_or_else(|| {
+        LegacyCode::Database.with_message(format!(
+            "account {} is missing from the wallet summary",
+            account_id.expose_uuid(),
+        ))
+    })?;
 
     // The height the transaction will target, which decides which pool a payment to an
     // Orchard receiver is constructed in. This is the same call `propose_transfer` makes
