@@ -38,6 +38,14 @@ be considered breaking changes.
   or as a generic proposal failure that did not mention the privacy policy at
   all.
 
+  Only the funds the request may spend are counted: a `fromaddress` (or
+  `pczt_create` `fund_source`) that limits which pools the send draws on is
+  checked against those pools' balances alone, so funds held elsewhere in the
+  account no longer make a send look payable that is not. A source that may
+  spend no shielded pool, such as a transparent address, is not checked here
+  against shielded recipients; the transaction proposal reports the
+  sender-revealing policy such a send requires.
+
   Which pool pays an Orchard receiver depends on the height the transaction
   targets. From NU6.3 the Orchard turnstile is one-way — value may leave the
   Orchard pool but never enter it — so a payment to an Orchard receiver is

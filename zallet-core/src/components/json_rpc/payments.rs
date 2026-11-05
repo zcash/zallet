@@ -299,21 +299,39 @@ fn spendable_in(balance: &AccountBalance, pool: ShieldedPool) -> Zatoshis {
 /// The check ignores fees, so the balances over-estimate what a payment can really draw on.
 /// That is the safe direction: a pool that cannot cover a payment even before fees certainly
 /// cannot cover it after them, so this never rejects a send that would have succeeded.
+///
+/// Only the pools `spend_policy` lets input selection draw on count toward a payment: funds
+/// the send may not spend cannot pay anyone, however much of them the account holds. A source
+/// that may spend no shielded pool at all reaches a shielded recipient only as a transparent
+/// sender, which is a different privacy cost from the crossing this check detects; for such a
+/// source the shielded recipients are left to [`enforce_privacy_policy`], so that the refusal
+/// names the policy the send actually requires.
 fn check_recipients_against_privacy_policy(
     params: &Network,
     target_height: BlockHeight,
     request: &TransactionRequest,
     privacy_policy: PrivacyPolicy,
+    spend_policy: &SpendPolicy,
     balance: &AccountBalance,
 ) -> Result<(), IncompatiblePrivacyPolicy> {
-    let mut max_sapling_available = spendable_in(balance, ShieldedPool::Sapling);
+    let available = |pool| {
+        if spend_policy.permits_shielded(pool) {
+            spendable_in(balance, pool)
+        } else {
+            Zatoshis::ZERO
+        }
+    };
+
+    let spends_shielded = !spend_policy.shielded().is_empty();
+
+    let mut max_sapling_available = available(ShieldedPool::Sapling);
 
     // A payment to an Orchard receiver is constructed in whichever pool
     // `orchard_receiver_pool` names, so only that pool's funds can pay one without crossing.
     // The other pool of the Orchard family is deliberately not counted: spending it would
     // cross the turnstile and reveal the amount, which is what this check exists to detect.
     let mut max_orchard_receiver_available =
-        spendable_in(balance, orchard_receiver_pool(params, target_height));
+        available(orchard_receiver_pool(params, target_height));
 
     for payment in request.payments().values() {
         let value = payment
@@ -332,6 +350,8 @@ fn check_recipients_against_privacy_policy(
                     return Err(IncompatiblePrivacyPolicy::TransparentRecipient);
                 }
             }
+            // A transparent-only source; see the doc comment.
+            Address::Sapling(_) | Address::Unified(_) if !spends_shielded => (),
             Address::Sapling(_) => {
                 match (
                     privacy_policy.allow_revealed_amounts(),
@@ -439,6 +459,7 @@ pub(super) fn propose_and_check(
         target_height.into(),
         &request,
         privacy_policy,
+        spend_policy,
         account_balance,
     )?;
 
@@ -2459,9 +2480,30 @@ mod recipient_preflight_tests {
     }
 
     /// Runs the check over payments of `(address, ZEC amount)`.
+    ///
+    /// The source may spend every shielded pool, as an account-wide send can; see
+    /// [`check_from`] for a source restricted to some of them.
     fn check(
         recipients: &[(&str, &str)],
         privacy_policy: PrivacyPolicy,
+        target_height: BlockHeight,
+        balance: &AccountBalance,
+    ) -> Result<(), IncompatiblePrivacyPolicy> {
+        check_from(
+            recipients,
+            privacy_policy,
+            &SpendPolicy::default(),
+            target_height,
+            balance,
+        )
+    }
+
+    /// Runs the check over payments of `(address, ZEC amount)` from a source that may spend
+    /// only what `spend_policy` permits.
+    fn check_from(
+        recipients: &[(&str, &str)],
+        privacy_policy: PrivacyPolicy,
+        spend_policy: &SpendPolicy,
         target_height: BlockHeight,
         balance: &AccountBalance,
     ) -> Result<(), IncompatiblePrivacyPolicy> {
@@ -2476,6 +2518,7 @@ mod recipient_preflight_tests {
             target_height,
             &request,
             privacy_policy,
+            spend_policy,
             balance,
         )
     }
@@ -2739,6 +2782,49 @@ mod recipient_preflight_tests {
         }
     }
 
+    /// The spend policy of the address `z_sendmany` names as its source, decoded on the
+    /// network these tests use.
+    fn spend_policy_from(source: &str) -> SpendPolicy {
+        spend_policy_for(
+            &Address::decode(&params(), source).expect("the source address is valid on mainnet"),
+        )
+    }
+
+    /// Funds the source may not spend cannot pay anyone. A Sapling source draws only on
+    /// Sapling notes, so the account's Orchard and Ironwood funds do not let it pay an Orchard
+    /// receiver without crossing, in either era, while its own Sapling funds still pay a
+    /// Sapling recipient.
+    #[test]
+    fn funds_the_source_cannot_spend_do_not_pay_a_recipient() {
+        let source = sapling_addr(&[0x2b; 32]);
+        let spend_policy = spend_policy_from(&source);
+        let orchard_recipient = ua(ORCHARD_ONLY);
+        let sapling_recipient = sapling_addr(&SEED);
+        let balance = account_balance(AMPLE_EACH, AMPLE_EACH, AMPLE_EACH);
+
+        for height in [before_ironwood(), from_ironwood()] {
+            assert_rejects(
+                check_from(
+                    &[(&orchard_recipient, PAYMENT_ZEC)],
+                    PrivacyPolicy::FullPrivacy,
+                    &spend_policy,
+                    height,
+                    &balance,
+                ),
+                IncompatiblePrivacyPolicy::RevealingReceiverAmounts,
+            );
+
+            check_from(
+                &[(&sapling_recipient, PAYMENT_ZEC)],
+                PrivacyPolicy::FullPrivacy,
+                &spend_policy,
+                height,
+                &balance,
+            )
+            .expect("the source's own pool pays a recipient in that pool");
+        }
+    }
+
     proptest! {
         // Each case derives a spending key, which is expensive, so take fewer samples than
         // the default 256.
@@ -2807,6 +2893,103 @@ mod recipient_preflight_tests {
                             .is_ok(),
                         "{addr} was rejected under FullPrivacy at height {height:?}",
                     );
+                }
+            }
+        }
+
+        /// A source that may spend no shielded pool can reach a shielded recipient only as a
+        /// transparent sender. That is not the crossing this check detects, so it accepts such
+        /// a recipient whatever the balances, and leaves the refusal to
+        /// [`enforce_privacy_policy`], which names the sender-revealing policy actually
+        /// required. Refusing here would recommend `AllowRevealedAmounts`, which the proposal
+        /// would then refuse in turn.
+        ///
+        /// Asserted under `FullPrivacy`, the strictest policy, and so the strongest form of
+        /// the claim.
+        #[test]
+        fn a_transparent_only_source_leaves_shielded_recipients_to_the_proposal(
+            seed in prop::array::uniform32(any::<u8>()),
+            sapling in 0u64..=AMPLE_EACH,
+            orchard in 0u64..=AMPLE_EACH,
+            ironwood in 0u64..=AMPLE_EACH,
+        ) {
+            let Some(sapling_recipient) = sapling_addr_from(&seed) else { return Ok(()) };
+            let Some(unified_recipient) = ua_from(&seed, BOTH_SHIELDED) else { return Ok(()) };
+            let spend_policy = spend_policy_from(T_ADDR_1);
+            let balance = account_balance(sapling, orchard, ironwood);
+
+            for height in [before_ironwood(), from_ironwood()] {
+                for addr in [&sapling_recipient, &unified_recipient] {
+                    prop_assert!(
+                        check_from(
+                            &[(addr, PAYMENT_ZEC)],
+                            PrivacyPolicy::FullPrivacy,
+                            &spend_policy,
+                            height,
+                            &balance,
+                        )
+                        .is_ok(),
+                        "{addr} was rejected for a transparent-only source at {height:?}",
+                    );
+                }
+            }
+        }
+
+        /// A pool the spend policy excludes counts for exactly as much as an empty one: for
+        /// every set of permitted shielded pools, checking against the account's balances is
+        /// the same as checking an account whose excluded pools hold nothing.
+        ///
+        /// Quantified over every non-empty subset of [`all_shielded_pools`], so a pool added
+        /// later is covered without changing the loop. The empty subset is a transparent-only
+        /// source, covered above.
+        #[test]
+        fn pools_outside_the_spend_policy_never_count(
+            seed in prop::array::uniform32(any::<u8>()),
+            sapling in 0u64..=AMPLE_EACH,
+            orchard in 0u64..=AMPLE_EACH,
+            ironwood in 0u64..=AMPLE_EACH,
+        ) {
+            let Some(sapling_recipient) = sapling_addr_from(&seed) else { return Ok(()) };
+            let Some(orchard_recipient) = ua_from(&seed, ORCHARD_ONLY) else { return Ok(()) };
+            let Some(unified_recipient) = ua_from(&seed, BOTH_SHIELDED) else { return Ok(()) };
+            let pools = all_shielded_pools();
+            let held = |pool| match pool {
+                ShieldedPool::Sapling => sapling,
+                ShieldedPool::Orchard => orchard,
+                ShieldedPool::Ironwood => ironwood,
+            };
+            let balance = account_balance(sapling, orchard, ironwood);
+
+            for mask in 1..(1usize << pools.len()) {
+                let permitted = pools
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| mask & (1 << i) != 0)
+                    .map(|(_, pool)| pool)
+                    .collect::<Vec<_>>();
+                let spend_policy = SpendPolicy::shielded_pools(permitted.iter().copied());
+                let only_permitted = |pool| if permitted.contains(&pool) { held(pool) } else { 0 };
+                let restricted = account_balance(
+                    only_permitted(ShieldedPool::Sapling),
+                    only_permitted(ShieldedPool::Orchard),
+                    only_permitted(ShieldedPool::Ironwood),
+                );
+
+                for height in [before_ironwood(), from_ironwood()] {
+                    for addr in [&sapling_recipient, &orchard_recipient, &unified_recipient] {
+                        let recipients = [(addr.as_str(), PAYMENT_ZEC)];
+                        prop_assert_eq!(
+                            check_from(
+                                &recipients,
+                                PrivacyPolicy::FullPrivacy,
+                                &spend_policy,
+                                height,
+                                &balance,
+                            ),
+                            check(&recipients, PrivacyPolicy::FullPrivacy, height, &restricted),
+                            "{} from {:?} at {:?}", addr, permitted, height,
+                        );
+                    }
                 }
             }
         }
