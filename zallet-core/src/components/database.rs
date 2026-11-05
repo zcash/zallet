@@ -81,33 +81,17 @@ impl Database {
         };
 
         // Keep the wallet database private to the owner. This must happen before
-        // SQLite opens it, as SQLite creates its journal files (which contain
+        // SQLite opens it: on Unix, SQLite creates its journal files (which contain
         // database content) with the database file's permissions. A missing
-        // database is created up front so it never exists with wider permissions.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let restrict = match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-                .await
-            {
-                Ok(_) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await
-                }
-                Err(e) => Err(e),
-            };
-            restrict.map_err(|e| {
-                ErrorKind::Init.context(fl!(
-                    "err-init-failed-to-restrict-permissions",
-                    path = path.display().to_string(),
-                    error = e.to_string(),
-                ))
-            })?;
-        }
+        // database is created up front so it never exists with wider permissions,
+        // and an existing one is tightened in case it predates this restriction.
+        crate::fs::create_or_restrict_private_file(&path).map_err(|e| {
+            ErrorKind::Init.context(fl!(
+                "err-init-failed-to-restrict-permissions",
+                path = path.display().to_string(),
+                error = e.to_string(),
+            ))
+        })?;
 
         let db_data_pool = match max_connections {
             None => connection::pool(&path, config.consensus.network())?,

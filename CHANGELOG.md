@@ -35,6 +35,13 @@ be considered breaking changes.
   Setting it at or below that number starves wallet operations, so it is
   intended mainly for regression testing, not production use.
 
+### Changed
+
+- The wallet database file is now created with a protected owner-only ACL on
+  Windows, matching the owner-only mode `0600` it already used on Unix
+  (previously it inherited the data directory's access control there). An
+  existing database file is still tightened on Unix only.
+
 ### Fixed
 
 - Wallet JSON-RPC methods no longer risk waiting forever for a database
