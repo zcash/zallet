@@ -1,0 +1,9 @@
+# `DbHandle` (a `deadpool::managed::Object`) is one of a small fixed pool of wallet
+# database connections, most of which the sync tasks retain for the lifetime of the
+# process. Holding one across an await that acquires another pooled connection (any
+# keystore key-material method takes its own) can deadlock the wallet (zcash/zallet#708),
+# and holding one across any slow await starves other wallet operations. See the
+# deadlock-avoidance rules on `Database::handle`.
+await-holding-invalid-types = [
+  { path = "deadpool::managed::Object", reason = "a pooled wallet database connection held across an await can deadlock or starve the pool (zcash/zallet#708); stage the reads, drop the handle, and reacquire instead, or `#[expect]` with a justification for why this hold is safe" },
+]

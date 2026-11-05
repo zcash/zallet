@@ -239,6 +239,12 @@ impl MigrateZcashdWalletCmd {
         }
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "one-shot CLI command: the only task on an otherwise idle pool, which \
+                  automatic sizing keeps large enough that a nested acquisition cannot \
+                  exhaust it (see `Database::handle`)"
+    )]
     async fn migrate_zcashd_wallet<C: Chain>(
         db: Database,
         keystore: KeyStore,

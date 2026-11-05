@@ -9,12 +9,12 @@ use zcash_protocol::consensus::BlockHeight;
 
 use crate::components::{
     chain::Chain,
-    database::DbConnection,
+    database::Database,
     json_rpc::{
         server::LegacyCode,
         utils::{
             ensure_seed_is_backed_up, ensure_wallet_is_unlocked, fetch_account_birthday,
-            parse_seedfp_parameter,
+            parse_seedfp_parameter, wallet_handle,
         },
     },
     keystore::KeyStore,
@@ -55,7 +55,7 @@ pub(super) const PARAM_ACCOUNTS_DESC: &str =
 pub(super) const PARAM_ACCOUNTS_REQUIRED: bool = true;
 
 pub(crate) async fn call<C: Chain>(
-    wallet: &mut DbConnection,
+    wallet: &Database,
     keystore: &KeyStore,
     chain: C,
     decryptor: &WalletDecryptorHandle,
@@ -68,7 +68,11 @@ pub(crate) async fn call<C: Chain>(
         .await
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
-    let recover_until = wallet
+    // The wallet connection is scoped to this read and released before the keystore
+    // queries below, which acquire their own connection (see `Database::handle`).
+    let recover_until = wallet_handle(wallet)
+        .await?
+        .as_ref()
         .chain_height()
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
         .ok_or(LegacyCode::InWarmup.with_static("Wallet sync required"))?;
@@ -107,23 +111,29 @@ pub(crate) async fn call<C: Chain>(
         }
     }
 
-    // Import the accounts.
-    let accounts = account_args
-        .into_iter()
-        .map(|(account_name, seed_fp, account_index, birthday)| {
-            let seed = seeds.get(&seed_fp).expect("present");
+    // All key material is in hand; import the accounts on a connection scoped to this
+    // block, so it is provably released before the decryptor is signalled below (a
+    // send on a bounded channel, which can wait while the decryptor is busy).
+    let accounts = {
+        let mut wallet = wallet_handle(wallet).await?;
+        account_args
+            .into_iter()
+            .map(|(account_name, seed_fp, account_index, birthday)| {
+                let seed = seeds.get(&seed_fp).expect("present");
 
-            let (account, _usk) = wallet
-                .import_account_hd(account_name, seed, account_index, &birthday, None)
-                .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+                let (account, _usk) = wallet
+                    .as_mut()
+                    .import_account_hd(account_name, seed, account_index, &birthday, None)
+                    .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
-            Ok::<_, ErrorObjectOwned>(Account {
-                account_uuid: account.id().expose_uuid().to_string(),
-                seedfp: seed_fp.to_string(),
-                zip32_account_index: account_index.into(),
+                Ok::<_, ErrorObjectOwned>(Account {
+                    account_uuid: account.id().expose_uuid().to_string(),
+                    seedfp: seed_fp.to_string(),
+                    zip32_account_index: account_index.into(),
+                })
             })
-        })
-        .collect::<Result<_, _>>()?;
+            .collect::<Result<_, _>>()?
+    };
 
     // Reload viewing keys so recovered accounts are scanned without a restart (see z_importkey).
     if decryptor.reload_keys().await.is_none() {

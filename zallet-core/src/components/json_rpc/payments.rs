@@ -26,6 +26,7 @@ use zcash_client_backend::{
 };
 use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, wallet::Account};
 use zcash_keys::{address::Address, keys::UnifiedFullViewingKey};
+use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
     PoolType, ShieldedPool, TxId,
     memo::MemoBytes,
@@ -1336,21 +1337,24 @@ fn proposed_transparent_payments<FeeRuleT, NoteRef>(
         .collect()
 }
 
-/// Verifies the built transactions against the proposal and the account's seed-derived
-/// key material, then broadcasts them to the network, if configured to do so.
+/// Reads the built transactions from the wallet and verifies their transparent outputs
+/// against the proposal and the account's seed-derived key material.
 ///
 /// A transaction containing a transparent output that verifies neither as a payment
 /// requested by the proposal nor as an address derived from `ufvk` (see
-/// [`check_transparent_outputs`]) is never handed to the broadcast step. `ufvk` must be
-/// derived from the wallet seed, not read from the database.
-pub(super) async fn verify_and_broadcast_transactions<C: Chain, FeeRuleT, NoteRef>(
+/// [`check_transparent_outputs`]) is rejected rather than returned for broadcast. `ufvk`
+/// must be derived from the wallet seed, not read from the database.
+///
+/// This is the database half of sending: it is synchronous, so the caller's pooled
+/// connection cannot be held across an await here. Release that connection before the
+/// async [`broadcast_transactions`] half, which needs no database access.
+pub(super) fn verify_transactions<FeeRuleT, NoteRef>(
     wallet: &DbConnection,
-    chain: C,
     account_id: AccountUuid,
     ufvk: &UnifiedFullViewingKey,
     proposal: &Proposal<FeeRuleT, NoteRef>,
-    txids: Vec<TxId>,
-) -> RpcResult<SendResult> {
+    txids: &[TxId],
+) -> RpcResult<Vec<Transaction>> {
     let params = *wallet.params();
     let expected_payments = proposed_transparent_payments(&params, proposal)?;
 
@@ -1419,6 +1423,19 @@ pub(super) async fn verify_and_broadcast_transactions<C: Chain, FeeRuleT, NoteRe
         transactions.push(tx);
     }
 
+    Ok(transactions)
+}
+
+/// Broadcasts transactions already verified by [`verify_transactions`].
+///
+/// The network half of sending: it touches no wallet database state, so callers MUST
+/// release their pooled connection before awaiting it. A slow or unresponsive node
+/// otherwise pins a connection per in-flight send (see `Database::handle`).
+pub(super) async fn broadcast_transactions<C: Chain>(
+    chain: C,
+    txids: Vec<TxId>,
+    transactions: Vec<Transaction>,
+) -> RpcResult<SendResult> {
     let broadcast = APP.config().external.broadcast();
     if broadcast {
         for tx in &transactions {
