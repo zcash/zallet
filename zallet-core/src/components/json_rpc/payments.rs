@@ -2340,10 +2340,10 @@ mod recipient_preflight_tests {
     /// A raw zatoshi amount, for terse fixtures.
     ///
     /// This is `zcash_protocol::value::testing::zats` verbatim, inlined only because that
-    /// module cannot be enabled here: every `test-dependencies` feature in librustzcash at
-    /// the pinned revision constrains `proptest` to `<1.7`, and this workspace is on 1.11,
-    /// so turning any of them on fails resolution outright. Everything else in this module
-    /// composes the crates' ordinary public constructors.
+    /// module is not enabled here: the librustzcash `test-dependencies` features require
+    /// `proptest` 1.12, and this workspace is locked to 1.11, so turning them on is a
+    /// dependency bump of its own. Everything else in this module composes the crates'
+    /// ordinary public constructors.
     const fn zats(amount: u64) -> Zatoshis {
         Zatoshis::const_from_u64(amount)
     }
@@ -2431,7 +2431,7 @@ mod recipient_preflight_tests {
     /// assert on a key that cannot exist.
     ///
     /// `zcash_keys` ships `arb_unified_addr` for exactly this, but its `test-dependencies`
-    /// feature is unusable here (see `Cargo.toml`), so this composes the crate's ordinary
+    /// feature is not enabled here (see [`zats`]), so this composes the crate's ordinary
     /// public constructors instead.
     fn ufvk(seed: &[u8; 32]) -> Option<UnifiedFullViewingKey> {
         UnifiedSpendingKey::from_seed(&CONSENSUS_NETWORK, seed, AccountId::ZERO)
