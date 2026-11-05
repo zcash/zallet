@@ -26,6 +26,53 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- `z_sendmany` and `pczt_create` now check a request's recipients against the
+  account's real per-pool balances, rather than assuming every pool holds the
+  entire money supply. A payment that no single shielded pool can cover has to
+  cross between pools, which reveals the crossing amount, so under the default
+  `privacyPolicy` of `FullPrivacy` it is now rejected up front, naming the
+  policy that would permit it. Previously the conflict was only noticed after
+  input selection had run, and was reported either as a different privacy error
+  or as a generic proposal failure that did not mention the privacy policy at
+  all.
+
+  Only the funds the request may spend are counted: a `fromaddress` (or
+  `pczt_create` `fund_source`) that limits which pools the send draws on is
+  checked against those pools' balances alone, so funds held elsewhere in the
+  account no longer make a send look payable that is not. A source that may
+  spend no shielded pool, such as a transparent address, is not checked here
+  against shielded recipients; the transaction proposal reports the
+  sender-revealing policy such a send requires.
+
+  Which pool pays an Orchard receiver depends on the height the transaction
+  targets. From NU6.3 the Orchard turnstile is one-way — value may leave the
+  Orchard pool but never enter it — so a payment to an Orchard receiver is
+  delivered in the Ironwood pool, and only Ironwood funds can cover it without
+  crossing. The recipient's address is unchanged; there is no Ironwood receiver
+  type, and an Ironwood note is received at an Orchard receiver.
+
+  A consequence worth planning for: once NU6.3 activates, an account whose
+  shielded funds are all in the legacy Orchard pool cannot pay anyone under the
+  default `FullPrivacy` policy, because every external payment moves that value
+  across the turnstile and reveals its amount. Such sends need `privacyPolicy`
+  set to `AllowRevealedAmounts` or weaker, or the funds migrated to Ironwood
+  first. This is NU6.3 behaviour rather than a change of policy — Zallet now
+  reports it up front instead of after input selection has run.
+
+  These methods now require the wallet to have completed enough sync to report
+  balances and to name the height its transaction would target, and return the
+  same "Wallet sync required" error as `z_getbalanceforaccount` if it has not.
+
+- `z_sendmany`, `z_sendfromaccount` and `pczt_create` now reject a recipient
+  address that belongs to another network alongside their other address
+  validation, before the wallet is consulted at all, and name the offending
+  address: `Invalid parameter, address not valid on this network: <address> (<reason>)`.
+  Previously such an address was reported later, from the privacy check, as a
+  bare "Address is for Main but we expected Test" with nothing to identify which
+  recipient was at fault.
+
 ## [0.1.0-beta.4] - 2026-11-01
 
 ### Added
