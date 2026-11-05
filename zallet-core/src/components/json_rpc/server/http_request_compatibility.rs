@@ -112,9 +112,13 @@ impl<S> HttpRequestMiddleware<S> {
 
     /// Maps whatever JSON-RPC version the client is using to JSON-RPC 2.0.
     ///
-    /// Returns an error response to send back instead, if the request body could not
-    /// be buffered: `413 Payload Too Large` if it exceeds
+    /// Returns an error response to send back instead, if the request body could
+    /// not be buffered: `413 Payload Too Large` if it exceeds
     /// [`Self::MAX_REQUEST_BODY_SIZE`], or `400 Bad Request` if reading it failed.
+    // The `Err` variant is `jsonrpsee::server::HttpResponse` (an upstream type
+    // we cannot shrink); allow clippy's large-error lint rather than boxing it
+    // and paying a heap allocation on the error path.
+    #[allow(clippy::result_large_err)]
     async fn request_to_json_rpc_2(
         request: HttpRequest<HttpBody>,
     ) -> Result<(JsonRpcVersion, HttpRequest<HttpBody>), HttpResponse> {

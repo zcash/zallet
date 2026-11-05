@@ -1,8 +1,16 @@
+// The `#[rpc(server)]` proc macro from jsonrpsee emits `#[must_use]` on the
+// generated trait server methods, which already return `#[must_use]` types
+// (`RpcResult`). Clippy's `double_must_use` lint fires on this upstream macro
+// expansion; allow it module-wide until jsonrpsee ships a fix.
+#![allow(clippy::double_must_use)]
+
 use async_trait::async_trait;
 use jsonrpsee::{
     core::{JsonValue, RpcResult},
     proc_macros::rpc,
 };
+#[cfg(zallet_build = "wallet")]
+use zcash_protocol::consensus::Parameters;
 
 use crate::components::{
     chain::Chain,
@@ -17,6 +25,15 @@ use {
         json_rpc::payments::AmountParameter, keystore::KeyStore, sync::WalletDecryptorHandle,
     },
 };
+
+/// The JSON-RPC methods that are only available when Zallet is running on the regtest
+/// network.
+///
+/// These methods return a "method not found" error on other networks, and `help` hides
+/// them there. Every method gated on `NetworkType::Regtest` in its `call` implementation
+/// must be listed here.
+#[cfg(zallet_build = "wallet")]
+const REGTEST_ONLY_METHODS: &[&str] = &["stop"];
 
 mod convert_tex;
 mod decode_raw_transaction;
@@ -71,6 +88,8 @@ mod pczt_prove;
 mod pczt_sign;
 #[cfg(zallet_build = "wallet")]
 mod recover_accounts;
+#[cfg(zallet_build = "wallet")]
+mod sign_message;
 mod stop;
 #[cfg(zallet_build = "wallet")]
 mod unlock_wallet;
@@ -349,11 +368,14 @@ pub(crate) trait Rpc {
 pub(crate) trait WalletRpc {
     /// List all commands, or get help for a specified command.
     ///
+    /// Commands that are not available on the network this node is running on (such as
+    /// regtest-only commands) are omitted.
+    ///
     /// # Arguments
     /// - `command` (string, optional) The command to get help on.
     // TODO: Improve the build script so this works with non-wallet Zallet builds.
     #[method(name = "help")]
-    fn help(&self, command: Option<&str>) -> help::Response;
+    async fn help(&self, command: Option<&str>) -> help::Response;
 
     /// Returns an OpenRPC schema as a description of this service.
     // TODO: Improve the build script so this works with non-wallet Zallet builds.
@@ -961,6 +983,14 @@ pub(crate) trait WalletRpc {
     /// - `pczt` (string, required) The base64-encoded PCZT to extract from.
     #[method(name = "pczt_extract")]
     async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response;
+
+    /// Sign a message with the private key of a transparent address.
+    ///
+    /// # Arguments
+    /// - `t_addr` (string, required): The transparent address to use to look up the private key that will be used to sign the message.
+    /// - `message` (string, required): The message to create a signature of.
+    #[method(name = "signmessage")]
+    async fn sign_message(&self, t_addr: &str, message: &str) -> sign_message::Response;
 }
 
 pub(crate) struct RpcImpl<C: Chain> {
@@ -1186,8 +1216,8 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
 #[cfg(zallet_build = "wallet")]
 #[async_trait]
 impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
-    fn help(&self, command: Option<&str>) -> help::Response {
-        help::call(command)
+    async fn help(&self, command: Option<&str>) -> help::Response {
+        help::call(self.wallet().await?.params().network_type(), command)
     }
 
     fn openrpc(&self) -> openrpc::Response {
@@ -1486,5 +1516,15 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
     async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response {
         self.general.ensure_synced()?;
         pczt_extract::call(self.wallet().await?, pczt).await
+    }
+
+    async fn sign_message(&self, t_addr: &str, message: &str) -> sign_message::Response {
+        sign_message::call(
+            self.wallet().await?.as_ref(),
+            &self.keystore,
+            t_addr,
+            message,
+        )
+        .await
     }
 }

@@ -46,6 +46,9 @@ Returns wallet status information.
 
 List all commands, or get help for a specified command.
 
+Commands that are not available on the network this node is running on (such as
+regtest-only commands) are omitted.
+
 #### Arguments
 - `command` (string, optional) The command to get help on.
 
@@ -208,6 +211,16 @@ sign anything that reveals more.
 *Only available in wallet builds of Zallet.*
 
 Returns an OpenRPC schema as a description of this service.
+
+## `signmessage`
+
+*Only available in wallet builds of Zallet.*
+
+Sign a message with the private key of a transparent address.
+
+#### Arguments
+- `t_addr` (string, required): The transparent address to use to look up the private key that will be used to sign the message.
+- `message` (string, required): The message to create a signature of.
 
 ## `stop`
 

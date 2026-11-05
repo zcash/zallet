@@ -4,13 +4,20 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::{
     cli::AddRpcUserCmd,
     commands::AsyncRunnable,
-    components::json_rpc::server::authorization::PasswordHash,
+    components::json_rpc::server::{authorization::PasswordHash, cookie},
     error::{Error, ErrorKind},
     fl,
 };
 
 impl AsyncRunnable for AddRpcUserCmd {
     async fn run(&self) -> Result<(), Error> {
+        // Refuse to emit a config block that Zallet would reject at startup.
+        if self.username == cookie::COOKIE_USER {
+            return Err(ErrorKind::Generic
+                .context(fl!("cmd-add-rpc-user-reserved", user = cookie::COOKIE_USER))
+                .into());
+        }
+
         let password = SecretString::new(
             rpassword::prompt_password(fl!("cmd-add-rpc-user-prompt"))
                 .map_err(|e| ErrorKind::Generic.context(e))?,

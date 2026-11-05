@@ -18,48 +18,47 @@ the simplest options:
 
 ## Choosing a chain backend
 
-Zallet supports two chain backends. Each is a separate binary (built from its own cargo
-workspace, so the two can track different `zebra` releases), and the `zallet` command is
-a small launcher that runs whichever backend your config file names:
+Each chain backend is a separate binary, built from its own cargo workspace so that it
+can track its own `zebra` release. The `zallet` command is a small launcher that runs
+whichever backend your config file names:
 
 ```toml
 # zallet.toml — the default if the key is absent is "zebra"
-backend = "zaino"
+backend = "zebra"
 ```
 
 | Backend | Default | Platform | Reaches the chain via | Requires | Regtest |
 |---------|:-------:|----------|-----------------------|----------|:-------:|
-| `zebra` | Yes | Linux only | co-located `zebrad`'s state database (`ReadStateService`) | `zebrad` built with the `indexer` feature + `[indexer.read_state_service]` config + shared state dir | No |
-| `zaino` | No | Linux, macOS, Windows | co-located `zebrad`'s JSON-RPC endpoint (optionally reads state directly when `[indexer.read_state_service]` is set) | co-located `zebrad` JSON-RPC endpoint | Yes |
+| `zebra` | Yes | Linux only | co-located `zebrad`'s state database (`ReadStateService`) | `zebrad` built with the `indexer` feature + `[indexer.read_state_service]` config + shared state dir | Yes |
 
-The **`zebra` backend** is the default. It reads finalized chain state directly from
-a co-located `zebrad`'s state database and is the recommended choice for production
-mainnet use on Linux. It **only works against a `zebrad` built with the non-default
-`indexer` feature**.
-
-The **`zaino` backend** fetches chain data over JSON-RPC. It is the only backend that
-supports regtest and non-Linux platforms, and it does **not** require the `zebrad`
-`indexer` feature — so it is the right choice when Zebra and Zallet run as separate
-services/containers over JSON-RPC (for example, the stock `zfnd/zebra` images or the
-[z3](https://github.com/ZcashFoundation/z3) stack), or when you need regtest.
+The **`zebra` backend** reads finalized chain state directly from a co-located
+`zebrad`'s state database. It **only works against a `zebrad` built with the
+non-default `indexer` feature**, and `zebrad`'s state directory must be on the same
+machine as Zallet. In a container deployment, mount `zebrad`'s state directory into the
+Zallet container (see [Docker](docker.md)).
 
 ### Pre-compiled artifacts (Docker image / Debian package)
 
-The official Docker image and Debian package ship the launcher and **both** backends:
+The official Docker image and Debian package ship the launcher and the backend:
 
 | Binary | Role | Notes |
 |--------|------|-------|
 | `zallet` | launcher | the default command / image `ENTRYPOINT`; dispatches on the config's `backend` key |
 | `zallet-zebra` | `zebra` backend | directly runnable |
-| `zallet-zaino` | `zaino` backend | directly runnable |
 
-All three share the same CLI surface, config format, and subcommands; only the chain-data
-backend differs, and you can bypass the launcher by running a backend binary directly (it
-will refuse to run against a config whose `backend` key names the other backend). The
-GitHub Releases page ships one signed tarball per platform,
-`zallet-<version>-linux-<arch>.tar.gz`, containing all three binaries (`zallet`,
-`zallet-zebra`, `zallet-zaino`) side by side — extract it and run whichever one you need
+Both share the same CLI surface, config format, and subcommands. You can bypass the
+launcher by running the backend binary directly (it will refuse to run against a config
+whose `backend` key names a different backend). The GitHub Releases page ships one signed
+tarball per platform, `zallet-<version>-linux-<arch>.tar.gz`, containing both binaries
+(`zallet`, `zallet-zebra`) side by side — extract it and run whichever one you need
 directly, or run `zallet` for config-driven dispatch.
+
+All of these artifacts (the release tarballs, the Docker image, and the Debian package)
+are built with the `rpc-cli` and `zcashd-import` features, so they include the
+[`zallet rpc`](../../cli/rpc.md) client and the `zcashd` migration commands
+[`migrate-zcash-conf`](../../cli/migrate-zcash-conf.md) and
+[`migrate-zcashd-wallet`](../../cli/migrate-zcashd-wallet.md). If you are migrating
+from `zcashd`, any of them will do.
 
 ### Building from source with a chosen backend
 
@@ -68,17 +67,18 @@ want by name (plus the launcher, if you want config-driven dispatch):
 
 ```
 # The zebra backend (Linux only, reads zebrad's state database)
-cargo install --locked --git https://github.com/zcash/zallet.git zallet-zebra
-
-# The zaino backend
-cargo install --locked --git https://github.com/zcash/zallet.git zallet-zaino
+cargo install --locked --git https://github.com/zcash/zallet.git zallet-zebra --features rpc-cli,zcashd-import
 
 # The launcher (optional; dispatches to whichever backend the config names)
 cargo install --locked --git https://github.com/zcash/zallet.git zallet
 ```
 
-Backend-independent features such as `rpc-cli` and `zcashd-import` are enabled per
-backend package with `--features` as usual.
+Backend-independent features are enabled per backend package with `--features`, and
+neither of the two you are likely to want is on by default: `rpc-cli` provides the
+[`zallet rpc`](../../cli/rpc.md) client, and `zcashd-import` provides the `zcashd`
+migration commands [`migrate-zcash-conf`](../../cli/migrate-zcash-conf.md) and
+[`migrate-zcashd-wallet`](../../cli/migrate-zcashd-wallet.md). A build without
+`zcashd-import` has no way to import a `wallet.dat`.
 
 ## Pre-compiled binaries
 

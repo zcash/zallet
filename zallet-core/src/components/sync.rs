@@ -38,7 +38,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use futures::{StreamExt as _, TryStreamExt as _};
+use futures::TryStreamExt as _;
 use jsonrpsee::tracing::{self, debug, info, warn};
 #[cfg(not(feature = "spend-index"))]
 use std::collections::HashSet;
@@ -172,11 +172,9 @@ impl WalletSync {
         // an atomic.
         let current_boundary = Arc::new(AtomicU32::new(starting_boundary.into()));
 
-        // TODO: Zaino should provide us an API that allows us to be notified when the chain tip
-        // changes; here, we produce our own signal via the "mempool stream closing" side effect
-        // that occurs in the light client API when the chain tip changes.
-        let tip_change_signal_source = Arc::new(Notify::new());
-        let req_tip_change_signal_receiver = tip_change_signal_source.clone();
+        // Wake the data-requests task after sync steps that can add or unblock requests.
+        let data_request_signal = Arc::new(Notify::new());
+        let data_request_signal_receiver = data_request_signal.clone();
 
         // Spawn the ongoing sync tasks.
         let steady_state_task = {
@@ -184,6 +182,7 @@ impl WalletSync {
             let lower_boundary = current_boundary.clone();
             let decryptor = decryptor.clone();
             let status = status.clone();
+            let data_request_signal = data_request_signal.clone();
             crate::spawn!("Steady state sync", async move {
                 steady_state(
                     chain,
@@ -191,7 +190,7 @@ impl WalletSync {
                     db_data.as_mut(),
                     starting_tip,
                     lower_boundary,
-                    tip_change_signal_source,
+                    data_request_signal,
                     decryptor,
                     shutdown_height,
                     status,
@@ -206,12 +205,14 @@ impl WalletSync {
             let chain = chain.clone();
             let mut db_data = db.handle().await?;
             let upper_boundary = current_boundary.clone();
+            let data_request_signal = data_request_signal.clone();
             crate::spawn!("Recover history", async move {
                 recover_history(
                     chain,
                     &params,
                     db_data.as_mut(),
                     upper_boundary,
+                    data_request_signal,
                     decryptor,
                     recover_batch_size,
                     shutdown_height,
@@ -229,7 +230,7 @@ impl WalletSync {
                 chain,
                 &params,
                 db_data.as_mut(),
-                req_tip_change_signal_receiver,
+                data_request_signal_receiver,
             )
             .await?;
             Ok(())
@@ -441,16 +442,20 @@ async fn initialize<C: Chain>(
     Ok((current_tip, starting_boundary))
 }
 
-/// How long to wait before re-pinning the chain view after a stale-view error, so a
-/// backend that is briefly unable to serve reads (still syncing its non-finalized state,
-/// or a reorg in progress) is not polled in a tight loop.
+/// How long to wait before re-pinning the chain view after a retryable chain error, so a
+/// backend that is briefly unable to serve reads or has expired a non-finalized view is not
+/// polled in a tight loop.
 const REORG_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
-/// Whether a sync error reflects a chain view that went stale mid-read — the captured
-/// snapshot referenced a non-finalized block that was reorged away — and so should be
-/// retried by re-pinning to the current tip, rather than propagated as fatal.
+/// Whether a sync error should be retried after re-pinning to the current tip, rather than
+/// propagated as fatal. `ViewExpired` is the precise fixed-view invalidation signal; the
+/// legacy `Unavailable` category remains retryable for backends that cannot classify the
+/// transient condition more precisely.
 fn is_retryable(error: &SyncError) -> bool {
-    matches!(error, SyncError::Chain(ChainError::Unavailable(_)))
+    matches!(
+        error,
+        SyncError::Chain(ChainError::Unavailable(_) | ChainError::ViewExpired(_))
+    )
 }
 
 /// How far back to step each time the wallet's recorded history is found to be off the
@@ -789,16 +794,15 @@ async fn steady_state<C: Chain>(
     db_data: &mut DbConnection,
     mut prev_tip: ChainBlock,
     lower_boundary: Arc<AtomicU32>,
-    tip_change_signal: Arc<Notify>,
+    data_request_signal: Arc<Notify>,
     decryptor: WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
     status: SyncStatusWriter,
 ) -> Result<(), SyncError> {
     info!("Steady-state sync task started");
 
-    // Wake up any tasks waiting on the tip-change signal, so they can service work that
-    // accumulated while the wallet was offline.
-    tip_change_signal.notify_one();
+    // Process data requests that accumulated while the wallet was offline.
+    data_request_signal.notify_one();
 
     let mut tree_recovery = TreeRecovery::default();
 
@@ -809,7 +813,7 @@ async fn steady_state<C: Chain>(
             db_data,
             &mut prev_tip,
             &lower_boundary,
-            &tip_change_signal,
+            &data_request_signal,
             &decryptor,
             shutdown_height,
             &status,
@@ -922,7 +926,7 @@ async fn steady_state_iteration<C: Chain>(
     db_data: &mut DbConnection,
     prev_tip: &mut ChainBlock,
     lower_boundary: &AtomicU32,
-    tip_change_signal: &Notify,
+    data_request_signal: &Notify,
     decryptor: &WalletDecryptorHandle,
     shutdown_height: Option<BlockHeight>,
     status: &SyncStatusWriter,
@@ -938,7 +942,7 @@ async fn steady_state_iteration<C: Chain>(
             current_tip.hash()
         );
         lower_boundary
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current_boundary| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current_boundary| {
                 Some(
                     update_boundary(
                         BlockHeight::from_u32(current_boundary),
@@ -948,7 +952,6 @@ async fn steady_state_iteration<C: Chain>(
                 )
             })
             .expect("closure always returns Some");
-        tip_change_signal.notify_one();
         status.set_tip(current_tip.height());
 
         // Find where the wallet's history rejoins the backend's best chain.
@@ -1011,6 +1014,9 @@ async fn steady_state_iteration<C: Chain>(
             // Now that we're done applying the block, update our chain pointer.
             *prev_tip = current_block;
         }
+
+        // Block scanning can add data requests. Notify after the database writes commit.
+        data_request_signal.notify_one();
     }
 
     // The backing node's tip may itself sit at or beyond the divergence height — e.g. the
@@ -1042,12 +1048,15 @@ async fn steady_state_iteration<C: Chain>(
         Some(mempool_stream) => {
             info!("Reached chain tip, streaming mempool");
             tokio::pin!(mempool_stream);
-            while let Some(tx) = mempool_stream.next().await {
+            while let Some(tx) = mempool_stream.try_next().await.map_err(SyncError::Chain)? {
                 info!("Scanning mempool tx {}", tx.txid());
                 // TODO: Route individual-transaction scanning through the batch
                 // decryptor (`Handle::queue_tx`) once a single-tx store path exists.
                 // See zcash/zallet#477.
                 decrypt_and_store_transaction(params, db_data, &tx, None)?;
+                // This stream stays open until the tip changes. Notify now so requests do not
+                // wait for the next block.
+                data_request_signal.notify_one();
             }
 
             // Mempool stream ended, signalling that the chain tip has changed.
@@ -1057,13 +1066,12 @@ async fn steady_state_iteration<C: Chain>(
         //
         // Yield to the runtime and pause briefly before re-iterating. `snapshot`,
         // `tip`, and `get_mempool_stream` can all return `Poll::Ready` from cached
-        // state (MockChain does, and the Zaino `FetchServiceSubscriber` was observed
-        // doing so in #136), so without this yield an aborted `steady_state` task
+        // state (MockChain does, and a backend was observed doing so in #136), so without this yield an aborted `steady_state` task
         // can complete a full iteration without ever polling its abort status,
         // spinning until the backend's view changes. The yield lets tokio observe
         // the abort and end the task; the sleep bounds the CPU cost of a non-aborted
         // task that is legitimately re-polling a backend serving a stale cached view
-        // (a backend contract violation, but one Zaino has been observed to exhibit).
+        // (a backend contract violation, but one that has been observed, #136).
         None if tip_changed => {
             tokio::task::yield_now().await;
             time::sleep(Duration::from_millis(500)).await;
@@ -1087,6 +1095,7 @@ async fn recover_history<C: Chain>(
     params: &Network,
     db_data: &mut DbConnection,
     upper_boundary: Arc<AtomicU32>,
+    data_request_signal: Arc<Notify>,
     decryptor: WalletDecryptorHandle,
     batch_size: u32,
     shutdown_height: Option<BlockHeight>,
@@ -1153,6 +1162,13 @@ async fn recover_history<C: Chain>(
                 .await
                 {
                     Ok(outcome) => break outcome,
+                    Err(error) if is_retryable(&error) => {
+                        warn!(
+                            "History recovery chain view became unavailable; re-pinning before \
+                             retrying {scan_range}: {error}"
+                        );
+                        time::sleep(REORG_RETRY_BACKOFF).await;
+                    }
                     Err(error)
                         if is_tree_divergence(&error) && attempt < TREE_DIVERGENCE_RETRIES =>
                     {
@@ -1169,6 +1185,10 @@ async fn recover_history<C: Chain>(
                     Err(error) => return Err(error),
                 }
             };
+            // `scan_blocks` may commit the prefix below a consensus-divergence boundary
+            // before returning `Break`, so signal before inspecting the outcome.
+            data_request_signal.notify_one();
+
             if outcome.is_break() {
                 // Reached the consensus-divergence height. History recovery operates below
                 // the boundary in practice, so this is belt-and-suspenders; stop scanning
@@ -1216,7 +1236,7 @@ fn address_request_bounds(
 }
 
 /// Services a [`TransactionDataRequest::TransactionsInvolvingAddress`] spend-search request on a
-/// backend without a per-outpoint spend index (the `zaino` build).
+/// backend without a per-outpoint spend index (a build without the `spend-index` feature).
 ///
 /// Cheap path first: diff the wallet's tracked unspent outputs at the address against the chain's
 /// current unspent set. Only if one of ours is missing (i.e. actually spent on chain) is the
@@ -1287,18 +1307,16 @@ async fn data_requests<C: Chain>(
     chain: C,
     params: &Network,
     db_data: &mut DbConnection,
-    tip_change_signal: Arc<Notify>,
+    data_request_signal: Arc<Notify>,
 ) -> Result<(), SyncError> {
     loop {
-        // Wait for the chain tip to advance
-        tip_change_signal.notified().await;
+        data_request_signal.notified().await;
 
         let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
 
         let requests = db_data.transaction_data_requests()?;
         if requests.is_empty() {
-            // Wait for new requests.
-            debug!("No transaction data requests, sleeping until the chain tip changes.");
+            debug!("No transaction data requests, waiting for new work.");
             continue;
         }
 
@@ -1352,7 +1370,7 @@ async fn data_requests<C: Chain>(
                 }
                 // With `spend-index`, spend detection uses `GetSpendingTx` (below) and any
                 // remaining `TransactionsInvolvingAddress` requests are ephemeral-address
-                // discovery, covered by full-block scanning. Without it (the `zaino` build),
+                // discovery, covered by full-block scanning. Without `spend-index`,
                 // these carry the spend-search requests and are serviced via address queries.
                 #[cfg(feature = "spend-index")]
                 TransactionDataRequest::TransactionsInvolvingAddress(_) => (),
@@ -1723,7 +1741,7 @@ mod tests {
     // arm of `steady_state_iteration` previously returned without an intervening
     // await, so against a `ChainView` whose `snapshot`, `tip`, and
     // `get_mempool_stream` all return `Poll::Ready` from cached state (the in-tree
-    // `MockChain`, and the Zaino `FetchServiceSubscriber` as reported in #136), the
+    // `MockChain`, and a backend as reported in #136), the
     // task could complete a full iteration without ever polling its abort status and
     // spin indefinitely. The fix inserts `tokio::task::yield_now().await` in that arm;
     // this test asserts the aborted task now exits within a bounded time.
@@ -1764,7 +1782,7 @@ mod tests {
         // subsequent iteration as well.
         let prev_tip = ChainBlock::new(BlockHeight::from_u32(0), BlockHash([0xff; 32]));
         let lower_boundary = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let tip_change_signal = std::sync::Arc::new(Notify::new());
+        let data_request_signal = std::sync::Arc::new(Notify::new());
 
         let steady_state_task = tokio::spawn(async move {
             steady_state(
@@ -1773,7 +1791,7 @@ mod tests {
                 db_data.as_mut(),
                 prev_tip,
                 lower_boundary,
-                tip_change_signal,
+                data_request_signal,
                 decryptor,
                 None,
                 status,
@@ -1916,6 +1934,13 @@ mod tests {
     #[test]
     fn stale_view_errors_are_retryable() {
         assert!(is_retryable(&SyncError::Chain(ChainError::unavailable(
+            "pinned block reorged away",
+        ))));
+    }
+
+    #[test]
+    fn expired_view_errors_are_retryable() {
+        assert!(is_retryable(&SyncError::Chain(ChainError::view_expired(
             "pinned block reorged away",
         ))));
     }
@@ -2071,7 +2096,7 @@ mod fork_fallback_tests {
 
         async fn get_mempool_stream(
             &self,
-        ) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+        ) -> Result<Option<BoxStream<'_, Result<Transaction, ChainError>>>, ChainError> {
             Ok(None)
         }
 

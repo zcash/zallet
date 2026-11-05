@@ -139,7 +139,7 @@ use crate::fl;
 
 use sapling::zip32::{DiversifiableFullViewingKey, ExtendedSpendingKey};
 
-#[cfg(feature = "zcashd-import")]
+#[cfg(feature = "transparent-key-import")]
 use {transparent::address::TransparentAddress, zcash_keys::address::Address};
 
 pub(super) mod db;
@@ -1110,7 +1110,7 @@ impl KeyStore {
         Ok(None)
     }
 
-    #[cfg(feature = "zcashd-import")]
+    #[cfg(feature = "transparent-key-import")]
     pub(crate) async fn decrypt_standalone_transparent_key(
         &self,
         address: &TransparentAddress,
@@ -1150,7 +1150,7 @@ impl KeyStore {
 
         // The ciphertext is not bound to the pubkey the row is keyed by, so verify that
         // the decrypted key reproduces the pubkey used for the lookup.
-        let pubkey = secret_key.public_key(&secp256k1::Secp256k1::signing_only());
+        let pubkey = secret_key.public_key();
         if pubkey.serialize()[..] != pubkey_bytes[..] {
             return Err(ErrorKind::Generic
                 .context(fl!("err-keystore-key-material-mismatch"))
@@ -1256,12 +1256,12 @@ impl Encryptor {
         encrypt_secret(&self.recipients, &secret)
     }
 
-    #[cfg(feature = "transparent-key-import")]
+    #[cfg(feature = "zcashd-import")]
     fn encrypt_standalone_transparent_privkey(
         &self,
         key: &secp256k1::SecretKey,
     ) -> Result<Vec<u8>, age::EncryptError> {
-        let secret = SecretVec::new(key.secret_bytes().to_vec());
+        let secret = SecretVec::new(key.to_secret_bytes().to_vec());
         encrypt_secret(&self.recipients, &secret)
     }
 }
@@ -1308,7 +1308,7 @@ impl EncryptedStandaloneSaplingKey {
     }
 }
 
-#[cfg(feature = "transparent-key-import")]
+#[cfg(feature = "zcashd-import")]
 pub(crate) struct EncryptedStandaloneTransparentKey {
     pubkey: secp256k1::PublicKey,
     encrypted_key_bytes: Vec<u8>,
@@ -1460,7 +1460,12 @@ fn decrypt_standalone_transparent_privkey(
 ) -> Result<secp256k1::SecretKey, Error> {
     let secret =
         decrypt_secret_bytes(identities, ciphertext).map_err(|e| ErrorKind::Generic.context(e))?;
-    let secret_key = secp256k1::SecretKey::from_slice(secret.expose_secret())
+    let secret_bytes: [u8; 32] = secret
+        .expose_secret()
+        .as_slice()
+        .try_into()
+        .map_err(|e| ErrorKind::Generic.context(e))?;
+    let secret_key = secp256k1::SecretKey::from_secret_bytes(secret_bytes)
         .map_err(|e| ErrorKind::Generic.context(e))?;
 
     Ok(secret_key)

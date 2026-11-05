@@ -4,14 +4,12 @@
 //! database (opened read-only as a RocksDB secondary) and follows the non-finalized
 //! tip over zebrad's gRPC indexer interface.
 //!
-//! Each backend carries its own copy of this module rather than sharing a crate: a
-//! shared crate's single manifest would bind both backend graphs to one zebra-state
-//! semver range (`[patch.crates-io]` cannot apply across a semver boundary, and
+//! This module lives in the backend rather than in a shared crate: a shared crate's
+//! single manifest would bind every backend that uses it to one zebra-state semver
+//! range (`[patch.crates-io]` cannot apply across a semver boundary, and
 //! librocksdb-sys's `links = "rocksdb"` forbids two zebra-state versions in one
 //! graph), recreating the coupling the split-workspace design (see
-//! <https://github.com/zcash/zallet/issues/540>) exists to remove. The copies may
-//! diverge as the backends' zebra-* versions do; when touching this file, check
-//! whether the sibling backend's copy needs the same change.
+//! <https://github.com/zcash/zallet/issues/540>) exists to remove.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -21,7 +19,7 @@ use tokio::net::lookup_host;
 use tokio::task::JoinHandle;
 use zcash_protocol::consensus::{NetworkType, NetworkUpgrade, Parameters};
 use zebra_rpc::sync::init_read_state_with_syncer;
-use zebra_state::{ChainTipChange, ReadStateService};
+use zebra_state::ReadStateService;
 
 /// A boxed error from the zebra crates.
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -130,7 +128,7 @@ pub fn network_to_zebra<P: Parameters>(
                 nu6_1: height(NetworkUpgrade::Nu6_1),
                 nu6_2: height(NetworkUpgrade::Nu6_2),
                 nu6_3: height(NetworkUpgrade::Nu6_3),
-                nu7: None,
+                nu7: height(NetworkUpgrade::Nu7),
             };
             Ok(ZebraNetwork::new_regtest(heights.into()))
         }
@@ -165,7 +163,7 @@ pub async fn init_read_state_service(
     zebra_network: &zebra_chain::parameters::Network,
     grpc_address: &str,
     zebra_state_path: PathBuf,
-) -> Result<(ReadStateService, ChainTipChange, JoinHandle<()>), ReadStateError> {
+) -> Result<(ReadStateService, JoinHandle<()>), ReadStateError> {
     // Resolve the gRPC indexer address used by the non-finalized syncer.
     let grpc_addr = lookup_host(grpc_address)
         .await
@@ -209,7 +207,7 @@ pub async fn init_read_state_service(
     }
 
     info!("Initializing read-only Zebra state service");
-    let (read_state_service, _latest_tip, tip_change, sync_task) =
+    let (read_state_service, _latest_tip, _tip_change, sync_task) =
         init_read_state_with_syncer(zebra_config, zebra_network, grpc_addr)
             .await
             // Outer JoinError from the spawned init task.
@@ -217,5 +215,79 @@ pub async fn init_read_state_service(
             // Inner BoxError from read-state initialization.
             .map_err(ReadStateError::Init)?;
 
-    Ok((read_state_service, tip_change, sync_task))
+    Ok((read_state_service, sync_task))
+}
+
+#[cfg(test)]
+mod tests {
+    use zallet_core::network::{Network, RegTestNuParam};
+    use zcash_protocol::consensus::{
+        BranchId, NetworkType, NetworkUpgrade as WalletUpgrade, Parameters, UPGRADES_IN_ORDER,
+    };
+    use zebra_chain::{block::Height, parameters::NetworkUpgrade};
+
+    use super::network_to_zebra;
+
+    /// Regtest activation height configured for NU6.3.
+    const NU6_3_HEIGHT: u32 = 50;
+    /// Regtest activation height configured for NU7.
+    const NU7_HEIGHT: u32 = 60;
+
+    fn nuparam(branch: BranchId, height: u32) -> RegTestNuParam {
+        RegTestNuParam::try_from(format!("{:08x}:{height}", u32::from(branch)))
+            .expect("well-formed regtest nuparam")
+    }
+
+    #[test]
+    fn regtest_activation_heights_are_forwarded_to_zebra() {
+        let nuparams = [
+            nuparam(BranchId::Nu6_3, NU6_3_HEIGHT),
+            nuparam(BranchId::Nu7, NU7_HEIGHT),
+        ];
+        let params = Network::from_type(NetworkType::Regtest, &nuparams);
+        let zebra_network = network_to_zebra(&params).expect("regtest maps to a Zebra network");
+        let activations = zebra_network.activation_list();
+
+        assert_eq!(
+            activations.get(&Height(NU6_3_HEIGHT)),
+            Some(&NetworkUpgrade::Nu6_3)
+        );
+        assert_eq!(
+            activations.get(&Height(NU7_HEIGHT)),
+            Some(&NetworkUpgrade::Nu7)
+        );
+    }
+
+    /// On Mainnet and Testnet, every network upgrade activates at the same height in the
+    /// wallet's consensus parameters and in the Zebra network the state reader uses, so
+    /// both interpret each block under the same consensus rules.
+    #[test]
+    fn public_network_activation_heights_match_zebra() {
+        for network_type in [NetworkType::Main, NetworkType::Test] {
+            let params = Network::from_type(network_type, &[]);
+            assert!(
+                params.activation_height(WalletUpgrade::Nu7).is_some(),
+                "NU7 is scheduled on {network_type:?}",
+            );
+
+            let zebra_network =
+                network_to_zebra(&params).expect("public networks map to a Zebra network");
+            let wallet_heights: Vec<_> = UPGRADES_IN_ORDER
+                .iter()
+                .map(|&nu| (nu, params.activation_height(nu).map(u32::from)))
+                .collect();
+            let zebra_heights: Vec<_> = UPGRADES_IN_ORDER
+                .iter()
+                .map(|&nu| {
+                    (
+                        nu,
+                        NetworkUpgrade::from(nu)
+                            .activation_height(&zebra_network)
+                            .map(|height| height.0),
+                    )
+                })
+                .collect();
+            assert_eq!(wallet_heights, zebra_heights, "{network_type:?}");
+        }
+    }
 }

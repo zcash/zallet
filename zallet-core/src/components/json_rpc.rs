@@ -32,6 +32,7 @@ pub(crate) mod methods;
 #[cfg(zallet_build = "wallet")]
 pub(crate) mod payments;
 pub(crate) mod server;
+mod unified_encoding;
 pub(crate) mod utils;
 
 /// The transport-security posture of a configured RPC bind address.

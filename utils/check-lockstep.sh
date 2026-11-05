@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Verify wallet-critical dependency lockstep across the three resolution graphs
-# (root, backends/zebra, backends/zaino).
+# Verify wallet-critical dependency lockstep across the resolution graphs
+# (root, backends/zebra).
 #
-# The split-workspace design (issue #540) deliberately lets the two backend
-# lockfiles diverge on the zebra-* and zaino-* dependency trees — that is the
-# point of the split, so a zebra bump touches only backends/zebra and a Zaino
-# bump only backends/zaino. Those crates are intentionally NOT checked here.
+# The split-workspace design (issue #540) deliberately lets each backend
+# lockfile diverge on its own chain-source dependency tree (zebra-*) — that is
+# the point of the split, so a zebra bump touches only backends/zebra. Those
+# crates are intentionally NOT checked here.
 #
-# Everything that touches persisted wallet state must NOT diverge: all three
-# binaries open the same wallet database, so a drifted zcash_client_sqlite (or
+# Everything that touches persisted wallet state must NOT diverge: every
+# binary opens the same wallet database, so a drifted zcash_client_sqlite (or
 # rusqlite, or any other wallet-critical crate) could apply different schema
 # migrations depending on which binary ran first. This script fails CI when any
 # such crate resolves to a different set of versions/sources in one lockfile, and
@@ -16,15 +16,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-LOCKFILES=(Cargo.lock backends/zebra/Cargo.lock backends/zaino/Cargo.lock)
-MANIFESTS=(Cargo.toml backends/zebra/Cargo.toml backends/zaino/Cargo.toml)
+LOCKFILES=(Cargo.lock backends/zebra/Cargo.lock)
+MANIFESTS=(Cargo.toml backends/zebra/Cargo.toml)
 
 # Packages whose versions must move in release lockstep.
 PACKAGES=(
   zallet/Cargo.toml
   zallet-core/Cargo.toml
   backends/zebra/Cargo.toml
-  backends/zaino/Cargo.toml
 )
 
 # The wallet-critical librustzcash stack: zcash_client_sqlite (which owns the
@@ -55,7 +54,7 @@ WALLET_CRATES=(
 )
 
 # Additional lockstep set: the union of [patch.crates-io] package names across
-# the three workspace manifests (honouring `package = "..."` renames) so that a
+# the workspace manifests (honouring `package = "..."` renames) so that a
 # shared patched crate such as `age` stays consistent, plus wallet-database
 # crates that are neither patched nor part of the librustzcash stack.
 EXTRA_CRATES=(rusqlite)
@@ -103,10 +102,10 @@ resolved() {
 
 fail=0
 
-# The zebra-* and zaino-* trees are the divergence the split exists to allow
-# (see the header above): a backend pinning its own chain-source crates via
-# [patch.crates-io] must not drag the other backend into lockstep with it.
-mapfile -t lockstep_crates < <(patch_crates "${MANIFESTS[@]}" | grep -Ev '^(zebra|zaino)-')
+# The zebra-* tree is the divergence the split exists to allow (see the header
+# above): a backend pinning its own chain-source crates via [patch.crates-io]
+# must not drag the other workspaces into lockstep with it.
+mapfile -t lockstep_crates < <(patch_crates "${MANIFESTS[@]}" | grep -Ev '^zebra-')
 lockstep_crates+=("${WALLET_CRATES[@]}" "${EXTRA_CRATES[@]}")
 # De-duplicate in case an explicit wallet crate is also patched.
 mapfile -t lockstep_crates < <(printf '%s\n' "${lockstep_crates[@]}" | sort -u)
@@ -150,8 +149,8 @@ done
 
 if [[ "$fail" -ne 0 ]]; then
   echo "" >&2
-  echo "Wallet-critical dependencies must resolve identically in all three" >&2
-  echo "lockfiles; align the version requirements across the root and backend" >&2
+  echo "Wallet-critical dependencies must resolve identically in every" >&2
+  echo "lockfile; align the version requirements across the root and backend" >&2
   echo "manifests, then run utils/sync-lockfiles.sh. See utils/check-lockstep.sh." >&2
   exit 1
 fi

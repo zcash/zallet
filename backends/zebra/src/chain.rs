@@ -98,9 +98,7 @@ impl ZebraChain {
         )?;
 
         // Open zebrad's state read-only and start the non-finalized syncer.
-        // The chain-tip-change watcher is only needed by the zaino backend's
-        // `ValidatorConnector::State`; this backend follows the tip directly.
-        let (read_state_service, _chain_tip_change, sync_task) = {
+        let (read_state_service, sync_task) = {
             let zebra_network =
                 network_to_zebra(&params).map_err(|e| ErrorKind::Init.context(e))?;
             init_read_state_service(
@@ -276,7 +274,7 @@ impl<R: ChainReader> ZebraChainView<R> {
                 .block_header_by_hash(cur_hash)
                 .await?
                 .ok_or_else(|| {
-                    ChainError::unavailable("pinned block reorged away during resolve")
+                    ChainError::view_expired("pinned block reorged away during resolve")
                 })?;
             cur_hash = header.previous_block_hash;
             cur_height = BlockHeight::from_u32(u32::from(cur_height) - 1);
@@ -346,7 +344,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
                      after that pool's activation; refusing to substitute an empty frontier"
                 ))
             } else {
-                ChainError::unavailable(format!("pinned {pool} treestate reorged away"))
+                ChainError::view_expired(format!("pinned {pool} treestate reorged away"))
             }
         };
         let absent_tree_is_empty = |pool: TreePool| {
@@ -436,7 +434,9 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
         self.stream_blocks_inner(range.start, range.end - 1)
     }
 
-    async fn get_mempool_stream(&self) -> Result<Option<BoxStream<'_, Transaction>>, ChainError> {
+    async fn get_mempool_stream(
+        &self,
+    ) -> Result<Option<BoxStream<'_, Result<Transaction, ChainError>>>, ChainError> {
         // If the tip already moved past the captured view, signal "tip changed" (no stream).
         let current_tip = self.reader.tip().await?;
         if current_tip.map(|t| t.hash()) != Some(self.tip.hash()) {
@@ -452,7 +452,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
             tip_hash: BlockHash,
             branch_id: BranchId,
             seen: HashSet<String>,
-            pending: VecDeque<Transaction>,
+            pending: VecDeque<Result<Transaction, ChainError>>,
             interval: tokio::time::Interval,
         }
 
@@ -508,7 +508,7 @@ impl<R: ChainReader> ChainView for ZebraChainView<R> {
                         }
                     };
                     match Transaction::read(&bytes[..], s.branch_id) {
-                        Ok(tx) => s.pending.push_back(tx),
+                        Ok(tx) => s.pending.push_back(Ok(tx)),
                         Err(e) => warn!("invalid mempool transaction: {e}"),
                     }
                 }
@@ -913,8 +913,8 @@ mod tests {
 
     #[tokio::test]
     async fn tree_state_as_of_still_reports_reorged_away_non_finalized_trees() {
-        // Above the finalized floor the pre-existing behaviour is unchanged: a missing tree
-        // means the pinned hash left the best chain, regardless of activation.
+        // Above the finalized floor a missing tree means the pinned hash left the best chain,
+        // so the fixed view has expired regardless of activation.
         let calls = Arc::new(AtomicU32::new(0));
         let view = test_view_with_params(10, 2, calls, regtest_with_all_pools_at(9));
 
@@ -923,6 +923,6 @@ mod tests {
             .await
             .expect_err("a non-finalized height with no tree bytes is unavailable");
 
-        assert!(matches!(err, ChainError::Unavailable(_)));
+        assert!(matches!(err, ChainError::ViewExpired(_)));
     }
 }

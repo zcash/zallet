@@ -115,28 +115,34 @@ pub(super) fn build_request(
             )));
         }
 
+        let memo = amount.memo().as_deref().map(parse_memo).transpose()?;
+        let value = zatoshis_from_value(amount.amount())?;
+
+        let payment =
+            Payment::new(addr.clone(), Some(value), memo, None, None, vec![]).map_err(|e| {
+                LegacyCode::InvalidParameter.with_static(match e {
+                    zcash_client_backend::zip321::PaymentError::TransparentMemo => {
+                        "Cannot send memo to transparent recipient"
+                    }
+                    zcash_client_backend::zip321::PaymentError::ZeroValuedTransparentOutput => {
+                        "Cannot send zero-valued output to transparent recipient"
+                    }
+                    zcash_client_backend::zip321::PaymentError::SproutAddress => {
+                        "Sending funds into the Sprout pool is no longer supported."
+                    }
+                })
+            })?;
+
         // A syntactically valid address may still belong to another network, or name a
         // receiver this build cannot resolve. Rejecting it here keeps address validation in
-        // one place, and reports it before the wallet is consulted at all.
+        // one place, and reports it before the wallet is consulted at all. It runs after
+        // `Payment::new` so that a Sprout recipient, which is not valid on any network, keeps
+        // `zcashd`'s dedicated message rather than this generic one.
         Address::try_from_zcash_address(params, addr.clone()).map_err(|e| {
             LegacyCode::InvalidParameter.with_message(format!(
                 "Invalid parameter, address not valid on this network: {} ({e})",
                 amount.address(),
             ))
-        })?;
-
-        let memo = amount.memo().as_deref().map(parse_memo).transpose()?;
-        let value = zatoshis_from_value(amount.amount())?;
-
-        let payment = Payment::new(addr, Some(value), memo, None, None, vec![]).map_err(|e| {
-            LegacyCode::InvalidParameter.with_static(match e {
-                zcash_client_backend::zip321::PaymentError::TransparentMemo => {
-                    "Cannot send memo to transparent recipient"
-                }
-                zcash_client_backend::zip321::PaymentError::ZeroValuedTransparentOutput => {
-                    "Cannot send zero-valued output to transparent recipient"
-                }
-            })
         })?;
 
         payments.push(payment);
@@ -178,6 +184,15 @@ pub(super) fn confirmations_policy_for_minconf(
 /// account's other transparent receivers. Every other source stays shielded-only, so a
 /// shielded send can never silently reach into transparent funds.
 ///
+/// A shielded source selects inputs only from the value pools its receivers name, as the
+/// `z_sendmany` documentation promises: a bare Sapling address or a Sapling-only unified
+/// address does not reach into the account's Orchard notes, and an Orchard-only unified
+/// address does not reach into its Sapling notes. An Orchard receiver corresponds to both
+/// the Orchard pool and the Ironwood pool: once Ironwood is active, payments to Orchard
+/// receivers are accounted to the Ironwood bundle, so an Orchard-receiver source must be
+/// able to draw on both. A unified address's transparent receiver deliberately does *not*
+/// permit transparent spending (see above).
+///
 /// Coinbase UTXOs are excluded: `TransparentSpendPolicy` defaults to
 /// `CoinbasePolicy::NonCoinbase`, and consensus requires coinbase to be spent to a single
 /// shielded output, which is `z_shieldcoinbase`'s job.
@@ -186,10 +201,33 @@ pub(super) fn confirmations_policy_for_minconf(
 /// proposal, and [`enforce_privacy_policy`] rejects it afterwards if it leaks more than the
 /// caller permitted.
 pub(super) fn spend_policy_for(source: &Address) -> SpendPolicy {
+    /// The pools an Orchard receiver's funds can live in.
+    const ORCHARD_RECEIVER_POOLS: [ShieldedPool; 2] =
+        [ShieldedPool::Orchard, ShieldedPool::Ironwood];
+
     match source {
         Address::Transparent(taddr) => SpendPolicy::shielded_pools([])
             .with_transparent(TransparentSpendPolicy::from_one_address(*taddr)),
-        _ => SpendPolicy::default(),
+        Address::Sapling(_) => SpendPolicy::shielded_pools([ShieldedPool::Sapling]),
+        Address::Unified(ua) => SpendPolicy::shielded_pools(
+            ua.sapling()
+                .is_some()
+                .then_some(ShieldedPool::Sapling)
+                .into_iter()
+                .chain(
+                    ua.orchard()
+                        .is_some()
+                        .then_some(ORCHARD_RECEIVER_POOLS)
+                        .into_iter()
+                        .flatten(),
+                ),
+        ),
+        // A TEX address (ZIP 320) names transparent funds held by a counterparty and
+        // cannot correspond to a wallet account, so no spend policy applies; account
+        // resolution rejects it before this is consulted. Named explicitly (rather
+        // than `_`) so that a future `Address` variant is a compile error here
+        // instead of silently receiving an empty spend policy.
+        Address::Tex(_) => SpendPolicy::shielded_pools([]),
     }
 }
 
@@ -312,11 +350,11 @@ fn check_recipients_against_privacy_policy(
                 match (
                     privacy_policy.allow_revealed_amounts(),
                     (
-                        ua.receiver_types().contains(&unified::Typecode::Orchard),
+                        ua.receiver_types().contains(&unified::Typecode::ORCHARD),
                         max_orchard_receiver_available - value,
                     ),
                     (
-                        ua.receiver_types().contains(&unified::Typecode::Sapling),
+                        ua.receiver_types().contains(&unified::Typecode::SAPLING),
                         max_sapling_available - value,
                     ),
                 ) {
@@ -479,7 +517,7 @@ pub(super) fn propose_and_check(
             kind = e.kind,
             limit = actions_limit,
             config = "-orchardactionlimit=N",
-            bound = format!("N >= %u"),
+            bound = "N >= %u".to_string(),
         ))
     })?;
 
@@ -1476,7 +1514,7 @@ pub(super) async fn verify_and_broadcast_transactions<C: Chain, FeeRuleT, NoteRe
             })
             .unwrap_or_default();
 
-        check_transparent_outputs(outputs, expected, ufvk.transparent(), |addr| {
+        check_transparent_outputs(outputs, expected, ufvk.p2pkh(), |addr| {
             wallet
                 .get_transparent_address_metadata(account_id, addr)
                 .map(|meta| meta.map(|m| m.source().clone()))
@@ -1636,7 +1674,7 @@ mod transparent_output_tests {
         let account = AccountId::try_from(account).ok()?;
         let usk =
             UnifiedSpendingKey::from_seed(&consensus::Network::TestNetwork, seed, account).ok()?;
-        usk.to_unified_full_viewing_key().transparent().cloned()
+        usk.to_unified_full_viewing_key().p2pkh().cloned()
     }
 
     /// The address the wallet would legitimately place at (`scope`, `index`) under `key`.
@@ -1926,6 +1964,7 @@ mod build_request_tests {
 
     use proptest::prelude::*;
 
+    use zcash_address::ToAddress;
     use zcash_protocol::consensus;
 
     use super::arb::*;
@@ -2078,6 +2117,26 @@ mod build_request_tests {
             let request = build_request(&params(), &amounts)
                 .expect("a batch of distinct mixed-protocol recipients should build a request");
             prop_assert_eq!(request.payments().len(), pool_indices.len());
+        }
+
+        /// A Sprout recipient is rejected as an invalid parameter, as in `zcashd`, on
+        /// every network and for every Sprout payload.
+        #[test]
+        fn rejects_a_sprout_recipient(
+            net in prop_oneof![
+                Just(consensus::Network::MainNetwork),
+                Just(consensus::Network::TestNetwork),
+            ],
+            payload in prop::array::uniform(any::<u8>()),
+        ) {
+            let sprout = ZcashAddress::from_sprout(net.network_type(), payload).encode();
+            let err = build_request(&Network::Consensus(net), &[amount(&sprout, "0.1")])
+                .expect_err("a Sprout recipient should be rejected");
+            prop_assert_eq!(
+                err,
+                LegacyCode::InvalidParameter
+                    .with_static("Sending funds into the Sprout pool is no longer supported.")
+            );
         }
     }
 }
@@ -2782,8 +2841,9 @@ mod proposal_policy_tests {
     fn note_in_pool(pool: ShieldedPool, value: u64) -> Note {
         match pool {
             ShieldedPool::Sapling => {
-                let (_, recipient) =
-                    sapling::zip32::ExtendedSpendingKey::master(&[0x2a; 32]).default_address();
+                let (_, recipient) = sapling::zip32::ExtendedSpendingKey::master(&[0x2a; 32])
+                    .expect("the test seed derives a valid master key")
+                    .default_address();
                 Note::Sapling(sapling::Note::from_parts(
                     recipient,
                     sapling::value::NoteValue::from_raw(value),

@@ -13,10 +13,11 @@ affect:
   the backend binaries, for anyone implementing a chain backend against it.
 - [`backends/zebra/CHANGELOG.md`](backends/zebra/CHANGELOG.md) — the
   `zallet-zebra` binary, for operators running the Zebra read-state backend.
-- [`backends/zaino/CHANGELOG.md`](backends/zaino/CHANGELOG.md) — the
-  `zallet-zaino` binary, for operators running the Zaino indexer backend.
 
-All four packages move in release lockstep and share one version number, so the
+The removed `zallet-zaino` binary's changelog, as of its last release, is at
+[`v0.1.0-beta.3`](https://github.com/zcash/zallet/blob/v0.1.0-beta.3/backends/zaino/CHANGELOG.md).
+
+All packages move in release lockstep and share one version number, so the
 same release heading appears in each file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -25,8 +26,159 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- `z_sendmany` and `pczt_create` now check a request's recipients against the
+  account's real per-pool balances, rather than assuming every pool holds the
+  entire money supply. A payment that no single shielded pool can cover has to
+  cross between pools, which reveals the crossing amount, so under the default
+  `privacyPolicy` of `FullPrivacy` it is now rejected up front, naming the
+  policy that would permit it. Previously the conflict was only noticed after
+  input selection had run, and was reported either as a different privacy error
+  or as a generic proposal failure that did not mention the privacy policy at
+  all.
+
+  Which pool pays an Orchard receiver depends on the height the transaction
+  targets. From NU6.3 the Orchard turnstile is one-way — value may leave the
+  Orchard pool but never enter it — so a payment to an Orchard receiver is
+  delivered in the Ironwood pool, and only Ironwood funds can cover it without
+  crossing. The recipient's address is unchanged; there is no Ironwood receiver
+  type, and an Ironwood note is received at an Orchard receiver.
+
+  A consequence worth planning for: once NU6.3 activates, an account whose
+  shielded funds are all in the legacy Orchard pool cannot pay anyone under the
+  default `FullPrivacy` policy, because every external payment moves that value
+  across the turnstile and reveals its amount. Such sends need `privacyPolicy`
+  set to `AllowRevealedAmounts` or weaker, or the funds migrated to Ironwood
+  first. This is NU6.3 behaviour rather than a change of policy — Zallet now
+  reports it up front instead of after input selection has run.
+
+  These methods now require the wallet to have completed enough sync to report
+  balances and to name the height its transaction would target, and return the
+  same "Wallet sync required" error as `z_getbalanceforaccount` if it has not.
+
+- `z_sendmany`, `z_sendfromaccount` and `pczt_create` now reject a recipient
+  address that belongs to another network alongside their other address
+  validation, before the wallet is consulted at all, and name the offending
+  address: `Invalid parameter, address not valid on this network: <address> (<reason>)`.
+  Previously such an address was reported later, from the privacy check, as a
+  bare "Address is for Main but we expected Test" with nothing to identify which
+  recipient was at fault.
+
+## [0.1.0-beta.4] - 2026-11-01
+
 ### Added
 
+- The `zallet backup` command writes a consistent, integrity-checked snapshot
+  of the wallet database to a backup file using SQLite's Online Backup API
+  (the manual backup command contemplated by #49 and #195). It works whether
+  or not the wallet is running: a backup of a running wallet is a
+  transaction-consistent snapshot taken without blocking it, and the command
+  fails loudly rather than running forever if sustained wallet writes keep
+  the copy from completing. Scheduled periodic backups from inside the
+  running process remain tracked in #195.
+- NU7 support in ordinary builds. Zallet follows the NU7 network upgrade on
+  Mainnet (height 3,543,405) and Testnet (height 4,465,026), and
+  `regtest_nuparams` accepts the NU7 consensus branch ID without building with
+  `--cfg zcash_unstable="nu7"`. Upgrade before the network you run on reaches
+  its activation height, together with a `zebrad` that also follows NU7.
+
+### Changed
+
+- JSON-RPC responses still give unified addresses and viewing keys in their
+  ZIP 316 Revision 0 form (`u1…`, `uview1…`, `uivk1…`). A unified address or
+  viewing key that Revision 0 cannot represent — one with no shielded
+  component, one carrying metadata such as an expiry, or a viewing key with a
+  P2SH item — is given in its Revision 2 form (`zu…`/`tu…`, `uvf…`, `uvi…`)
+  instead. Both revisions are accepted as input.
+- `z_sendmany` rejects a Sprout recipient address with
+  `RPC_INVALID_PARAMETER` ("Sending funds into the Sprout pool is no longer
+  supported."), as `zcashd` did, when it builds the payment request.
+- `z_sendmany` fails for a recipient unified address that has expired, or whose
+  ZIP 316 Revision 2 expiry height is earlier than the expiry height of the
+  transaction that would pay it.
+- `zallet generate-encryption-identity` now creates the identity file with a
+  protected owner-only ACL on Windows, matching the owner-only permissions it
+  already used on Unix (previously the file inherited the destination
+  directory's access control there), and publishes it with a write-through
+  rename on Windows, so the identity is durable before the command reports
+  success.
+
+### Deprecated
+
+- `indexer.db_path`. It has no effect, and Zallet logs a warning when it is set.
+
+### Removed
+
+- The `zaino` chain backend and its `zallet-zaino` binary. The release
+  tarballs, Debian packages, and Docker images no longer contain it. A config
+  file with `backend = "zaino"` must change to `backend = "zebra"`. The `zebra`
+  backend requires a `zebrad` built with the `indexer` feature, an
+  `[indexer.read_state_service]` config section, and `zebrad`'s state directory
+  on the same host. The wallet database needs no migration. The `zaino`
+  directory in the data directory is no longer used, and you can delete it.
+- No chain backend currently runs on macOS or Windows, because the `zebra`
+  backend is Linux-only.
+
+
+### Fixed
+
+- `z_viewtransaction` no longer panics when it cannot find the output
+  that a transparent input spends: the previous transaction is unknown to the
+  node, or has no output at that index. That input is left out of `spends`,
+  and `fee` is omitted. A failed lookup of the previous transaction now returns
+  an RPC error.
+- `migrate-zcashd-wallet` now includes un-mined transactions when estimating
+  the wallet birthday. An expired or conflicted transaction still shows that
+  the wallet's addresses were in use around its expiry height, so history near
+  such a transaction is no longer at risk of being skipped by the post-import
+  scan.
+- `migrate-zcashd-wallet` no longer raises the wallet birthday to the Sapling
+  activation height. A zcashd wallet may predate Sapling, so evidence of
+  earlier activity now sets the birthday directly, and a wallet with no usable
+  evidence at all falls back to the genesis height instead of Sapling
+  activation.
+- `migrate-zcashd-wallet --help` no longer says that a local `zcashd`
+  installation is required. The `--zcashd-install-dir` flag is optional: by
+  default Zallet uses the Berkeley DB 6.2 `db_dump` it vendors, falling back to
+  one on the `PATH`.
+- Fixed a race that could leave wallet data requests unprocessed. The sync task
+  now signals data-request processing after new blocks are stored. It also
+  signals after each mempool transaction is stored.
+- `z_listunspent` no longer fails the entire request when a note's memo cannot
+  be read — because the stored memo cannot be decoded (for example a text memo
+  containing invalid UTF-8), or because the database layer does not support
+  memo lookups for the note's pool. The note is reported with its `memo` and
+  `memoStr` fields omitted, and a warning identifying the note is logged. A
+  note whose memo the wallet has not yet fetched likewise omits the memo
+  fields, instead of reporting the placeholder text `TODO: Always enhance
+  every note` in the `memo` field (which is documented as hexadecimal).
+- `migrate-zcashd-wallet` now records the P2SH addresses of the redeem scripts it
+  imports (from zcashd's `importaddress <redeemscript>` and
+  `addmultisigaddress`) as exposed. Such an address was in use outside the wallet
+  before it was imported, but it has no derivation, so it was reached by neither
+  the exposures recorded in the migrated wallet nor the gap-limit inference that
+  covers derived receivers; one that had never appeared in a wallet transaction
+  was left with no exposure height at all. One consequence is that
+  `listaddresses`, which reports only exposed addresses, did not surface it where
+  `zcashd` did.
+- `migrate-zcashd-wallet` no longer aborts when a `zcashd` wallet's watch-only
+  pubkeys (from `importpubkey`) include one whose address the Zallet wallet already
+  tracks. Every such pubkey was registered regardless, and the wallet rejects an
+  import of key material another account holds, so migrating a second `zcashd`
+  wallet that shared a watched key failed with a database error *after* the import
+  had committed. A pubkey whose address *another* account already holds is now
+  left alone. One the importing account itself holds is still registered, which
+  upgrades a row imported by address alone -- as `zallet import-address` creates
+  -- with its public key, and exposes it.
+
+## [0.1.0-beta.3] - 2026-08-24
+
+### Added
+
+- `z_listunspent` transparent coinbase outputs now include a `blockstomaturity`
+  field reporting the number of blocks remaining until the output reaches
+  maturity and becomes spendable.
 - `zallet import-address` CLI command for importing a transparent address as
   watch-only, given the bare address string, its hex-encoded public key
   (P2PKH), or its redeem script (P2SH). A bare-address import stores no key
@@ -40,6 +192,12 @@ be considered breaking changes.
   and of the `z_importaddress` JSON-RPC method. Funds received by an address
   imported without key material contribute to account balances but are never
   selected for spending.
+- `signmessage` RPC method: signs a message with the private key of a
+  transparent P2PKH address, producing a signature that `verifymessage` (and
+  `zcashd`) accepts. The wallet must be unlocked. The address's key may be
+  HD-derived from the wallet seed or a standalone imported key; signing with
+  an ephemeral (ZIP 320) address is refused, as those addresses are internal
+  to transaction construction.
 - A global sync lock that blocks wallet usage while Zallet’s view of the chain
   is not trustworthy. The balance and spend RPC methods (`z_getbalances`,
   `z_getbalanceforaccount`, `z_gettotalbalance`, `z_listunspent`,
@@ -129,9 +287,52 @@ be considered breaking changes.
   wallet passphrases to the network path; remote access should instead go
   through an authenticated, encrypted tunnel such as SSH port forwarding or a
   VPN. Previously any bind address was accepted without a warning.
+- The `help` JSON-RPC method (and `zallet rpc help`) now omits regtest-only
+  methods (currently just `stop`) unless the node is running on the regtest
+  network, matching the "method not found" error those methods return on other
+  networks.
+
+- `getwalletinfo`’s `mnemonic_seedfp` field now reports the wallet’s ZIP 32 seed
+  fingerprint, instead of the placeholder string `"TODO"`. It is present only
+  when the wallet holds exactly one mnemonic phrase: `zcashd` had at most one per
+  wallet and omitted the field when it had none, while a Zallet wallet may hold
+  any number, and there is no one fingerprint to report when it holds several.
+
+  A new `mnemonic_seedfps` field lists every ZIP 32 seed fingerprint the wallet
+  holds, in lexicographic order, so a wallet with several phrases is no longer
+  unreportable. It is empty when the wallet holds no mnemonic phrases, and is
+  omitted — along with `mnemonic_seedfp` — only when the key store could not be
+  queried, which is what distinguishes a wallet with no phrases from a failed
+  lookup. Use `z_listaccounts` to learn which phrase an individual account
+  derives from.
+
+  Note that Zallet reports the fingerprint in its ZIP 32 bech32m encoding
+  (`zip32seedfp1…`), as `z_listaccounts` already does, whereas `zcashd` reported
+  the `uint256` hex form.
 
 ### Fixed
 
+- `migrate-zcashd-wallet` now marks the addresses of imported standalone
+  transparent spending keys (from zcashd's `importprivkey`) as exposed, so
+  `listaddresses` surfaces them even if they were never funded, as `zcashd`
+  did. Addresses that are also seed-derived receivers of an imported account
+  are excluded — both here and in the watch-only pubkey registration — so
+  they keep the gap-limit-inferred exposure that seed recovery depends on.
+- `migrate-zcashd-wallet` prints the backup reminder before reporting an
+  error from the post-import registration and verification steps.
+- The `__cookie__` JSON-RPC username is now actually reserved. It is documented
+  as belonging to the cookie credential that Zallet generates at startup, but a
+  `[[rpc.auth]]` entry could claim it: Zallet warned, skipped cookie generation,
+  and served that name with the configured password, so a configured credential
+  gained access under the username clients treat as the short-lived,
+  filesystem-permission-protected cookie. Zallet now refuses to start if a
+  `[[rpc.auth]]` user is named `__cookie__`, and always generates its cookie.
+  `zallet add-rpc-user __cookie__` is rejected for the same reason, instead of
+  printing a config block that would not start.
+
+  Anyone who relied on configuring `__cookie__` as an ordinary RPC user must
+  rename that `[[rpc.auth]]` entry before upgrading, and update the clients
+  using it.
 - `migrate-zcashd-wallet` now passes a fallback network to the wallet parser
   for regtest wallets. A pre-Sapling wallet (zcashd < 5.0.0) has no
   `networkinfo` record; without a fallback, parsing failed with "wallet has no
@@ -140,14 +341,45 @@ be considered breaking changes.
 - A regtest wallet's transactions mined under NU6.3 (Ironwood) no longer fail
   to import with "Consensus branch ID not known". Bumped `zewif-zcashd` to
   0.1.0-rc.5, which includes NU6.3 in the regtest activation schedule.
+- `migrate-zcashd-wallet` no longer aborts with "Consensus branch ID not known"
+  when the `zcashd` wallet contains an unmined transaction with a zero expiry
+  height, such as an imported coinbase transaction. The importer stores such a
+  transaction with neither a mined height nor a usable expiry height, and the
+  read-back it performs to tally the import then had no epoch from which to
+  select a consensus branch ID. Fixed upstream by bumping the librustzcash
+  wallet crates, which now fall back to the wallet's view of the chain tip
+  (zcash/librustzcash#2975).
+- Updated transitive dependencies flagged by `cargo audit`: `crossbeam-epoch`
+  0.9.18 → 0.9.20 (RUSTSEC-2026-0204, invalid pointer dereference in
+  `fmt::Pointer`), the yanked `num-bigint` 0.4.7 and `spin` 0.9.8 to their
+  current releases, and `i18n-embed-fl` 0.10.0 → 0.10.1, which replaces the
+  unmaintained `proc-macro-error2` (RUSTSEC-2026-0173) with its maintained
+  successor.
+- `z_sendmany` and `pczt_create` now select inputs only from the value pools
+  named by the `fromaddress`'s receivers, as the `z_sendmany` documentation
+  already promised: a bare Sapling address or Sapling-only unified address no
+  longer draws on the account's Orchard notes, and an Orchard-only unified
+  address no longer draws on its Sapling notes. (An Orchard receiver permits
+  both the Orchard and Ironwood pools, since payments to Orchard receivers are
+  accounted to the Ironwood pool once it is active.) Previously any shielded
+  `fromaddress` permitted selection from all of the account's shielded pools.
 - The JSON-RPC server now rejects HTTP request bodies larger than 10 MiB (the
   request-size limit the RPC server already enforced after parsing) with
   `413 Payload Too Large` before buffering them (GHSA-m539-482m-q66j).
   Previously the version-compatibility middleware buffered the complete
   request body into memory without a size limit, allowing an authenticated
   caller to exhaust wallet memory with a single oversized request. A request
-  body that cannot be read now yields `400 Bad Request` instead of killing
-  the connection task.
+  body that cannot be read now yields `400 Bad Request` instead of killing the
+  connection task.
+- `migrate-zcashd-wallet` now records the mined height of every migrated
+  transaction whose block is in the main chain, rather than only those `zcashd`
+  itself tracked a height for (which is just the transactions that added notes
+  to the Orchard note commitment tree). A transaction imported with neither a
+  mined height nor a non-zero expiry height gives the wallet no height from
+  which to determine its consensus branch ID, so migrating a wallet holding one
+  — a coinbase transaction, or any transaction whose sender disabled expiry —
+  previously failed outright with "Consensus branch ID not known, cannot parse
+  this transaction until it is mined".
 - `example-config` and `migrate-zcash-conf` no longer panic when `-o/--output`
   is omitted. As their documentation already stated, they now write to the
   default Zallet config file path (`zallet.toml` in the datadir), matching the
@@ -162,43 +394,6 @@ be considered breaking changes.
   users left the cookie — a bearer credential for the RPC interface — readable
   by them as well. Unix platforms already created the cookie with mode `0600`
   and are unaffected.
-
-- `z_sendmany` and `pczt_create` now check a request's recipients against the
-  account's real per-pool balances, rather than assuming every pool holds the
-  entire money supply. A payment that no single shielded pool can cover has to
-  cross between pools, which reveals the crossing amount, so under the default
-  `privacyPolicy` of `FullPrivacy` it is now rejected up front, naming the
-  policy that would permit it. Previously the conflict was only noticed after
-  input selection had run, and was reported either as a different privacy error
-  or as a generic proposal failure that did not mention the privacy policy at
-  all.
-
-  Which pool pays an Orchard receiver depends on the height the transaction
-  targets. From NU6.3 the Orchard turnstile is one-way — value may leave the
-  Orchard pool but never enter it — so a payment to an Orchard receiver is
-  delivered in the Ironwood pool, and only Ironwood funds can cover it without
-  crossing. The recipient's address is unchanged; there is no Ironwood receiver
-  type, and an Ironwood note is received at an Orchard receiver.
-
-  A consequence worth planning for: once NU6.3 activates, an account whose
-  shielded funds are all in the legacy Orchard pool cannot pay anyone under the
-  default `FullPrivacy` policy, because every external payment moves that value
-  across the turnstile and reveals its amount. Such sends need `privacyPolicy`
-  set to `AllowRevealedAmounts` or weaker, or the funds migrated to Ironwood
-  first. This is NU6.3 behaviour rather than a change of policy — Zallet now
-  reports it up front instead of after input selection has run.
-
-  These methods now require the wallet to have completed enough sync to report
-  balances and to name the height its transaction would target, and return the
-  same "Wallet sync required" error as `z_getbalanceforaccount` if it has not.
-
-- `z_sendmany`, `z_sendfromaccount` and `pczt_create` now reject a recipient
-  address that belongs to another network alongside their other address
-  validation, before the wallet is consulted at all, and name the offending
-  address: `Invalid parameter, address not valid on this network: <address>`.
-  Previously such an address was reported later, from the privacy check, as a
-  bare "Address is for Main but we expected Test" with nothing to identify which
-  recipient was at fault.
 
 - A note commitment tree conflict during sync no longer shuts the wallet down
   permanently. Zallet now rolls the wallet back to a progressively older point
@@ -252,6 +447,12 @@ be considered breaking changes.
   `generate-mnemonic`) rather than failing initialization. `@`-prefixed
   recipient entries are rejected, as indirection through external sources
   cannot be part of the wallet's stored recipient set.
+- `migrate-zcashd-wallet` now acquires the data directory lock for the duration
+  of the migration. It writes accounts and transparent key material into the
+  same wallet database `zallet start` uses, so running the two concurrently
+  could interleave writes; the command now reports that Zallet is already
+  running instead.
+
 - The queue of asynchronous RPC operations (`z_sendmany`, `z_shieldcoinbase`)
   is now bounded (GHSA-3wr9-v982-59fj). Finished operations are still retained
   until collected with `z_getoperationresult`, but once the queue reaches its
@@ -287,6 +488,11 @@ be considered breaking changes.
   `walletpassphrase` unlocks a running server’s identities rather than this
   process’s, which cannot run concurrently with it in any case. The regtest
   account command is fixed the same way.
+
+- Wallet sync now loads a complete block range from one fixed-history view
+  before queueing decryption or database work. If the view expires partway
+  through the range, the partial batch is discarded and the entire range is
+  retried against a fresh view, including during history recovery.
 
 ## [0.1.0-beta.2] - 2026-07-28
 

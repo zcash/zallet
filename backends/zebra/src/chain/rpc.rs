@@ -1,8 +1,5 @@
-//! A small direct JSON-RPC client for the validator (zebrad/zcashd), used by the
-//! zebra backend for mempool access and transaction submission. Deliberately
-//! Zaino-free: the `zaino-fetch` connector transitively pulls the full Zebra stack
-//! (`zebra-state`, rocksdb), which would re-introduce the version coupling this backend
-//! exists to remove.
+//! A small direct JSON-RPC client for zebrad, used by the zebra backend for mempool
+//! access, transaction submission, and the node's network-upgrade table.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

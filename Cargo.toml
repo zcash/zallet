@@ -37,7 +37,7 @@ fmutex = "0.3"
 home = "0.5"
 known-folders = "1"
 windows = "0.62"
-xdg = "2.5"
+xdg = "3"
 
 # Hashing
 blake2b_simd = "1"
@@ -52,7 +52,7 @@ age = { version = "0.12", features = ["armor", "cli-common", "plugin"] }
 # memory when cached identities are dropped. `age` enables only `static_secrets`.
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 bech32 = "0.11"
-bip0039 = "0.12"
+bip0039 = "0.14"
 
 # Localization
 i18n-embed = { version = "0.16", features = ["fluent-system"] }
@@ -69,16 +69,16 @@ flate2 = "1"
 spdx = "0.10"
 
 # Parsing and serialization
-base64ct = "1.8"
+base64ct = { version = "1.8", features = ["alloc"] }
 hex = "0.4"
 serde = { version = "1", features = ["serde_derive"] }
 semver = "1"
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
-toml = "0.8"
-zcash_address = "0.13.0"
+toml = "0.9"
+zcash_address = "0.14"
 
 # Randomness
-rand = "0.8"
+rand = "0.10"
 
 # Secret management
 secrecy = { version = "0.8", features = ["serde"] }
@@ -95,7 +95,7 @@ http-body-util = "0.1"
 hyper = "1"
 jsonrpsee = "0.24"
 jsonrpsee-http-client = { version = "0.24", default-features = false }
-nix = "0.29" # `stop` RPC method
+nix = "0.31" # `stop` RPC method
 rust_decimal = { version = "1.37", default-features = false, features = [
     "serde-arbitrary-precision",
     "serde-float",
@@ -108,7 +108,7 @@ once_cell = "1.2"
 proptest = "1.9"
 regex = "1.4"
 tempfile = "3"
-trycmd = "0.15"
+trycmd = "1"
 
 # Tracing
 console-subscriber = "0.5"
@@ -117,11 +117,11 @@ tracing-log = "0.2"
 tracing-subscriber = "0.3"
 
 # Zcash consensus
-zcash_protocol = "0.10.0"
+zcash_protocol = "0.11"
 
 # Zcash payment protocols
-orchard = "0.15.0"
-pczt = { version = "0.9.1", features = [
+orchard = "0.16"
+pczt = { version = "0.10", features = [
     "orchard",
     "sapling",
     "transparent",
@@ -130,20 +130,20 @@ pczt = { version = "0.9.1", features = [
     "spend-finalizer",
     "tx-extractor",
 ] }
-sapling = { package = "sapling-crypto", version = "0.7" }
-transparent = { package = "zcash_transparent", version = "0.10.0" }
-zcash_encoding = "0.4"
-zcash_keys = { version = "0.16.0", features = [
+sapling = { package = "sapling-crypto", version = "0.9" }
+transparent = { package = "zcash_transparent", version = "0.11" }
+zcash_encoding = "0.5"
+zcash_keys = { version = "0.17", features = [
     "transparent-inputs",
     "sapling",
     "orchard",
     "transparent-key-encoding",
 ] }
-zcash_primitives = "0.30.0"
-zcash_proofs = "0.30.0"
-zcash_script = "0.4.3"
+zcash_primitives = "0.31"
+zcash_proofs = "0.31"
+zcash_script = "0.6"
 zcash_spec = "0.2"
-secp256k1 = { version = "0.29", features = ["recovery"] }
+secp256k1 = { version = "0.33", features = ["global-context", "recovery"] }
 
 # Zcash chain state
 
@@ -152,22 +152,23 @@ secp256k1 = { version = "0.29", features = ["recovery"] }
 deadpool = "0.12"
 deadpool-sqlite = "0.12"
 deadpool-sync = "0.1"
-incrementalmerkletree = "0.8.2"
-rusqlite = { version = "0.37", features = ["time"] }
-schemerz = "0.2"
-schemerz-rusqlite = "0.370.0"
-shardtree = "0.7"
+incrementalmerkletree = "0.9"
+rusqlite = { version = "0.37", features = ["backup", "time"] }
+rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }
+schemerz = "0.3"
+schemerz-rusqlite = "0.371"
+shardtree = "0.8"
 time = "0.3"
 uuid = "1"
-zcash_client_backend = "=0.24.0-rc.7"
-zcash_client_sqlite = "=0.22.0-rc.7"
-zcash_note_encryption = "0.4"
-zip32 = "0.2"
+zcash_client_backend = "0.25"
+zcash_client_sqlite = "0.23"
+zcash_note_encryption = "0.5.1"
+zip32 = "0.3"
 bip32 = "0.2"
 
 # Zcashd wallet migration
-zewif = { version = "1.0.0-rc.3" }
-zewif-zcashd = { version = "0.1.0-rc.5" }
+zewif = { version = "=1.0.0-rc.3" }
+zewif-zcashd = { version = "=0.1.0-rc.6" }
 which = "8.0"
 anyhow = "1.0"
 
@@ -176,24 +177,3 @@ tonic = "0.14"
 
 [profile.release]
 debug = "line-tables-only"
-
-[patch.crates-io]
-# TEMPORARY: pin the wallet-critical librustzcash crates to the branch adding
-# `WalletWrite::import_standalone_transparent_address` (zcash/librustzcash#2941),
-# which `zallet import-address` uses to track watch-only transparent addresses
-# imported without key material. The full in-repo dependency closure of the two
-# client crates is patched to the same rev so the whole cohort resolves from a
-# single source. Repoint at crates.io once the change lands in a release.
-equihash = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-f4jumble = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_address = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_pool_migration = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_proofs = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }
-zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "375fc8e51acb2903777f3512bf92b28dc0ac42ef" }

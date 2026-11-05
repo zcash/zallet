@@ -32,11 +32,12 @@ normally do not need to provide one yourself. If that vendored utility is unavai
 Zallet falls back to a `db_dump` found on the system `$PATH`; you can also point Zallet
 at a specific `zcashd` installation's `db_dump` with `--zcashd-install-dir` (see below).
 
-The command requires at least one of the following two flag:
+The wallet file is located with two flags, neither of which is required:
 
-- `--path`: A path to a `zcashd` wallet file.
-- `--zcashd-datadir`: A path to a `zcashd` datadir. If this is provided, then `--path` can
-  be relative (or omitted, in which case the default filename `wallet.dat` will be used).
+- `--path`: A path to a `zcashd` wallet file. Defaults to `wallet.dat`.
+- `--zcashd-datadir`: A path to a `zcashd` datadir, against which a relative `--path` is
+  resolved. If omitted, the platform's default `zcashd` datadir is used (`~/.zcash` on
+  Linux, the XDG data home's `Zcash` directory on macOS, `%APPDATA%\Zcash` on Windows).
 
 Additional CLI arguments:
 - `--zcashd-install-dir`: A path to a local `zcashd` installation directory, for
@@ -59,6 +60,32 @@ Additional CLI arguments:
   accessible only via the original `wallet.dat` file. Without this flag, such
   a migration fails with an error enumerating what was left behind. A
   migration that imports nothing at all is an error regardless of this flag.
+  Note that the check runs *after* the importable accounts and their key
+  material have been written to the wallet database and keystore, so a
+  failed migration cannot simply be re-run against the same wallet database.
+  By default the re-run is refused because the database already holds an
+  imported `zcashd` wallet, and the error suggests
+  `--allow-multiple-wallet-imports`; do not use that flag to re-run the same
+  `wallet.dat`. With it, a duplicate is detected only by mnemonic
+  fingerprint, and a wallet with no HD seed gets a newly minted mnemonic on
+  every run, so its re-run would not be caught and would import the wallet a
+  second time. Decide on this flag before the first run. To accept a partial import after a failure, start again with a
+  fresh wallet database (delete `wallet.db` and re-run
+  [`zallet init-wallet-encryption`]) and pass the flag. The items that can
+  trigger it in a `zcashd` wallet are transparent spending keys with
+  uncompressed public keys, and transparent spending keys whose address is
+  not listed under any imported account.
+- `--no-scan`: Do not connect to the chain backend. Keys, accounts and
+  transactions are still imported, but nothing is resolved from the chain:
+  only the mined heights `zcashd` itself recorded are kept (it recorded one
+  only for transactions that added Orchard notes), and every other
+  transaction is stored as unmined until the next scan re-encounters it. Each
+  account's birthday is estimated from the wallet's own records alone: the
+  lowest of those recorded mined heights and of the un-mined transactions'
+  expiry heights minus 1000 blocks, or genesis if the wallet records neither.
+  The next `zallet start` rescans from that estimate. Use it when the chain
+  backend is not reachable yet; the cost is a conservative birthday and
+  therefore a longer first sync.
 
 > For the Zallet beta releases, the command also currently takes another required flag
 > `--this-is-beta-code-and-you-will-need-to-redo-the-migration-later`.
@@ -68,18 +95,99 @@ in-memory [ZeWIF] (Zcash Wallet Interchange Format) document, connect to the
 backing full node (to obtain necessary chain information for setting up wallet
 birthdays), and import the document: Zallet accounts are created corresponding
 to the structure of the `zcashd` wallet, spending key material is stored in the
-Zallet keystore, and the account birthdays carry the note commitment tree state
-needed for recovery. Parsing is performed using the `db_dump` command-line
+Zallet keystore, the account birthdays carry the note commitment tree state
+needed for recovery, and every transaction in the `zcashd` wallet is stored
+directly. Transactions are stored with a mined height when `zcashd` recorded
+one (it did only for transactions that added Orchard notes) or when the chain
+backend can resolve their block; the rest (never-mined sends, transactions on
+a non-main-chain block, and, under `--no-scan`, every transaction without a
+`zcashd`-recorded height) are stored as unmined, and the post-migration scan
+fills in the height of any that were in fact mined. The scan is what establishes the note commitment tree positions
+that make notes spendable, so balances are complete only once it has run past
+the wallet's history. Parsing is performed using the `db_dump` command-line
 utility. By default Zallet uses the copy it vendors and builds, which is the
 recommended choice; a `zcashd`-provided `db_dump` from the `zcutil/bin`
 directory of a source installation (via `--zcashd-install-dir`), or one on the
 system `$PATH`, are used otherwise.
 
+## Encrypted wallets
+
+A `wallet.dat` whose key material was encrypted with `zcashd`'s `encryptwallet`
+can be migrated as-is; nothing needs to be done in `zcashd` first. When the
+command finds encrypted key material it prompts on the terminal:
+
+```
+Enter the passphrase for the encrypted zcashd wallet:
+```
+
+This is the `zcashd` wallet passphrase (the one `walletpassphrase` took), not
+the passphrase of your age encryption identity. A wrong passphrase is reported
+and the prompt repeats; after three wrong attempts the command fails without
+having written anything. Because the prompt is interactive, run this step in a
+terminal rather than under a service manager. The decrypted keys are used only
+for the duration of the migration and are stored in Zallet's keystore
+encrypted to your age identity.
+
+## How the wallet birthday is chosen
+
+The post-migration scan starts at an account's birthday, so a birthday later
+than the wallet's real history means funds the scan never finds. With a chain
+backend every imported account gets the same birthday; with `--no-scan` they
+can differ (see below).
+
+The birthday is the earliest evidence of activity among the wallet's
+transactions: the lowest of every mined height the migration knows, and of
+every un-mined transaction's expiry height minus 1000 blocks (expiry is
+normally creation height plus 40, so this is a generous margin). A transaction
+whose expiry height is zero, meaning it never expires, contributes nothing. A
+`zcashd` wallet may predate Sapling, so an estimate below Sapling activation
+stands as it is.
+
+- **With a chain backend** (the default), the migration first looks up every
+  block hash recorded on the wallet's transactions and records the main-chain
+  height of each one it can resolve as that transaction's mined height. Hashes
+  the backend does not know are ignored, and those transactions count through
+  their expiry heights instead. The birthday is then the estimate above, capped
+  at the current chain tip; a wallet with no usable evidence at all gets the
+  chain tip. The height up to which the wallet considers itself recovered is
+  the chain tip in every case. The note commitment tree state as of the block
+  before the birthday is then fetched from the backend and stored with the
+  accounts.
+- **With `--no-scan`**, no lookups happen: only the mined heights `zcashd`
+  itself recorded (those of transactions that added Orchard notes) are known,
+  and every other transaction counts through its expiry height. An account
+  that already has a birthday from those Orchard records keeps it, so accounts
+  can end up with different birthdays; every other account gets the
+  wallet-wide estimate above, or genesis if the wallet has no usable evidence.
+  The wallet rescans from those birthdays on the next start.
+
+An unsynced node causes one silent failure. If `zebrad` has not yet reached
+the blocks the wallet's transactions are in, those hashes do not resolve; a
+transaction with an expiry height still bounds the birthday, but one without
+(a pre-NU5 coinbase transaction, or any transaction from before Overwinter)
+then contributes nothing, so a wallet whose earliest activity is only such
+transactions gets a birthday later than its history, with nothing in the
+output to say so. Letting `zebrad` sync to the chain tip before migrating
+avoids it.
+
+Separately, the migration can fail with `missing tree state for height N` if
+the backend cannot supply the tree state for the block before the birthday.
+Because the birthday is capped at the chain tip, that block is one the node
+already has, so syncing further does not help; the exception is a node still
+at genesis, where there is no tip to cap against. The lookup happens before
+anything is written, so re-running is safe; if the error persists on a synced
+node, report it.
+
 Some `zcashd` wallet contents cannot be represented in a Zallet wallet, and are
-reported (with counts) rather than migrated: Sprout spending keys (move any
-Sprout funds using `zcashd` before migrating), address book entries, watch-only
-entries recorded without their public keys or redeem scripts, and entries with
-uncompressed public keys.
+logged with a count rather than migrated: Sprout spending keys (move any Sprout
+funds using `zcashd` before migrating), address book entries, watch-only
+entries recorded without their public keys or redeem scripts, watch-only public
+keys that are uncompressed or malformed, watch-only redeem scripts other than
+multisig within the P2SH size limit, standalone copies of unified spending keys,
+and transactions that carry no raw data. Records the wallet parser does not
+recognise are discarded without any message. See
+[What is not migrated](../zcashd/README.md#what-is-not-migrated) for what each
+of these means for you.
 
 [ZeWIF]: https://github.com/zcash/zewif
 

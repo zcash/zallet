@@ -5,7 +5,7 @@ use serde::Serialize;
 use zcash_client_backend::data_api::{AccountPurpose, WalletRead, WalletWrite};
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_keys::{encoding::decode_extended_spending_key, keys::UnifiedFullViewingKey};
-use zcash_protocol::consensus::{BlockHeight, NetworkConstants};
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::components::{
     chain::Chain,
@@ -112,8 +112,10 @@ pub(crate) async fn call<C: Chain>(
         return Err(LegacyCode::InvalidParameter.with_static("Block height out of range."));
     }
 
-    let hrp = wallet.params().hrp_sapling_extended_spending_key();
-    let hrp_addr = wallet.params().hrp_sapling_payment_address();
+    let hrp =
+        zcash_keys::constants::hrp_sapling_extended_spending_key(wallet.params().network_type());
+    let hrp_addr =
+        zcash_address::constants::hrp_sapling_payment_address(wallet.params().network_type());
     let (extsk, address) = decode_key_and_address(hrp, hrp_addr, key)?;
 
     // Encrypt the spending key up front. Encryption is the only step needing the keystore
@@ -161,7 +163,10 @@ pub(crate) async fn call<C: Chain>(
             _ => unreachable!(),
         };
 
-        Some(fetch_account_birthday(&chain, effective_height).await?)
+        let chain_view = chain.snapshot().await.map_err(|e| {
+            LegacyCode::Database.with_message(format!("Failed to obtain a chain snapshot: {e}"))
+        })?;
+        Some(fetch_account_birthday(&chain_view, effective_height, None).await?)
     } else {
         None
     };
@@ -219,8 +224,9 @@ pub(crate) async fn call<C: Chain>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zcash_address::constants as address_constants;
+    use zcash_keys::constants as key_constants;
     use zcash_keys::encoding::encode_extended_spending_key;
-    use zcash_protocol::constants;
 
     // Test vector: ExtendedSpendingKey derived from master key with seed [0; 32].
     // From zcash_keys::encoding tests.
@@ -264,8 +270,8 @@ mod tests {
     #[test]
     fn decode_valid_mainnet_key() {
         let (_, address) = decode_key_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             MAINNET_ENCODED_EXTSK,
         )
         .unwrap();
@@ -277,8 +283,8 @@ mod tests {
     #[test]
     fn decode_valid_testnet_key() {
         let (_, address) = decode_key_and_address(
-            constants::testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
-            constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            address_constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
             TESTNET_ENCODED_EXTSK,
         )
         .unwrap();
@@ -290,15 +296,15 @@ mod tests {
     #[test]
     fn decode_same_key_produces_same_address_across_calls() {
         let (_, addr1) = decode_key_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             MAINNET_ENCODED_EXTSK,
         )
         .unwrap();
 
         let (_, addr2) = decode_key_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             MAINNET_ENCODED_EXTSK,
         )
         .unwrap();
@@ -309,14 +315,14 @@ mod tests {
     #[test]
     fn decode_roundtrip_mainnet() {
         let (extsk, _) = decode_key_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             MAINNET_ENCODED_EXTSK,
         )
         .unwrap();
 
         let re_encoded = encode_extended_spending_key(
-            constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
             &extsk,
         );
         assert_eq!(re_encoded, MAINNET_ENCODED_EXTSK);
@@ -325,8 +331,8 @@ mod tests {
     #[test]
     fn decode_invalid_key() {
         let result = decode_key_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             "not-a-valid-key",
         );
         assert!(result.is_err());
@@ -336,8 +342,8 @@ mod tests {
     fn decode_wrong_network_key() {
         // Try to decode a testnet key with mainnet HRP — should fail.
         let result = decode_key_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             TESTNET_ENCODED_EXTSK,
         );
         assert!(result.is_err());
@@ -346,8 +352,8 @@ mod tests {
     #[test]
     fn decode_empty_key() {
         let result = decode_key_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             "",
         );
         assert!(result.is_err());

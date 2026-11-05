@@ -156,6 +156,13 @@ impl StartCmd {
         if config.external.notify.is_some() {
             warn_unused("external.notify");
         }
+        // Deprecated: only the removed Zaino backend read this option.
+        if config.indexer.db_path.is_some() {
+            warn!(
+                "{}",
+                fl!("warn-config-deprecated-ignored", option = "indexer.db_path")
+            );
+        }
 
         // Construct a structurally admitted chain backend before opening the wallet database.
         let (chain, chain_indexer_task_handle) = factory.build(config).await?;

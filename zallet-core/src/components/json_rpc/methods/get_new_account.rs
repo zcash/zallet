@@ -2,14 +2,17 @@ use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use schemars::JsonSchema;
 use serde::Serialize;
-use zcash_client_backend::data_api::{AccountBirthday, WalletRead, WalletWrite};
+use zcash_client_backend::data_api::{WalletRead, WalletWrite};
 
 use crate::components::{
     chain::{Chain, ChainView},
     database::DbConnection,
     json_rpc::{
         server::LegacyCode,
-        utils::{ensure_seed_is_backed_up, ensure_wallet_is_unlocked, parse_seedfp_parameter},
+        utils::{
+            ensure_seed_is_backed_up, ensure_wallet_is_unlocked, fetch_account_birthday,
+            parse_seedfp_parameter,
+        },
     },
     keystore::{KeyStore, SeedSelectionError},
     sync::WalletDecryptorHandle,
@@ -63,19 +66,8 @@ pub(crate) async fn call<C: Chain>(
                 .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
                 .height(),
         );
-    let treestate_height = chain_height.saturating_sub(1);
 
-    let chain_state = chain_view
-        .tree_state_as_of(treestate_height)
-        .await
-        .map_err(|e| {
-            LegacyCode::InvalidParameter.with_message(format!(
-                "Failed to get treestate at height {treestate_height}: {e}"
-            ))
-        })?
-        .expect("always in range");
-
-    let birthday = AccountBirthday::from_parts(chain_state, None);
+    let birthday = fetch_account_birthday(&chain_view, chain_height, None).await?;
 
     let seed_fp = keystore.select_seed(seedfp).await.map_err(|e| match e {
         SeedSelectionError::Database(e) => LegacyCode::Database.with_message(e.to_string()),

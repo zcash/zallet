@@ -55,13 +55,60 @@ pub(crate) struct GetWalletInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     unlocked_until: Option<u64>,
 
-    /// The BLAKE2b-256 hash of the HD seed derived from the wallet's emergency recovery phrase.
-    mnemonic_seedfp: String,
+    /// The ZIP 32 seed fingerprint of the wallet's mnemonic phrase.
+    ///
+    /// Present only when the wallet holds exactly one mnemonic phrase, so that this
+    /// `zcashd`-inherited field always means what `zcashd` meant by it: `zcashd` had at
+    /// most one phrase per wallet, and omitted this field when it had none. A Zallet
+    /// wallet may hold any number, so see `mnemonic_seedfps` for the general case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mnemonic_seedfp: Option<String>,
+
+    /// Every ZIP 32 seed fingerprint the wallet holds, in lexicographic order.
+    ///
+    /// Empty if the wallet holds no mnemonic phrases. Omitted, along with
+    /// `mnemonic_seedfp`, only if the key store could not be queried.
+    ///
+    /// Use `z_listaccounts` to learn which phrase an individual account derives from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mnemonic_seedfps: Option<Vec<String>>,
 }
 
 pub(crate) async fn call(keystore: &KeyStore) -> Response {
-    // https://github.com/zcash/zallet/issues/55
-    warn!("TODO: Implement getwalletinfo");
+    // https://github.com/zcash/zallet/issues/620
+    warn!(
+        "TODO: getwalletinfo still reports placeholders for walletversion, balance, \
+         unconfirmed_balance, immature_balance, shielded_balance, \
+         shielded_unconfirmed_balance, txcount, keypoololdest, and keypoolsize"
+    );
+
+    let mnemonic_seedfps = match keystore.list_seed_fingerprints().await {
+        Ok(seed_fps) => {
+            let mut seed_fps = seed_fps
+                .into_iter()
+                .map(|seed_fp| seed_fp.to_string())
+                .collect::<Vec<_>>();
+            // `list_seed_fingerprints` returns a `HashSet`, whose iteration order varies
+            // between calls; sort so that repeated calls agree.
+            seed_fps.sort();
+            Some(seed_fps)
+        }
+        Err(e) => {
+            // Degrade rather than failing the whole method: every other field here is
+            // computable without the key store database, and omitting these two is
+            // unambiguous because `mnemonic_seedfps` is otherwise always present.
+            warn!("Failed to list the wallet's seed fingerprints: {e}");
+            None
+        }
+    };
+
+    // `zcashd` omitted this field when the wallet had no mnemonic, rather than reporting
+    // a placeholder. Zallet additionally omits it when the wallet holds several, since
+    // there is no one fingerprint to report; `mnemonic_seedfps` covers that case.
+    let mnemonic_seedfp = match mnemonic_seedfps.as_deref() {
+        Some([seed_fp]) => Some(seed_fp.clone()),
+        _ => None,
+    };
 
     let unlocked_until = if keystore.uses_encrypted_identities() {
         Some(
@@ -86,6 +133,7 @@ pub(crate) async fn call(keystore: &KeyStore) -> Response {
         keypoololdest: 0,
         keypoolsize: 0,
         unlocked_until,
-        mnemonic_seedfp: "TODO".into(),
+        mnemonic_seedfp,
+        mnemonic_seedfps,
     })
 }

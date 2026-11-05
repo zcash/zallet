@@ -40,8 +40,8 @@ jobs:
       # (zcash/zallet#540), so each is tested separately alongside the shared
       # zallet-core workspace.
       #
-      # The lockfiles may deliberately diverge on the zebra-*/zaino-* trees,
-      # but crates touching the shared wallet database must stay in lockstep.
+      # The lockfiles may deliberately diverge on the zebra-* trees, but crates
+      # touching the shared wallet database must stay in lockstep.
       - name: Check wallet-critical dependency lockstep
         run: ./utils/check-lockstep.sh
       # Exercise the lockfile-sync helper end to end: it regenerates every
@@ -57,11 +57,6 @@ jobs:
           cargo test
           --workspace
           --features zcashd-import,rpc-cli,tokio-console
-      - name: Run tests (zaino backend)
-        run: >
-          cargo test
-          --manifest-path backends/zaino/Cargo.toml
-          --features zcashd-import,rpc-cli,tokio-console
       - name: Run tests (zebra-state backend)
         run: >
           cargo test
@@ -73,7 +68,6 @@ jobs:
         run: |
           cargo build --bin zallet
           cargo build --manifest-path backends/zebra/Cargo.toml --bin zallet-zebra
-          cargo build --manifest-path backends/zaino/Cargo.toml --bin zallet-zaino
           bindir="$(mktemp -d)"
           datadir="$(mktemp -d)"
           cp target/debug/zallet "$bindir/"
@@ -84,29 +78,37 @@ jobs:
           "$bindir/zallet" --datadir "$datadir" --version
 
           # Generate a real config through the launcher (also exercises subcommand
-          # and flag passthrough), then point it at the zaino backend. The key must
-          # be prepended: top-level TOML keys precede the first [section] header.
+          # and flag passthrough), then point it at a backend that is not
+          # installed. The key must be prepended: top-level TOML keys precede the
+          # first [section] header.
           "$bindir/zallet" --datadir "$datadir" example-config \
             -o "$datadir/zallet.toml" \
             --this-is-beta-code-and-you-will-need-to-recreate-the-example-later
-          sed -i '1i backend = "zaino"' "$datadir/zallet.toml"
+          sed -i '1i backend = "absent"' "$datadir/zallet.toml"
 
-          # backend = "zaino" maps to the zallet-zaino binary: with the binary
-          # absent, the launcher must fail and name what it looked for.
+          # backend = "absent" maps to a zallet-absent binary: with no such
+          # binary, the launcher must fail and name what it looked for.
           if out=$("$bindir/zallet" --datadir "$datadir" --version 2>&1); then
-            echo "expected dispatch to a missing zallet-zaino to fail"; exit 1
+            echo "expected dispatch to a missing zallet-absent to fail"; exit 1
           fi
-          echo "$out" | grep -q "zallet-zaino" || { echo "error did not name zallet-zaino: $out"; exit 1; }
+          echo "$out" | grep -q "zallet-absent" || { echo "error did not name zallet-absent: $out"; exit 1; }
 
-          # With the binary present, the same invocation succeeds.
-          cp backends/zaino/target/debug/zallet-zaino "$bindir/"
-          "$bindir/zallet" --datadir "$datadir" --version
+          # Install the zebra binary under that name. The launcher now dispatches
+          # to it, and the binary refuses a config that names a backend other
+          # than the one it provides.
+          cp backends/zebra/target/debug/zallet-zebra "$bindir/zallet-absent"
+          if out=$("$bindir/zallet" --datadir "$datadir" example-config -o - \
+            --this-is-beta-code-and-you-will-need-to-recreate-the-example-later 2>&1); then
+            echo "expected the dispatched binary to reject a backend=absent config"; exit 1
+          fi
+          echo "$out" | grep -q "provides the 'zebra' backend" \
+            || { echo "unexpected mismatch error: $out"; exit 1; }
 
-          # Belt-and-braces: a backend binary invoked directly against a config
-          # that names the other backend refuses to run.
+          # Belt-and-braces: the backend binary invoked directly against the same
+          # config also refuses to run.
           if out=$("$bindir/zallet-zebra" --datadir "$datadir" example-config -o - \
             --this-is-beta-code-and-you-will-need-to-recreate-the-example-later 2>&1); then
-            echo "expected zallet-zebra to reject a backend=zaino config"; exit 1
+            echo "expected zallet-zebra to reject a backend=absent config"; exit 1
           fi
           echo "$out" | grep -q "provides the 'zebra' backend" \
             || { echo "unexpected mismatch error: $out"; exit 1; }
@@ -124,7 +126,6 @@ jobs:
           - Windows
         state:
           - default
-          - NU7
 
         include:
           - target: macOS
@@ -133,18 +134,9 @@ jobs:
             os: windows-latest
 
           - target: Linux
-            state: NU7
-            os: ubuntu-latest
-            rustflags: '--cfg zcash_unstable="nu7"'
-
-          - target: Linux
             state: merchant_terminal
             os: ubuntu-latest
             rustflags: '--cfg zallet_build="merchant_terminal"'
-
-        exclude:
-          - target: macOS
-            state: NU7
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -154,18 +146,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      # Cross-platform / NU7 / merchant_terminal coverage tracks zallet-core and the
-      # zaino backend; the `zebra-state` backend is Linux-only and covered by
-      # `test-msrv-required`.
+      # Cross-platform / merchant_terminal coverage tracks zallet-core; the
+      # `zebra-state` backend is Linux-only and covered by `test-msrv-required`.
       - name: Run tests (zallet-core)
         run: >
           cargo test
           --workspace
-          --features zcashd-import,rpc-cli,tokio-console
-      - name: Run tests (zaino backend)
-        run: >
-          cargo test
-          --manifest-path backends/zaino/Cargo.toml
           --features zcashd-import,rpc-cli,tokio-console
       - name: Verify working directory is clean
         run: git diff --exit-code
@@ -190,17 +176,11 @@ jobs:
         # Multi-path rm requires bash: the Windows default shell (pwsh) aliases
         # `rm` to Remove-Item, which rejects multiple positional paths.
         shell: bash
-        run: rm Cargo.lock backends/zebra/Cargo.lock backends/zaino/Cargo.lock
+        run: rm Cargo.lock backends/zebra/Cargo.lock
       - name: Build crates (zallet-core)
         run: >
           cargo build
           --workspace
-          --all-targets
-          --features zcashd-import,rpc-cli,tokio-console
-      - name: Build crates (zaino backend)
-        run: >
-          cargo build
-          --manifest-path backends/zaino/Cargo.toml
           --all-targets
           --features zcashd-import,rpc-cli,tokio-console
       - name: Build crates (zebra-state backend)
@@ -214,7 +194,7 @@ jobs:
         # The `--` is load-bearing: the deleted lockfiles are not regenerated on
         # platforms that skip a backend build, and git fatals on a pathspec for
         # a nonexistent path unless the paths are `--`-separated.
-        run: git diff --exit-code -- ':!Cargo.lock' ':!backends/zebra/Cargo.lock' ':!backends/zaino/Cargo.lock'
+        run: git diff --exit-code -- ':!Cargo.lock' ':!backends/zebra/Cargo.lock'
 
   required-checks:
     name: Required status checks have passed

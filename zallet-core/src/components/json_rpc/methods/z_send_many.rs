@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use abscissa_core::Application;
 
 use jsonrpsee::core::{JsonValue, RpcResult};
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::ExposeSecret;
 use serde_json::json;
 use zcash_client_backend::data_api::wallet::SpendingKeys;
@@ -18,7 +19,7 @@ use zcash_client_backend::{
     fees::StandardFeeRule,
     wallet::OvkPolicy,
 };
-use zcash_client_sqlite::{AccountUuid, ReceivedNoteId};
+use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, util::SystemClock};
 use zcash_keys::{
     address::Address,
     keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
@@ -142,7 +143,7 @@ pub(crate) async fn call<C: Chain>(
             count = amounts.len(),
             limit = actions_limit,
             config = "-orchardactionlimit=N",
-            bound = format!("N >= %u"),
+            bound = "N >= %u".to_string(),
         )));
     }
 
@@ -239,6 +240,8 @@ async fn run<C: Chain>(
         create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             wallet.as_mut(),
             &params,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             &prover,
             &prover,
             &spending_keys,
@@ -261,6 +264,8 @@ async fn run<C: Chain>(
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
+    use std::collections::BTreeSet;
+
     use zcash_client_backend::{
         data_api::wallet::input_selection::{CoinbasePolicy, TransparentSource},
         fees::TransparentChangePolicy,
@@ -269,7 +274,7 @@ mod tests {
         address::{Address, UnifiedAddress},
         keys::{UnifiedAddressRequest, UnifiedSpendingKey},
     };
-    use zcash_protocol::consensus::Network;
+    use zcash_protocol::{ShieldedPool, consensus::Network};
     use zip32::AccountId;
 
     use super::{SpendPolicy, legacy_pool_spend_policy};
@@ -395,19 +400,107 @@ mod tests {
             account in arb_account(),
         ) {
             let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            // Some seeds derive an address without every shielded receiver; those
+            // receiver-restricted cases are covered by
+            // `unified_source_spends_only_its_receivers_pools`.
+            prop_assume!(ua.orchard().is_some() && ua.sapling().is_some());
 
-            let policy = spend_policy_for(&Address::Unified(ua));
+            let policy = spend_policy_for(&Address::Unified(Box::new(ua)));
 
             prop_assert!(
                 policy.transparent().is_none(),
                 "a shielded source must not permit transparent spending",
             );
 
-            // Shielded selection is left exactly as it was before transparent spending
-            // existed. Comparing against the default's pool set keeps that true for any
-            // pool added later, rather than pinning today's three.
+            // The address carries every shielded receiver type, so its permitted pools
+            // are exactly the full set. Comparing against the default's pool set keeps
+            // that true for any pool added later, rather than pinning today's three.
             let unchanged = SpendPolicy::default();
             prop_assert_eq!(policy.shielded(), unchanged.shielded());
+        }
+
+        /// A bare Sapling source draws only on the Sapling pool, never on the account's
+        /// Orchard or Ironwood notes, and on no transparent UTXO.
+        #[test]
+        fn sapling_source_spends_only_the_sapling_pool(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+        ) {
+            let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            let Some(saddr) = ua.sapling().cloned() else { return Ok(()) };
+
+            let policy = spend_policy_for(&Address::Sapling(Box::new(saddr)));
+
+            prop_assert_eq!(
+                policy.shielded(),
+                &BTreeSet::from([ShieldedPool::Sapling]),
+                "a Sapling source must draw only on the Sapling pool",
+            );
+            prop_assert!(
+                policy.transparent().is_none(),
+                "a shielded source must not permit transparent spending",
+            );
+        }
+
+        /// A receiver-restricted unified address selects inputs only from the value pools
+        /// its receivers name, as the `z_sendmany` documentation promises. An Orchard
+        /// receiver names both the Orchard pool and the Ironwood pool (where payments to
+        /// Orchard receivers are accounted once Ironwood is active).
+        #[test]
+        fn unified_source_spends_only_its_receivers_pools(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+            include_transparent in any::<bool>(),
+        ) {
+            let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            let orchard = ua.orchard().copied();
+            let sapling = ua.sapling().cloned();
+            // The transparent receiver's presence must make no difference to the
+            // permitted pools, so the property quantifies over it.
+            let transparent = include_transparent
+                .then(|| ua.transparent().copied())
+                .flatten();
+
+            let orchard_pools = BTreeSet::from([ShieldedPool::Orchard, ShieldedPool::Ironwood]);
+            let sapling_pools = BTreeSet::from([ShieldedPool::Sapling]);
+
+            // Each combo pairs a receiver subset with the exact pool set it must permit.
+            // Some seeds derive an address without every shielded receiver, so only the
+            // combos this seed can express are exercised.
+            let mut combos = Vec::new();
+            if orchard.is_some() {
+                combos.push((orchard, None, orchard_pools.clone()));
+            }
+            if sapling.is_some() {
+                combos.push((None, sapling, sapling_pools.clone()));
+            }
+            if orchard.is_some() && sapling.is_some() {
+                combos.push((
+                    orchard,
+                    sapling,
+                    orchard_pools.union(&sapling_pools).copied().collect(),
+                ));
+            }
+
+            for (orchard, sapling, expected) in combos {
+                let Some(ua) =
+                    UnifiedAddress::from_receivers(orchard, sapling, transparent, None, None)
+                else {
+                    continue;
+                };
+
+                let policy = spend_policy_for(&Address::Unified(Box::new(ua)));
+
+                prop_assert_eq!(
+                    policy.shielded(),
+                    &expected,
+                    "permitted pools must be exactly those named by the source's receivers",
+                );
+                prop_assert!(
+                    policy.transparent().is_none(),
+                    "a shielded source must not permit transparent spending",
+                );
+            }
         }
 
         /// Change may be returned to the transparent pool exactly when the source could spend
@@ -427,7 +520,7 @@ mod tests {
                 "a fully transparent send keeps its change transparent",
             );
 
-            let shielded_source = spend_policy_for(&Address::Unified(ua));
+            let shielded_source = spend_policy_for(&Address::Unified(Box::new(ua)));
             prop_assert_eq!(
                 transparent_change_policy_for(&shielded_source),
                 TransparentChangePolicy::ShieldChange,
