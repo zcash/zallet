@@ -13,7 +13,14 @@ use zcash_client_backend::{
 use zcash_keys::encoding::AddressCodec;
 
 use super::verify_message;
-use crate::components::{database::DbConnection, json_rpc::server::LegacyCode, keystore::KeyStore};
+use crate::{
+    components::{
+        database::Database,
+        json_rpc::{server::LegacyCode, utils::wallet_handle},
+        keystore::KeyStore,
+    },
+    network::Network,
+};
 
 /// Response to a `signmessage` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -28,7 +35,7 @@ pub(super) const PARAM_MESSAGE_DESC: &str = "The message to create a signature o
 
 /// Signs a message with the private key of a transparent address.
 pub(crate) async fn call(
-    wallet: &DbConnection,
+    wallet: &Database,
     keystore: &KeyStore,
     t_addr: &str,
     message: &str,
@@ -55,12 +62,18 @@ pub(crate) async fn call(
 
 /// Retrieves the private key for a transparent address known to the wallet.
 async fn get_transparent_secret_key(
-    wallet: &DbConnection,
+    wallet: &Database,
     keystore: &KeyStore,
     address: &TransparentAddress,
 ) -> RpcResult<secp256k1::SecretKey> {
-    // Find the account for this transparent address.
+    let params: Network = *wallet.params();
+
+    // Find the account for this transparent address, on a connection scoped to the
+    // lookup and released before key material is decrypted below, which acquires its
+    // own connection via the keystore (see `Database::handle`).
     let (account, metadata) = {
+        let handle = wallet_handle(wallet).await?;
+        let wallet = handle.as_ref();
         let mut found = None;
         for account_id in wallet
             .get_account_ids()
@@ -102,7 +115,7 @@ async fn get_transparent_secret_key(
                 .map_err(map_wallet_locked_error)?;
 
             let usk = UnifiedSpendingKey::from_seed(
-                wallet.params(),
+                &params,
                 seed.expose_secret(),
                 derivation.account_index(),
             )

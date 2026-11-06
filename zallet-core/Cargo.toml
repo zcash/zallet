@@ -225,3 +225,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(zallet_build, values("merchant_terminal", "wallet"))',
     'cfg(zallet_unimplemented)',
 ] }
+
+[lints.clippy]
+await_holding_invalid_type = "warn"

@@ -121,6 +121,23 @@ impl Drop for PendingWalletSyncTasks {
     }
 }
 
+/// The number of pooled database connections that wallet sync retains for the lifetime
+/// of the process.
+///
+/// Derived from the four tasks spawned by [`WalletSync::spawn`], each of which moves one
+/// `DbHandle` into itself: the batch decryptor, steady-state sync (which inherits the
+/// handle `initialize` uses), history recovery, and transaction data requests. The
+/// connection pool is sized above this value (see
+/// [`Database::handle`](crate::components::database::Database::handle) and
+/// `database::connection::pool`) so that foreground wallet operations are never starved
+/// by sync.
+///
+/// This count is not statically enforced: it must equal the number of `db.handle()`
+/// acquisitions whose connections [`WalletSync::spawn`] moves into long-lived tasks. A
+/// task added there without updating this constant (and the pool's sizing floor) would
+/// reintroduce the starvation this guards against, so change them together.
+pub(crate) const LONG_LIVED_SYNC_CONNECTIONS: usize = 4;
+
 impl WalletSync {
     /// Builds the batch decryptor. Split from [`WalletSync::spawn`] so the RPC server can be
     /// handed a handle before `spawn`'s initial scan, which would otherwise delay RPC startup.
@@ -134,6 +151,12 @@ impl WalletSync {
     ///
     /// On success, the caller owns cancellation for every returned task and must register
     /// that ownership before its next cancellable await.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "sync deliberately retains LONG_LIVED_SYNC_CONNECTIONS pooled \
+                  connections for the lifetime of the process; the pool is sized above \
+                  that count (see `database::connection::pool`)"
+    )]
     pub(crate) async fn spawn<C: Chain>(
         config: &ZalletConfig,
         db: Database,
@@ -146,7 +169,13 @@ impl WalletSync {
         let params = config.consensus.network();
         let recover_batch_size = config.sync.recover_batch_size();
 
-        // Spawn the processing tasks.
+        // Spawn the processing tasks. Each long-lived task holds one pooled connection
+        // for the lifetime of the process; the total held must equal
+        // [`LONG_LIVED_SYNC_CONNECTIONS`], which the pool's foreground headroom is sized
+        // above (see `database::connection::pool`). The connections are acquired lazily,
+        // each where its task is spawned, so that a failure partway through this function
+        // never acquires the connections for tasks it did not reach. Keep this count and
+        // the constant in step.
         let batch_decryptor_task = {
             let mut db_data = db.handle().await?;
             crate::spawn!("Batch decryptor", async move {

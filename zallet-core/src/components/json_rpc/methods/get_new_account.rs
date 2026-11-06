@@ -6,12 +6,12 @@ use zcash_client_backend::data_api::{WalletRead, WalletWrite};
 
 use crate::components::{
     chain::{Chain, ChainView},
-    database::DbConnection,
+    database::Database,
     json_rpc::{
         server::LegacyCode,
         utils::{
             ensure_seed_is_backed_up, ensure_wallet_is_unlocked, fetch_account_birthday,
-            parse_seedfp_parameter,
+            parse_seedfp_parameter, wallet_handle,
         },
     },
     keystore::{KeyStore, SeedSelectionError},
@@ -38,7 +38,7 @@ pub(super) const PARAM_SEEDFP_DESC: &str =
     "ZIP 32 seed fingerprint for the BIP 39 mnemonic phrase from which to derive the account.";
 
 pub(crate) async fn call<C: Chain>(
-    wallet: &mut DbConnection,
+    wallet: &Database,
     keystore: &KeyStore,
     chain: C,
     decryptor: &WalletDecryptorHandle,
@@ -54,18 +54,28 @@ pub(crate) async fn call<C: Chain>(
         .await
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
-    let chain_height = wallet
-        .chain_height()
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-        .ok_or(LegacyCode::InWarmup.with_static("Wallet sync required"))?
-        // Tolerate race conditions between this RPC and the sync engine.
-        .min(
-            chain_view
-                .tip()
-                .await
-                .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-                .height(),
-        );
+    // The wallet connection is scoped to this read and released before the chain query
+    // and the keystore queries below; the keystore acquires its own connection (see
+    // `Database::handle`).
+    let wallet_height = {
+        let handle = wallet_handle(wallet).await?;
+        handle
+            .as_ref()
+            .chain_height()
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+            .ok_or(LegacyCode::InWarmup.with_static("Wallet sync required"))?
+    };
+
+    // Tolerate race conditions between this RPC and the sync engine: the wallet's
+    // recorded height and the chain view are deliberately read without any shared
+    // snapshot, so taking the minimum keeps the birthday at a height both have seen.
+    let chain_height = wallet_height.min(
+        chain_view
+            .tip()
+            .await
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+            .height(),
+    );
 
     let birthday = fetch_account_birthday(&chain_view, chain_height, None).await?;
 
@@ -87,7 +97,10 @@ pub(crate) async fn call<C: Chain>(
         .await
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
-    let (account_id, _usk) = wallet
+    // All key material is in hand; reacquire a connection for the mutation.
+    let (account_id, _usk) = wallet_handle(wallet)
+        .await?
+        .as_mut()
         .create_account(account_name, &seed, &birthday, None)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 

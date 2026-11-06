@@ -1,11 +1,10 @@
 //! `example-config` subcommand
 
 use abscissa_core::Runnable;
-use tokio::{fs::File, io::AsyncWriteExt};
 
 use crate::{
     cli::ExampleConfigCmd,
-    commands::{AsyncRunnable, overwrite_allowed, resolve_output_target},
+    commands::{AsyncRunnable, overwrite_allowed, resolve_output_target, write_config_output},
     config::ZalletConfig,
     error::{Error, ErrorKind},
     fl,
@@ -26,25 +25,11 @@ impl AsyncRunnable for ExampleConfigCmd {
         // is never overwritten.
         let output_path = resolve_output_target(APP.config().datadir(), self.output.as_deref());
         if let Some(path) = output_path {
-            let mut f = if overwrite_allowed(self.force, self.output.is_some()) {
-                File::create(&path).await
-            } else {
-                match File::create_new(&path).await {
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        return Err(ErrorKind::Generic
-                            .context(fl!(
-                                "err-config-output-exists",
-                                path = path.display().to_string()
-                            ))
-                            .into());
-                    }
-                    other => other,
-                }
-            }
-            .map_err(|e| ErrorKind::Generic.context(e))?;
-            f.write_all(output.as_bytes())
-                .await
-                .map_err(|e| ErrorKind::Generic.context(e))?;
+            write_config_output(
+                &path,
+                overwrite_allowed(self.force, self.output.is_some()),
+                &output,
+            )?;
             println!(
                 "{}",
                 fl!("migrate-config-written", conf = path.display().to_string())

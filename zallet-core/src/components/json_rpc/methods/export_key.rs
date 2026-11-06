@@ -5,10 +5,12 @@ use serde::Serialize;
 use zcash_keys::encoding::{decode_payment_address, encode_extended_spending_key};
 use zcash_protocol::consensus::Parameters;
 
-use crate::components::{
-    database::DbConnection,
-    json_rpc::{server::LegacyCode, utils::ensure_wallet_is_unlocked},
-    keystore::KeyStore,
+use crate::{
+    components::{
+        json_rpc::{server::LegacyCode, utils::ensure_wallet_is_unlocked},
+        keystore::KeyStore,
+    },
+    network::Network,
 };
 
 /// Response to a `z_exportkey` RPC request.
@@ -22,12 +24,12 @@ pub(crate) struct ResultType(String);
 pub(super) const PARAM_ADDRESS_DESC: &str =
     "The Sapling payment address corresponding to the spending key to export.";
 
-pub(crate) async fn call(wallet: &DbConnection, keystore: &KeyStore, address: &str) -> Response {
+pub(crate) async fn call(params: &Network, keystore: &KeyStore, address: &str) -> Response {
     ensure_wallet_is_unlocked(keystore).await?;
 
     // Decode the Sapling payment address.
     let payment_address = decode_payment_address(
-        zcash_address::constants::hrp_sapling_payment_address(wallet.params().network_type()),
+        zcash_address::constants::hrp_sapling_payment_address(params.network_type()),
         address,
     )
     .map_err(|e| {
@@ -45,7 +47,7 @@ pub(crate) async fn call(wallet: &DbConnection, keystore: &KeyStore, address: &s
         })?;
 
     let encoded = encode_extended_spending_key(
-        zcash_keys::constants::hrp_sapling_extended_spending_key(wallet.params().network_type()),
+        zcash_keys::constants::hrp_sapling_extended_spending_key(params.network_type()),
         &extsk,
     );
 

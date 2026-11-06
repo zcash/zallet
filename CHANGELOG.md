@@ -26,6 +26,40 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- A `database.max_connections` configuration option overrides the wallet
+  database connection pool size. When unset (the default), Zallet sizes the
+  pool automatically from the CPU count, floored so that foreground JSON-RPC
+  and CLI work is never starved by the connections the sync engine retains.
+  Setting it at or below that number starves wallet operations, so it is
+  intended mainly for regression testing, not production use.
+
+### Changed
+
+- The wallet database file is now created with a protected owner-only ACL on
+  Windows, matching the owner-only mode `0600` it already used on Unix
+  (previously it inherited the data directory's access control there). An
+  existing database file is still tightened on Unix only.
+
+### Fixed
+
+- Wallet JSON-RPC methods no longer risk waiting forever for a database
+  connection while wallet sync is running (#708). Methods that use both the
+  database and stored key material (`z_getnewaccount`, `z_recoveraccounts`,
+  `z_getaddressforaccount`, `z_getbalanceforaccount`, `z_viewtransaction`,
+  `z_importkey`, `z_exportkey`, `z_exportviewingkey`, `z_sendmany`,
+  `z_sendfromaccount`, `z_shieldcoinbase`, `pczt_sign`, `pczt_extract`,
+  `signmessage`) previously held one pooled connection while acquiring
+  another, which could deadlock them (and starve every other wallet RPC,
+  including `z_listaccounts` and `getwalletinfo`) once sync's long-lived
+  connections had consumed the rest of the pool. On small machines this was
+  reachable from a fresh wallet: `z_getnewaccount` could hang before any
+  account existed. The pool's CPU-derived default sizing honours container
+  CPU quotas, so a container limited to one or two CPUs was the most common
+  way to hit this. The connection pool is now also always sized with headroom
+  above the connections sync retains.
+
 ## [0.1.0-beta.4] - 2026-11-01
 
 ### Added

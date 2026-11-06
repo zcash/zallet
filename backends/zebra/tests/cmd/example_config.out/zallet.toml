@@ -108,6 +108,19 @@ network = "main"
 # replace all backslashes `/` with forward slashes `/`.
 #wallet = "wallet.db"
 
+# Maximum number of connections in the wallet database connection pool.
+#
+# When unset (the default), Zallet sizes the pool automatically from the number of
+# CPUs, with a floor that always leaves connections free for JSON-RPC and CLI work
+# after the background sync engine has taken the ones it holds for the lifetime of
+# the process. Leave this unset unless you have a specific reason not to.
+#
+# Setting it too low starves wallet operations: the sync engine permanently retains
+# several connections, so a value at or below that number prevents the wallet from
+# servicing any JSON-RPC request. This override exists mainly so regression tests
+# can force a small pool; it is not recommended for production use.
+#max_connections = UNSET
+
 
 #
 # Settings controlling how Zallet interacts with the outside world.

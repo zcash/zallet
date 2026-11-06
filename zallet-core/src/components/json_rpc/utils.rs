@@ -17,10 +17,11 @@ use zcash_protocol::{
 use zip32::DiversifierIndex;
 
 use super::server::LegacyCode;
+use crate::components::database::{Database, DbHandle};
 
 #[cfg(zallet_build = "wallet")]
 use {
-    crate::components::{chain::ChainView, database::DbConnection, keystore::KeyStore},
+    crate::components::{chain::ChainView, keystore::KeyStore},
     std::collections::HashSet,
     zcash_client_backend::data_api::{Account, AccountBirthday, WalletRead, chain::ChainState},
     zcash_primitives::block::BlockHash,
@@ -30,6 +31,7 @@ use {
 
 #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
 use {
+    crate::components::database::DbConnection,
     crate::error::ErrorKind,
     std::collections::HashMap,
     transparent::address::TransparentAddress,
@@ -43,6 +45,18 @@ use {
 /// the legacy `getnewaddress` and `z_getnewaddress` code paths.
 #[cfg(zallet_build = "wallet")]
 pub(super) const ZCASH_LEGACY_ACCOUNT: u32 = 0x7fff_ffff;
+
+/// Acquires a wallet database connection, mapping a pool failure to the internal-error
+/// RPC code.
+///
+/// The deadlock-avoidance rule on [`Database::handle`] applies: do not call this (or any
+/// keystore method that touches key material) while already holding a [`DbHandle`].
+pub(super) async fn wallet_handle(wallet: &Database) -> RpcResult<DbHandle> {
+    wallet
+        .handle()
+        .await
+        .map_err(|_| RpcErrorCode::InternalError.into())
+}
 
 #[cfg(zallet_build = "wallet")]
 pub(super) async fn ensure_wallet_is_unlocked(keystore: &KeyStore) -> RpcResult<()> {
@@ -82,27 +96,26 @@ pub(super) async fn ensure_seed_is_backed_up(
     }
 }
 
-/// Collects the standalone (non-HD) transparent spending keys required to sign the
-/// transparent inputs of `proposal`.
-///
 /// Determines which transparent receivers in this account were imported standalone
-/// (vs. HD-derived). Only those have an associated entry in the keystore's
-/// standalone-key table; HD-derived receivers are signed for using `usk` and must not
-/// be looked up via `decrypt_standalone_transparent_key` (which would error with
-/// `QueryReturnedNoRows`).
+/// (vs. HD-derived).
+///
+/// This is the database half of collecting the standalone (non-HD) transparent spending
+/// keys needed to sign a proposal's transparent inputs; run it while a wallet connection
+/// is held, then release that connection and pass the result to
+/// [`decrypt_standalone_transparent_keys`] (which acquires its own connection via the
+/// keystore, and so must not run while the caller still holds one; see
+/// [`Database::handle`]).
 ///
 /// Gated on `zcashd-import` because its only callers (`z_send_many` and
 /// `z_shieldcoinbase`) sign for standalone keys under that feature, and on the
 /// `wallet` build because those callers are wallet-only and the
 /// `DbConnection`/`KeyStore` types it uses are only imported in that build.
 #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
-pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
+pub(super) fn standalone_transparent_receivers(
     wallet: &DbConnection,
-    keystore: &KeyStore,
     account_id: AccountUuid,
-    proposal: &Proposal<StandardFeeRule, NoteRef>,
-) -> RpcResult<HashMap<TransparentAddress, Vec<secp256k1::SecretKey>>> {
-    let standalone_addrs: HashSet<TransparentAddress> = wallet
+) -> RpcResult<HashSet<TransparentAddress>> {
+    Ok(wallet
         .get_transparent_receivers(account_id, true, true)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
         .into_iter()
@@ -114,8 +127,23 @@ pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
             TransparentAddressSource::StandaloneAddress => None,
             TransparentAddressSource::Derived { .. } => None,
         })
-        .collect();
+        .collect())
+}
 
+/// Decrypts the standalone transparent spending keys required to sign the transparent
+/// inputs of `proposal`.
+///
+/// `standalone_addrs` is the output of [`standalone_transparent_receivers`]: only those
+/// addresses have an associated entry in the keystore's standalone-key table; HD-derived
+/// receivers are signed for using the account's unified spending key and must not be
+/// looked up via `decrypt_standalone_transparent_key` (which would error with
+/// `QueryReturnedNoRows`).
+#[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+pub(super) async fn decrypt_standalone_transparent_keys<NoteRef>(
+    keystore: &KeyStore,
+    standalone_addrs: &HashSet<TransparentAddress>,
+    proposal: &Proposal<StandardFeeRule, NoteRef>,
+) -> RpcResult<HashMap<TransparentAddress, Vec<secp256k1::SecretKey>>> {
     let mut keys: HashMap<TransparentAddress, Vec<secp256k1::SecretKey>> = HashMap::new();
     for step in proposal.steps() {
         for input in step.transparent_inputs() {
@@ -228,8 +256,12 @@ pub(crate) fn parse_seedfp(
 }
 
 /// Parses the `account` parameter present in many wallet RPCs.
+///
+/// Takes the database rather than a connection, acquiring one itself only for the
+/// numeric (ZIP 32 account index) form: callers must not already hold a [`DbHandle`],
+/// per the deadlock-avoidance rule on [`Database::handle`].
 pub(super) async fn parse_account_parameter(
-    #[cfg(zallet_build = "wallet")] wallet: &DbConnection,
+    #[cfg(zallet_build = "wallet")] wallet: &Database,
     #[cfg(zallet_build = "wallet")] keystore: &KeyStore,
     account: &JsonValue,
 ) -> RpcResult<AccountUuid> {
@@ -249,16 +281,22 @@ pub(super) async fn parse_account_parameter(
             let mut distinct_seeds = HashSet::new();
             let mut account_id = None;
 
+            // Query the keystore before acquiring a wallet connection: the keystore
+            // takes its own connection from the same pool.
             let legacy_seeds = keystore
                 .list_legacy_seed_fingerprints()
                 .await
                 .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
+            let wallet = wallet_handle(wallet).await?;
+
             for candidate_account_id in wallet
+                .as_ref()
                 .get_account_ids()
                 .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
             {
                 let account = wallet
+                    .as_ref()
                     .get_account(candidate_account_id)
                     .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
                     // This would be a race condition between this and account deletion.
