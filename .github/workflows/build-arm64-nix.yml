@@ -214,7 +214,14 @@ jobs:
       # by the `manifest` job on the final multi-arch index digest.)
       - name: Install Cosign
         if: ${{ steps.push.outputs.digest != '' }}
+        # Pinned explicitly: the installer's default (v3.0.2 here, v3.0.6 in
+        # installer v4.1.2) predates sigstore-go v1.3.0, whose Rekor upload
+        # recovers from a 409 "equivalent entry already exists" by fetching the
+        # existing entry (sigstore/sigstore-go#647). cosign v3.1.4 is the first
+        # release built against it. See the retry wrappers below.
         uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+        with:
+          cosign-release: v3.1.4
       - name: Install Syft
         if: ${{ steps.push.outputs.digest != '' }}
         uses: anchore/sbom-action/download-syft@8e94d75ddd33f69f691467e42275782e4bfefe84 # v0.20.9
@@ -225,10 +232,13 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -Eeuo pipefail
-          # A Rekor upload can be committed while its response is lost; cosign's
-          # own retry then fails with 409 "an equivalent entry already exists"
-          # (v0.1.0-beta.4, run 41461526245). A new cosign call signs with a fresh
-          # Fulcio certificate, so retrying the whole call cannot hit that 409.
+          # A Rekor upload can be committed while its response is lost; before
+          # cosign v3.1.4, cosign's own retry then failed with 409 "an equivalent
+          # entry already exists" (v0.1.0-beta.4, run 41461526245). v3.1.4 recovers
+          # from that 409 on Rekor v1, but not on Rekor v2, and other transient
+          # Fulcio, Rekor, or registry failures remain. A new cosign call signs
+          # with a fresh Fulcio certificate, so retrying the whole call cannot hit
+          # the same 409.
           retry() {
             local n
             for n in 1 2 3; do
