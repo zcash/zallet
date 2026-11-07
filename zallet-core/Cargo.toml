@@ -23,6 +23,7 @@ shadow-rs.workspace = true
 
 # Documentation
 documented.workspace = true
+openrpsee.workspace = true
 phf.workspace = true
 
 # Filesystem
@@ -156,6 +157,7 @@ windows = { workspace = true, features = [
 ] }
 
 [build-dependencies]
+openrpsee.workspace = true
 clap = { workspace = true, features = ["string", "unstable-styles"] }
 clap_complete.workspace = true
 clap_mangen.workspace = true
