@@ -1,6 +1,6 @@
 [package]
 name = "zallet-core"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.4"
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -80,9 +80,6 @@ rust_decimal.workspace = true
 schemars.workspace = true
 tower = { workspace = true, features = ["timeout"] }
 
-# Testing
-tempfile.workspace = true
-
 # Tracing
 console-subscriber = { workspace = true, optional = true }
 tracing.workspace = true
@@ -95,7 +92,7 @@ zcash_protocol = { workspace = true, features = ["local-consensus"] }
 # Zcash payment protocols
 # `bip32` is pinned to the same semver line as `transparent`'s dependency, because
 # we round-trip `TransparentKeyScope` through its `ChildNumber` type.
-bip32 = { version = "0.6.0-pre.1", default-features = false }
+bip32 = { version = "0.6", default-features = false }
 orchard.workspace = true
 pczt.workspace = true
 sapling.workspace = true
@@ -143,6 +140,21 @@ zewif-zcashd = { workspace = true, optional = true }
 # lightwalletd (temporary)
 tonic.workspace = true
 
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+# Already in the production graph via `age`; used for RENAME_NOREPLACE renames.
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Used to create secret-bearing files (e.g. the RPC auth cookie) with an
+# explicit owner-only DACL, instead of the ACL inherited from the parent
+# directory.
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+] }
+
 [build-dependencies]
 clap = { workspace = true, features = ["string", "unstable-styles"] }
 clap_complete.workspace = true
@@ -161,6 +173,7 @@ abscissa_core = { workspace = true, features = ["testing"] }
 once_cell.workspace = true
 proptest.workspace = true
 regex.workspace = true
+tempfile.workspace = true
 trycmd.workspace = true
 
 [features]
@@ -169,8 +182,7 @@ default = []
 ## Enables per-outpoint transparent spend detection: the wallet emits
 ## `TransactionDataRequest::SpendsOfTransparentOutput` and the backend resolves spends via a
 ## per-outpoint spend index. Enabled by the `zebra-state` backend package (which reaches
-## Zebra's spend index); the `zaino` backend leaves it off and uses address-based spend
-## detection instead.
+## Zebra's spend index). Without it, spends are detected by address-based queries.
 spend-index = ["zcash_client_sqlite/spend-index"]
 
 ## `zallet rpc` CLI support
@@ -212,5 +224,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(tokio_unstable)',
     'cfg(zallet_build, values("merchant_terminal", "wallet"))',
     'cfg(zallet_unimplemented)',
-    'cfg(zcash_unstable, values("nu7"))',
 ] }
+
+[lints.clippy]
+await_holding_invalid_type = "warn"

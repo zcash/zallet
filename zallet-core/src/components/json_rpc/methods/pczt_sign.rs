@@ -6,6 +6,7 @@ use documented::Documented;
 use jsonrpsee::core::RpcResult;
 use pczt::Pczt;
 use pczt::roles::signer::{Error as SignerError, Signer, extract_orchard_spend_auth_signatures};
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use schemars::JsonSchema;
 use secrecy::ExposeSecret;
 use serde::Serialize;
@@ -19,7 +20,6 @@ use super::pczt_common::{
 use super::pczt_error::PcztError;
 use crate::{
     components::{
-        database::DbHandle,
         json_rpc::{
             payments::{PrivacyPolicy, parse_privacy_policy},
             server::LegacyCode,
@@ -27,6 +27,7 @@ use crate::{
         keystore::KeyStore,
     },
     fl,
+    network::Network,
 };
 
 pub(crate) type Response = RpcResult<ResultType>;
@@ -132,7 +133,7 @@ fn check_privacy_policy(pczt: &Pczt, acknowledged: PrivacyPolicy) -> RpcResult<(
 /// is every input of a PCZT that carries no hints (one created by a different
 /// wallet).
 pub(crate) async fn call(
-    wallet: DbHandle,
+    params: &Network,
     keystore: KeyStore,
     pczt_base64: &str,
     privacy_policy: Option<String>,
@@ -232,15 +233,13 @@ pub(crate) async fn call(
         None => None,
         Some(hints) => match keystore.decrypt_seed(&hints.seed_fp).await {
             Ok(seed) => Some(
-                UnifiedSpendingKey::from_seed(
-                    wallet.params(),
-                    seed.expose_secret(),
-                    hints.account_idx,
-                )
-                .map_err(|e| {
-                    LegacyCode::InvalidAddressOrKey
-                        .with_message(fl!("err-pczt-derive-spending-key", error = e.to_string()))
-                })?,
+                UnifiedSpendingKey::from_seed(params, seed.expose_secret(), hints.account_idx)
+                    .map_err(|e| {
+                        LegacyCode::InvalidAddressOrKey.with_message(fl!(
+                            "err-pczt-derive-spending-key",
+                            error = e.to_string()
+                        ))
+                    })?,
             ),
             Err(e)
                 if matches!(e.kind(), crate::error::ErrorKind::Generic)
@@ -263,7 +262,7 @@ pub(crate) async fn call(
     // Ironwood notes are Orchard-shaped, so both pools sign under the same
     // spend authorizing key. Both keys are absent exactly when the wallet does
     // not hold the seed the PCZT names.
-    let sapling_ask = usk.as_ref().map(|usk| &usk.sapling().expsk.ask);
+    let sapling_ask = usk.as_ref().map(|usk| usk.sapling().expsk().ask());
     let orchard_ask = usk
         .as_ref()
         .map(|usk| orchard::keys::SpendAuthorizingKey::from(usk.orchard()));
@@ -300,19 +299,27 @@ pub(crate) async fn call(
     };
 
     let (sapling_signed, unsigned_sapling) = sign_each("Sapling spend", 0..sapling_count, |i| {
-        sapling_ask.map(|ask| signer.sign_sapling(i, ask))
+        sapling_ask.map(|ask| signer.sign_sapling(UnwrapErr(SysRng), i, ask))
     });
 
     let (orchard_signed, unsigned_orchard) = sign_each(
         "Orchard action",
         (0..orchard_count).filter(|i| !presigned_orchard.contains(i)),
-        |i| orchard_ask.as_ref().map(|ask| signer.sign_orchard(i, ask)),
+        |i| {
+            orchard_ask
+                .as_ref()
+                .map(|ask| signer.sign_orchard(UnwrapErr(SysRng), i, ask))
+        },
     );
 
     let (ironwood_signed, unsigned_ironwood) = sign_each(
         "Ironwood action",
         (0..ironwood_count).filter(|i| !presigned_ironwood.contains(i)),
-        |i| orchard_ask.as_ref().map(|ask| signer.sign_ironwood(i, ask)),
+        |i| {
+            orchard_ask
+                .as_ref()
+                .map(|ask| signer.sign_ironwood(UnwrapErr(SysRng), i, ask))
+        },
     );
 
     if strict.unwrap_or(false)

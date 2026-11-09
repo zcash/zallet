@@ -148,11 +148,6 @@ impl StartCmd {
         if config.builder.tx_expiry_delta.is_some() {
             warn_unused("builder.tx_expiry_delta");
         }
-        // TODO: https://github.com/zcash/zallet/issues/201
-        #[cfg(zallet_build = "wallet")]
-        if config.keystore.require_backup.is_some() {
-            warn_unused("keystore.require_backup");
-        }
         // These are accepted, documented, and migrated from zcashd config, but nothing
         // reads them at runtime, so a migrated wallet silently loses the behaviour.
         if config.external.export_dir.is_some() {
@@ -160,6 +155,13 @@ impl StartCmd {
         }
         if config.external.notify.is_some() {
             warn_unused("external.notify");
+        }
+        // Deprecated: only the removed Zaino backend read this option.
+        if config.indexer.db_path.is_some() {
+            warn!(
+                "{}",
+                fl!("warn-config-deprecated-ignored", option = "indexer.db_path")
+            );
         }
 
         // Construct a structurally admitted chain backend before opening the wallet database.

@@ -2,12 +2,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64ct::{Base64, Encoding};
-use rand::{Rng, rngs::OsRng};
+use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 use tracing::{info, warn};
 
 use super::authorization::PasswordHash;
 use crate::error::{Error, ErrorKind};
 use crate::fl;
+use crate::fs::{Publish, PublishError, write_private_file};
 
 /// Username for cookie-based auth, matching zcashd convention.
 pub(crate) const COOKIE_USER: &str = "__cookie__";
@@ -43,44 +44,34 @@ pub(crate) fn cookie_path(datadir: &Path) -> PathBuf {
 pub(crate) fn generate_cookie(
     datadir: &Path,
 ) -> Result<(String, PasswordHash, CookieGuard), Error> {
-    let password: [u8; 32] = OsRng.r#gen();
+    let password: [u8; 32] = UnwrapErr(SysRng).random();
     let password = Base64::encode_string(&password);
     let cookie = format!("{COOKIE_USER}:{password}");
 
     let cookie_path = cookie_path(datadir);
-    let tmp_path = datadir.join(format!("{COOKIE_FILENAME}.tmp"));
 
-    // Clean up any leftover tmp file from a previous crash.
-    let _ = fs::remove_file(&tmp_path);
-
-    // Write to temp file with restricted permissions for atomic creation.
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp_path)
-            .map_err(|e| ErrorKind::Init.context(e))?;
-        f.write_all(cookie.as_bytes()).map_err(|e| {
-            let _ = fs::remove_file(&tmp_path);
-            ErrorKind::Init.context(e)
-        })?;
-    }
-
-    #[cfg(not(unix))]
-    fs::write(&tmp_path, cookie.as_bytes()).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        ErrorKind::Init.context(e)
+    // The restrictive permissions are applied at creation time so there is no
+    // window during which another user can open the file, and the publication
+    // rename preserves them. The cookie is per-process, so an existing cookie
+    // (or a temporary left by a crashed process) is replaced.
+    write_private_file(
+        &cookie_path,
+        Publish::Replacing {
+            temp_suffix: ".tmp",
+        },
+        cookie.as_bytes(),
+    )
+    .map_err(|e| match e {
+        PublishError::Create { source, .. } | PublishError::PostPublish { source, .. } => {
+            ErrorKind::Init.context(source)
+        }
+        PublishError::Fill(e) | PublishError::Publish(e) => ErrorKind::Init.context(e),
+        // Replacing mode never refuses an existing destination; map it like any
+        // other publication failure rather than asserting on it.
+        PublishError::DestinationExists => {
+            ErrorKind::Init.context(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+        }
     })?;
-
-    // Atomic rename into place.
-    if let Err(e) = fs::rename(&tmp_path, &cookie_path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(ErrorKind::Init.context(e).into());
-    }
 
     info!(
         "{}",
@@ -192,5 +183,73 @@ mod tests {
             .unwrap()
             .permissions();
         assert_eq!(perms.mode() & 0o777, 0o600);
+    }
+
+    /// Checks that the cookie installed at its final path carries the owner-only
+    /// DACL applied at creation time, i.e. that the policy survives the atomic
+    /// rename and is not replaced by ACEs inherited from the parent directory.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn windows_file_acl() {
+        use crate::fs::OWNER_ONLY_SDDL;
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GetFileSecurityW, PSECURITY_DESCRIPTOR,
+        };
+        use windows::core::{HSTRING, PWSTR};
+
+        let dir = TempDir::new().unwrap();
+        let _guard = generate_cookie(dir.path()).unwrap();
+
+        let path = HSTRING::from(dir.path().join(COOKIE_FILENAME).as_os_str());
+
+        // First call reports the required buffer size (returning failure by
+        // design, hence the discarded result); the second fetches the security
+        // descriptor.
+        let mut needed = 0u32;
+        // SAFETY: the `HSTRING` is a NUL-terminated UTF-16 string, and passing no
+        // buffer is valid for querying the required size.
+        let _ =
+            unsafe { GetFileSecurityW(&path, DACL_SECURITY_INFORMATION.0, None, 0, &mut needed) };
+        let mut sd = vec![0u8; needed as usize];
+        // SAFETY: `sd` is a writable buffer of the size the previous call requested.
+        let ok = unsafe {
+            GetFileSecurityW(
+                &path,
+                DACL_SECURITY_INFORMATION.0,
+                Some(PSECURITY_DESCRIPTOR(sd.as_mut_ptr().cast())),
+                needed,
+                &mut needed,
+            )
+        };
+        assert!(ok.as_bool(), "{}", std::io::Error::last_os_error());
+
+        let mut sddl_ptr = PWSTR::null();
+        // SAFETY: `sd` holds the valid security descriptor fetched above, and
+        // `sddl_ptr` is a valid out-pointer.
+        unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                PSECURITY_DESCRIPTOR(sd.as_mut_ptr().cast()),
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut sddl_ptr,
+                None,
+            )
+        }
+        .unwrap();
+
+        // SAFETY: `sddl_ptr` is the NUL-terminated UTF-16 string the conversion
+        // above allocated on the local heap; it is read once and freed once.
+        let sddl = unsafe {
+            let sddl = sddl_ptr.to_string().unwrap();
+            LocalFree(Some(HLOCAL(sddl_ptr.as_ptr().cast())));
+            sddl
+        };
+
+        assert_eq!(sddl, OWNER_ONLY_SDDL);
     }
 }

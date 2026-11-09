@@ -70,7 +70,7 @@ on:
       smoke-distro:
         description: "Debian release used for binary/package smoke tests"
         required: false
-        default: bullseye
+        default: bookworm
         type: string
       apt-distributions:
         description: "Comma- or newline-separated Debian distributions to mirror/publish to apt.z.cash"
@@ -96,7 +96,7 @@ jobs:
       - id: compute
         env:
           PLATFORM_SPEC: ${{ inputs.platforms || 'linux/amd64' }}
-          MATRIX_DEBIAN: ${{ inputs['smoke-distro'] || 'bullseye' }}
+          MATRIX_DEBIAN: ${{ inputs['smoke-distro'] || 'bookworm' }}
         run: |
           set -euo pipefail
           MATRIX_JSON=$(
@@ -105,7 +105,7 @@ jobs:
           import os
 
           raw = os.environ.get("PLATFORM_SPEC", "").replace("\r", "")
-          debian_fallback = os.environ.get("MATRIX_DEBIAN", "bullseye").strip() or "bullseye"
+          debian_fallback = os.environ.get("MATRIX_DEBIAN", "bookworm").strip() or "bookworm"
 
           tokens = [tok.strip() for tok in raw.replace("\n", ",").split(",") if tok.strip()]
           if not tokens:
@@ -256,10 +256,10 @@ jobs:
           PLATFORM_KEY="${{ matrix.platform_key }}"
           ARTIFACT_ROOT="build/runtime-artifact/${PLATFORM_KEY}"
 
-          # Basic sanity check: the export image carries three binaries at its
-          # root (zcash/zallet#540): /zallet is the launcher, and
-          # /zallet-zebra + /zallet-zaino are the real backend binaries.
-          for bin in zallet zallet-zebra zallet-zaino; do
+          # Basic sanity check: the export image carries two binaries at its
+          # root (zcash/zallet#540): /zallet is the launcher, and /zallet-zebra
+          # is the real backend binary.
+          for bin in zallet zallet-zebra; do
             if [[ ! -s "${ARTIFACT_ROOT}/${bin}" ]]; then
               echo "Missing ${bin} binary under ${ARTIFACT_ROOT}" >&2
               find "${ARTIFACT_ROOT}" -maxdepth 5 || true
@@ -275,7 +275,6 @@ jobs:
           # executable perms.
           install -m 0755 "${ARTIFACT_ROOT}/zallet"             "build/${PLATFORM_KEY}/zallet"
           install -m 0755 "${ARTIFACT_ROOT}/zallet-zebra" "build/${PLATFORM_KEY}/zallet-zebra"
-          install -m 0755 "${ARTIFACT_ROOT}/zallet-zaino"       "build/${PLATFORM_KEY}/zallet-zaino"
 
           # Copy the usr/local tree as-is (completions, manpages, docs, etc.)
           # If there is no usr/local in the artifact, this won't fail because of '|| true'
@@ -295,16 +294,12 @@ jobs:
         run: |
           set -euo pipefail
           # Mount the launcher next to the zebra-state backend so `zallet -h`
-          # exercises real launcher dispatch; then check the zaino backend.
+          # exercises real launcher dispatch.
           docker run --rm --platform ${{ matrix.platform }} \
             -v "$PWD/build/${{ matrix.platform_key }}/zallet":/usr/local/bin/zallet:ro \
             -v "$PWD/build/${{ matrix.platform_key }}/zallet-zebra":/usr/local/bin/zallet-zebra:ro \
             "debian:${SMOKE_TEST_DISTRO}-slim" \
             /usr/local/bin/zallet -h
-          docker run --rm --platform ${{ matrix.platform }} \
-            -v "$PWD/build/${{ matrix.platform_key }}/zallet-zaino":/usr/local/bin/zallet-zaino:ro \
-            "debian:${SMOKE_TEST_DISTRO}-slim" \
-            /usr/local/bin/zallet-zaino -h
 
       - name: Prepare standalone release tarball
         env:
@@ -312,15 +307,14 @@ jobs:
           BINARY_SUFFIX: ${{ matrix.binary_suffix }}
         run: |
           set -euo pipefail
-          # Ship all three binaries (launcher + both real backends) in ONE
-          # self-sufficient tarball per platform, mirroring the .deb's layout
-          # (zcash/zallet#540) instead of three loose files. Preserves relative
+          # Ship both binaries (launcher + real backend) in ONE self-sufficient
+          # tarball per platform, mirroring the .deb's layout (zcash/zallet#540)
+          # instead of loose files. Preserves relative
           # perms/paths so `tar -xzf ... && ./zallet -h` works out of the box.
           STAGE="tarball/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}"
           mkdir -p "$STAGE"
           cp "build/${PLATFORM_KEY}/zallet"        "$STAGE/zallet"
           cp "build/${PLATFORM_KEY}/zallet-zebra"  "$STAGE/zallet-zebra"
-          cp "build/${PLATFORM_KEY}/zallet-zaino"  "$STAGE/zallet-zaino"
           chmod 0755 "$STAGE"/zallet*
           mkdir -p standalone
           # Deterministic tarball: fixed mtime/owner so the .tar.gz digest
@@ -348,7 +342,7 @@ jobs:
             "subject": {
               "name": "zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.tar.gz",
               "sha256": "${TARBALL_SHA256}",
-              "contains": ["zallet", "zallet-zebra", "zallet-zaino"]
+              "contains": ["zallet", "zallet-zebra"]
             },
             "source": {
               "image_ref": "${SOURCE_IMAGE_REF}",
@@ -404,7 +398,7 @@ jobs:
           PackageDownloadLocation: NOASSERTION
           FilesAnalyzed: false
           PackageChecksum: SHA256: {checksum}
-          # Contains: zallet (launcher), zallet-zebra, zallet-zaino
+          # Contains: zallet (launcher), zallet-zebra
           """
           output.write_text(doc, encoding="utf-8")
           PY
@@ -437,14 +431,13 @@ jobs:
 
           mkdir -p "${TARGET_DIR}" "${COMPLETIONS_DIR}" "${MANPAGES_DIR}"
 
-          # Seed the launcher and both real backend binaries for cargo-deb
+          # Seed the launcher and the real backend binary for cargo-deb
           # --no-build: the `zallet` package installs `zallet` = the launcher
-          # plus the two backend binaries it dispatches to (zcash/zallet#540;
+          # plus the backend binary it dispatches to (zcash/zallet#540;
           # the pre-split zallet-zebra *symlink* is obsolete — it is a
           # real binary now).
           install -m 0755 "build/${PLATFORM_KEY}/zallet"             "${TARGET_DIR}/zallet"
           install -m 0755 "build/${PLATFORM_KEY}/zallet-zebra" "${TARGET_DIR}/zallet-zebra"
-          install -m 0755 "build/${PLATFORM_KEY}/zallet-zaino"       "${TARGET_DIR}/zallet-zaino"
 
           # Copy the whole completions tree (whatever is inside)
           cp -a "${ROOT}/completions/." "${COMPLETIONS_DIR}/" 2>/dev/null || true
@@ -454,7 +447,7 @@ jobs:
 
           # Copy Debian copyright metadata. The license inventory is generated
           # by gen-copyright on the amd64 StageX path only; it is the union of
-          # all three shipped binaries' dependency graphs and arch-independent,
+          # both shipped binaries' dependency graphs and arch-independent,
           # so the arm64 (Nix-built) leg reuses the amd64 artifact's copy.
           if [[ -f "${ROOT}/debian-copyright" ]]; then
             install -m 0644 "${ROOT}/debian-copyright" "${TARGET_DIR}/debian-copyright"
@@ -505,13 +498,22 @@ jobs:
           set -euo pipefail
           mkdir -p smoke
           cp "zallet_${RELEASE_VERSION}_${{ matrix.arch }}.deb" smoke/package.deb
+          # The binaries are static musl builds, which is why one Debian release
+          # stands in for every distribution the package is published to. A
+          # shared-library dependency would break that, so fail on any Depends.
+          DEPENDS="$(dpkg-deb --field smoke/package.deb Depends)"
+          if [ -n "${DEPENDS}" ]; then
+            echo "::error::package declares Depends: ${DEPENDS}; the binaries are expected to be static"
+            exit 1
+          fi
           docker run --rm --platform ${{ matrix.platform }} \
             -v "$PWD/smoke":/release:ro \
             "debian:${SMOKE_TEST_DISTRO}-slim" \
             bash -euo pipefail -c "\
-              apt-get update >/dev/null && \
-              apt-get install -y --no-install-recommends ca-certificates >/dev/null && \
-              dpkg -i /release/package.deb || apt-get -f install -y >/dev/null && \
+              apt-get update >/dev/null; \
+              apt-get install -y --no-install-recommends ca-certificates >/dev/null; \
+              { dpkg -i /release/package.deb || apt-get -f install -y >/dev/null; }; \
+              dpkg -s zallet >/dev/null; \
               zallet -h >/dev/null"
 
       # NOTE: APT index publishing (aptly mirror/snapshot/publish + S3 sync) was

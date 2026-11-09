@@ -7,8 +7,8 @@ The amd64 image is a reproducible [StageX](https://codeberg.org/stagex/stagex/)
 build with SLSA provenance attestations; see
 [Supply Chain Security](../../slsa/slsa.md).
 
-The image contains the `zallet` launcher (the entrypoint) and both backend
-binaries (`zallet-zebra`, `zallet-zaino`) in `/usr/local/bin`, runs as the
+The image contains the `zallet` launcher (the entrypoint) and the backend
+binary (`zallet-zebra`) in `/usr/local/bin`, runs as the
 non-root user `1000:1000`, and uses `/var/lib/zallet` as its working
 directory. It is a minimal from-scratch image: there is no shell, and no
 `$HOME`, so **always pass `--datadir` explicitly**.
@@ -28,25 +28,25 @@ Then follow [Wallet setup](../setup.md) for the config contents and wallet
 initialization, running each `zallet` command through `docker run` as above
 (interactive commands such as `import-mnemonic` need `-it`).
 
-## Choosing a backend in containers
+## Connecting to zebrad from a container
 
 The launcher dispatches on the config's `backend` key as usual (see
-[Choosing a chain backend](README.md#choosing-a-chain-backend)):
+[Choosing a chain backend](README.md#choosing-a-chain-backend)). The `zebra`
+backend reads `zebrad`'s state database directly, so:
 
-- The default `zebra` backend reads `zebrad`'s state database directly, so the
-  `zebrad` container's state directory must be mounted into the Zallet
+- the `zebrad` container's state directory must be mounted into the Zallet
   container (read-only) at the path named by
-  `indexer.read_state_service.zebra_state_path`, and `zebrad` must be built
-  with the `indexer` feature.
-- The `zaino` backend talks to `zebrad` only over JSON-RPC, which makes it the
-  natural fit for container deployments where services are separate — point
-  `indexer.validator_address` at the `zebrad` container and connect the
-  containers to the same network.
+  `indexer.read_state_service.zebra_state_path`, which requires both
+  containers to run on the same host;
+- `zebrad` must be built with the `indexer` feature; and
+- `indexer.validator_address` and `indexer.read_state_service.grpc_address`
+  must point at the `zebrad` container, with both containers connected to the
+  same network.
 
-To run a specific backend binary directly, override the entrypoint:
+To run the backend binary directly, override the entrypoint:
 
 ```
-$ docker run --rm -v zallet-data:/var/lib/zallet --entrypoint zallet-zaino \
+$ docker run --rm -v zallet-data:/var/lib/zallet --entrypoint zallet-zebra \
     zodlinc/zallet:latest --datadir /var/lib/zallet start
 ```
 

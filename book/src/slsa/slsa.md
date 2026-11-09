@@ -35,7 +35,7 @@ Zallet’s release automation is designed to satisfy the latest [SLSA v1.0](http
 - **Builder identity:** GitHub Actions workflows run with `permissions: id-token: write`, enabling keyless Sigstore certificates bound to the workflow path (`https://github.com/zcash/zallet/.github/workflows/<workflow>.yml@refs/tags/vX.Y.Z`).
 - **Provenance predicate:** `actions/attest-build-provenance@v3` emits [`https://slsa.dev/provenance/v1`](https://slsa.dev/provenance/v1) predicates for every OCI image (including the final multi-arch index), standalone binary, and `.deb`. Each predicate captures the git tag, commit SHA, build arguments, and resolved platform.
 - **Reproducibility (amd64):** StageX enforces a full-source-bootstrapped deterministic build. Re-running `make build` in a clean tree produces a bit-identical image whose digest matches the published amd64 digest. This is bootstrap-grade — the toolchain itself is built from a hand-auditable seed.
-- **Reproducibility (arm64):** the Nix build is rebuild-reproducible: `nix build .#zallet` from the pinned `flake.lock` (same `nixpkgs` rev + `crane` + `rustc`) produces a byte-identical `aarch64-unknown-linux-musl` binary, verifiable by building twice and comparing with `diffoscope`. It is **not** bootstrap-grade — Nix's toolchain derives from a pre-built binary bootstrap seed — so arm64 closes "did the published binary come from this source" but not the deeper trusting-trust question that StageX's amd64 path does. Note also that Nix gives determinism *by sandbox enforcement*, not by proof: an impure `build.rs` can still break it (e.g. `zaino-state`'s `build.rs` shells out to `git`), which is why the arm64 result is **verified** by a build-twice diff rather than assumed.
+- **Reproducibility (arm64):** the Nix build is rebuild-reproducible: `nix build .#zallet` from the pinned `flake.lock` (same `nixpkgs` rev + `crane` + `rustc`) produces a byte-identical `aarch64-unknown-linux-musl` binary, verifiable by building twice and comparing with `diffoscope`. It is **not** bootstrap-grade — Nix's toolchain derives from a pre-built binary bootstrap seed — so arm64 closes "did the published binary come from this source" but not the deeper trusting-trust question that StageX's amd64 path does. Note also that Nix gives determinism *by sandbox enforcement*, not by proof: an impure `build.rs` can still break it, which is why the arm64 result is **verified** by a build-twice diff rather than assumed.
 - **GPG signing key:** standalone binaries, `.deb` packages, and the APT `Release.gpg` are signed **only** with the ZODL release key (`sysadmin@zodl.com`, fetched from AWS Secrets Manager `/release/gpg-signing-key`). This is intentional: it does **not** dual-sign with the legacy ECC key (`sysadmin@z.cash`). The older `apt.z.cash` pipeline dual-signed (ECC + ZODL) during the key-transition window so users with either key in their keyring could verify; the ECC key's planned revocation is mid-2026, after which ZODL-only is the steady state. Users verify against the ZODL public key published at `https://apt.z.cash/zcash.asc`.
 
 ## Building Zallet yourself
@@ -132,6 +132,27 @@ export PATH="$PATH:$HOME/go/bin"
 # will look at a different repository and report "no signatures associated" even though the
 # tagged digest was signed under the real namespace.
 ```
+
+#### Versions re-released from a release branch
+
+The identities above assume the release workflow ran on the tag push. When a
+release run fails and is re-run with `workflow_dispatch` from a
+`release/${VERSION}` branch (the tagged commit plus a workflow fix), its images,
+binaries and packages are signed by that branch run instead. This applies to
+`v0.1.0-beta.1` and `v0.1.0-beta.4`. For those versions, use:
+
+```bash
+export IMAGE_WORKFLOW="https://github.com/${REPO}/.github/workflows/build-and-push-docker-hub.yaml@refs/heads/release/${VERSION}"
+export BIN_WORKFLOW="https://github.com/${REPO}/.github/workflows/binaries-and-deb-release.yml@refs/heads/release/${VERSION}"
+export BIN_SIGNER_WORKFLOW="github.com/${REPO}/.github/workflows/binaries-and-deb-release.yml@refs/heads/release/${VERSION}"
+```
+
+The released source is the tagged commit; the branch adds only workflow and
+book changes. The provenance names the branch commit, so in step 6
+`gitCommit` is that commit and the workflow ref is
+`refs/heads/release/${VERSION}`. Check that it differs from the tag only
+outside the source tree: `git diff --stat "${VERSION}" <gitCommit>` should
+list only `.github/` and `book/` files. Step 1 below validates the tag as usual.
 
 ### 1. Validate the git tag
 

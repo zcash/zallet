@@ -60,14 +60,35 @@ If this returns `true`, the user has write access (or higher) and the contributi
 - Inability to explain the logic or design tradeoffs of the changes when asked.
 - Missing or removed `Co-Authored-By:` metadata for AI-assisted contributions (see [AI Disclosure](#ai-disclosure)).
 
-## AI Disclosure
+## Contribution Policy
 
-If AI tools were used in the preparation of a commit, the contributor MUST include `Co-Authored-By:` metadata in the commit message indicating the AI agent's participation. The contents of the `Co-Authored-By` field must clearly identify which AI system was used (if multiple systems were used, each should have a `Co-Authored-By` line). Failure to do so is grounds for closing the pull request. The contributor is the sole responsible author -- "the AI generated it" is not a justification during review.
+Before contributing please see the [CONTRIBUTING.md] file.
+
+- All PRs require human review from a maintainer. This incurs a cost upon the dev team,
+  so ensure your changes are not frivolous.
+- Keep changes focused — avoid unsolicited refactors or broad "improvement" PRs.
+- See also the license and contribution terms in `README.md`.
+
+### AI Disclosure
+
+#### Commit messages
+If AI tools were used in the preparation of a commit, the contributor MUST include
+`Co-Authored-By:` metadata in the commit message identifying the AI system. Failure to
+include this is grounds for closing the pull request. The contributor is the sole
+responsible author — "the AI generated it" is not a justification during review.
 
 Example:
 ```
 Co-Authored-By: Claude <noreply@anthropic.com>
 ```
+#### Issues and Pull Requests
+If AI tools were used in preparation of a GitHub issue, a Pull Request or comments on 
+Issues or Pull Requests, the contributor creating the Issue, Pull Request or comment
+MUST include `Co-Authored-By:` metadata in the commit message identifying the AI system. 
+The contributor is the sole responsible author — "the AI generated it" is not a justification
+during review. The contributor is responsible for ensuring that GitHub issues, Pull Requests
+and comments authored by them with assistance of AI fully adhere to [CONTRIBUTING.md] and 
+the [Code of Conduct](https://github.com/zcash/zcash/blob/master/code_of_conduct.md). 
 
 ## Project Overview
 
@@ -80,9 +101,10 @@ Zallet is a Zcash full node wallet, designed to replace the legacy wallet that w
 
 ## Project Structure
 
-Zallet is split across **three independent Cargo workspaces**, each with its own
-`Cargo.lock`. A thin launcher binary (`zallet`) selects a backend at runtime and
-execs the matching per-backend binary (`zallet-zebra`, `zallet-zaino`).
+Zallet is split across **independent Cargo workspaces** (the root workspace plus
+one per chain backend), each with its own `Cargo.lock`. A thin launcher binary
+(`zallet`) selects a backend at runtime and execs the matching per-backend binary
+(currently `zallet-zebra`).
 
 ```text
 .
@@ -95,28 +117,26 @@ execs the matching per-backend binary (`zallet-zebra`, `zallet-zaino`).
 │                            #   linked into every backend binary
 ├── tools/gen-copyright/     # Build tooling (root workspace member)
 ├── backends/
-│   ├── zebra/               # Workspace for the `zallet-zebra` binary
-│   │                        #   (Zebra read-state backend); deps on zallet-core
-│   └── zaino/               # Workspace for the `zallet-zaino` binary
-│                            #   (Zaino indexer backend); deps on zallet-core
+│   └── zebra/               # Workspace for the `zallet-zebra` binary
+│                            #   (Zebra read-state backend); deps on zallet-core
 ├── utils/                   # Build + librustzcash lockstep scripts
 ├── book/                    # Documentation (mdBook)
 └── .github/workflows/       # CI configuration
 ```
 
 Because each backend binary statically links `zallet-core`, a change there
-affects both backends. All three binaries open the **same** wallet database, so
+affects every backend. Every binary opens the **same** wallet database, so
 the librustzcash stack (`zcash_client_backend`, `zcash_client_sqlite`, ...) MUST
-resolve to one identical version across all three lockfiles. This is enforced in
+resolve to one identical version across every lockfile. This is enforced in
 CI by `utils/check-lockstep.sh`. These crates are consumed as released
 crates.io versions, so when you bump one, apply the identical version
-requirement to all three manifests (root `Cargo.toml` plus
-`backends/{zebra,zaino}/Cargo.toml`), then run `utils/sync-lockfiles.sh` to
-reconcile the three lockfiles together (never hand-edit a single lockfile).
+requirement to every manifest (root `Cargo.toml` plus
+`backends/*/Cargo.toml`), then run `utils/sync-lockfiles.sh` to
+reconcile the lockfiles together (never hand-edit a single lockfile).
 
-`check-lockstep.sh` likewise requires the four shipped packages (`zallet`,
-`zallet-core`, `zallet-zebra`, `zallet-zaino`) to carry one identical version,
-which no single `cargo` invocation can bump because they span three workspaces.
+`check-lockstep.sh` likewise requires the shipped packages (`zallet`,
+`zallet-core`, `zallet-zebra`) to carry one identical version, which no single
+`cargo` invocation can bump because they span several workspaces.
 Use `utils/bump-version.sh <version>` rather than editing the manifests by hand:
 it also updates the artefacts that embed the version (the `as_of_version` trycmd
 goldens, the version-naming book prose, and the `[Unreleased]` changelog section,
@@ -127,7 +147,6 @@ Key external dependencies from the Zcash ecosystem:
 - `zcash_client_backend`, `zcash_client_sqlite` -- wallet backend logic and storage
 - `zcash_keys`, `zcash_primitives`, `zcash_proofs` -- protocol primitives
 - `zebra-chain`, `zebra-state`, `zebra-rpc` -- chain data types and node RPC
-- `zaino-*` -- indexer integration
 
 ## Code Conventions
 
@@ -146,7 +165,7 @@ Key external dependencies from the Zcash ecosystem:
 
 ## Build, Test, and Development Commands
 
-The three workspaces have separate lockfiles, so every check runs once **per
+The workspaces have separate lockfiles, so every check runs once **per
 workspace**: the root, then each backend via `--manifest-path`. CI does exactly
 this; run all legs before any PR. Formatting uses the pinned toolchain from
 `rust-toolchain.toml` (plain `cargo fmt`, never `cargo +nightly fmt`).
@@ -155,19 +174,16 @@ this; run all legs before any PR. Formatting uses the pinned toolchain from
 # Format check (root, then each backend)
 cargo fmt --all -- --check
 cargo fmt --manifest-path backends/zebra/Cargo.toml -- --check
-cargo fmt --manifest-path backends/zaino/Cargo.toml -- --check
 
 # Lint (root, then each backend)
 cargo clippy --all-targets -- -D warnings
 cargo clippy --manifest-path backends/zebra/Cargo.toml --all-targets -- -D warnings
-cargo clippy --manifest-path backends/zaino/Cargo.toml --all-targets -- -D warnings
 
 # Test (root, then each backend)
 cargo test
 cargo test --manifest-path backends/zebra/Cargo.toml
-cargo test --manifest-path backends/zaino/Cargo.toml
 
-# Verify the three lockfiles resolve librustzcash identically (also run in CI)
+# Verify the lockfiles resolve librustzcash identically (also run in CI)
 utils/check-lockstep.sh
 ```
 
@@ -176,7 +192,6 @@ Build the launcher and the backend binaries:
 ```bash
 cargo build --bin zallet
 cargo build --manifest-path backends/zebra/Cargo.toml --bin zallet-zebra
-cargo build --manifest-path backends/zaino/Cargo.toml --bin zallet-zaino
 ```
 
 `zallet` dispatches to the backend named by the config `backend` key (default
@@ -349,7 +364,7 @@ guarded against is on the failure path.
 
 ### CHANGELOG
 
-The repository has FOUR changelogs, one per audience, all following the
+The repository has THREE changelogs, one per audience, all following the
 conventions documented at [Keep a Changelog](https://keepachangelog.com/). See
 the Changelog Entries section of CONTRIBUTING.md for the full rationale.
 
@@ -358,7 +373,6 @@ the Changelog Entries section of CONTRIBUTING.md for the full rationale.
 | `CHANGELOG.md` | The `zallet` user interface | People who run Zallet and integrate against it |
 | `zallet-core/CHANGELOG.md` | The `zallet-core` public Rust API | People implementing a chain backend against it |
 | `backends/zebra/CHANGELOG.md` | The `zallet-zebra` binary | Operators running the Zebra read-state backend |
-| `backends/zaino/CHANGELOG.md` | The `zallet-zaino` binary | Operators running the Zaino indexer backend |
 
 The rules are:
 
@@ -368,7 +382,7 @@ The rules are:
   `zallet-core`'s own Rust API (the `Chain` / `ChainView` seam and the types it
   exchanges, or a dependency whose types appear in that API) go in its file. A
   backend's file records what that backend requires of its chain source: the
-  `zebrad` or Zaino versions it builds against, the on-disk formats it reads,
+  `zebrad` versions it builds against, the on-disk formats it reads,
   and backend-specific configuration.
 - An entry is REQUIRED for any change to the root file's surface — the JSON-RPC
   methods and their request and response shapes, the CLI commands, flags and
@@ -382,7 +396,7 @@ The rules are:
 - Entries **MUST NOT** describe implementation details, internal refactors,
   test-fixture reworks, or contracts no audience can observe. Documentation-only
   changes (book pages, rustdoc corrections) do not get entries. Before
-  dismissing a dependency bump as invisible, check all four audiences: one that
+  dismissing a dependency bump as invisible, check all three audiences: one that
   a wallet user cannot see may still force a backend implementor to upgrade in
   lockstep, or change which `zebrad` an operator must run.
 - A change serving two audiences goes in both files, written differently for
@@ -405,12 +419,12 @@ The rules are:
   the published entry.
 - The `## [Unreleased]` heading is permanent: it stays at the top of every
   changelog even when it is empty following a release.
-- All four packages ship in release lockstep under one version number, so every
+- All three packages ship in release lockstep under one version number, so every
   release heading appears in every file. A component with no changes for its own
   audience gets an empty section; that is expected, not an omission to fix.
 - Updated or added public API members MUST include complete `rustdoc` documentation comments.
 
-`utils/bump-version.sh` promotes the `## [Unreleased]` section in all four files
+`utils/bump-version.sh` promotes the `## [Unreleased]` section in all three files
 at release time; do not hand-roll the promotion.
 
 ### Merge Workflow
@@ -460,3 +474,4 @@ The Zallet authors hold this software to a high standard of quality. The followi
 - Derived serialization (e.g., `serde`) is NOT used except in specifically marked cases.
 - Serialization-critical types may not be modified once exposed in a public release.
 - These rules may be relaxed for purely ephemeral wire formats.
+

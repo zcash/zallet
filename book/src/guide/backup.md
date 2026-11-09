@@ -46,7 +46,41 @@ passphrase-encrypted — the key material in every copy of `wallet.db` becomes
 permanently undecryptable. Store the identity file separately from `wallet.db`
 where practical, since together they grant full spending access.
 
+## Encrypting backups before upload
+
+`wallet.db` as a whole is not encrypted (see [Wallet encryption]). Transaction
+history and viewing keys are stored in the clear, so any copy of the file,
+even one held by a backup service you do not fully control, exposes your full
+transaction history. Encrypt the database before uploading it to any
+third-party storage:
+
+```bash
+age -r <recipient> wallet.db > wallet.db.age
+```
+
+[`rage`] works the same way (`rage -r <recipient> wallet.db > wallet.db.age`).
+The recipient is the age public key from your wallet's
+[encryption identity](../concepts/encryption.md), or any other age recipient
+you control.
+
+Do not bundle the identity file in the same encrypted archive as `wallet.db`.
+Together they grant full spending access; encrypting them together means
+whoever decrypts the archive can spend. Back them up to separate locations.
+
+[Wallet encryption]: ../concepts/encryption.md
+[`rage`]: https://github.com/str4d/rage
+
 ### Backing up a mnemonic
+
+A phrase that Zallet generated for you exists nowhere else until you write it
+down, so Zallet asks you to confirm that you have: until you do, it will not
+derive new accounts or addresses from that phrase (see `keystore.require_backup`
+in the
+[configuration reference](../config/README.md)). Export and decrypt the phrase
+as described below, write it down, and then run
+[`zallet confirm-backup`](../cli/confirm-backup.md), which asks you to read
+three of its words back. A phrase you imported with `zallet import-mnemonic`
+needs no confirmation, since you already had it.
 
 [`zallet export-mnemonic`](../cli/export-mnemonic.md) exports the mnemonic for
 a given account. The output is **not plain text**: it is encrypted to the

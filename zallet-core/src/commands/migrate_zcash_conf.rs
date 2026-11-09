@@ -7,16 +7,17 @@ use std::path::PathBuf;
 use abscissa_core::Runnable;
 use tokio::{
     fs::File,
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, BufReader},
 };
 
 use crate::{
     cli::MigrateZcashConfCmd,
-    commands::AsyncRunnable,
+    commands::{AsyncRunnable, overwrite_allowed, resolve_output_target, write_config_output},
     config::{RpcAuthSection, ZalletConfig},
     error::{Error, ErrorKind},
     fl,
     network::RegTestNuParam,
+    prelude::*,
 };
 
 impl AsyncRunnable for MigrateZcashConfCmd {
@@ -147,23 +148,20 @@ impl AsyncRunnable for MigrateZcashConfCmd {
         output +=
             &toml::to_string_pretty(&config_toml).map_err(|e| ErrorKind::Generic.context(e))?;
 
-        // Write the Zallet config file.
-        let output_path = match self.output.as_deref() {
-            None => todo!("Fetch default Zallet config path"),
-            Some("-") => None,
-            Some(path) => Some(path),
-        };
+        // Write the Zallet config file. `--force` may overwrite only a target named
+        // explicitly with `-o`; the inferred default path is the live config, which
+        // is never overwritten (a re-run migration would discard any manual edits).
+        let output_path = resolve_output_target(APP.config().datadir(), self.output.as_deref());
         if let Some(path) = output_path {
-            let mut f = if self.force {
-                File::create(path).await
-            } else {
-                File::create_new(path).await
-            }
-            .map_err(|e| ErrorKind::Generic.context(e))?;
-            f.write_all(output.as_bytes())
-                .await
-                .map_err(|e| ErrorKind::Generic.context(e))?;
-            println!("{}", fl!("migrate-config-written", conf = path));
+            write_config_output(
+                &path,
+                overwrite_allowed(self.force, self.output.is_some()),
+                &output,
+            )?;
+            println!(
+                "{}",
+                fl!("migrate-config-written", conf = path.display().to_string())
+            );
         } else {
             println!("{output}")
         }
@@ -188,8 +186,8 @@ pub(crate) fn zcashd_default_data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         xdg::BaseDirectories::new()
-            .ok()
-            .map(|base_dirs| base_dirs.get_data_home().join("Zcash"))
+            .get_data_home()
+            .map(|data_home| data_home.join("Zcash"))
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]

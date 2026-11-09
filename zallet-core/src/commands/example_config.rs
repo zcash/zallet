@@ -1,14 +1,14 @@
 //! `example-config` subcommand
 
 use abscissa_core::Runnable;
-use tokio::{fs::File, io::AsyncWriteExt};
 
 use crate::{
     cli::ExampleConfigCmd,
-    commands::AsyncRunnable,
+    commands::{AsyncRunnable, overwrite_allowed, resolve_output_target, write_config_output},
     config::ZalletConfig,
     error::{Error, ErrorKind},
     fl,
+    prelude::*,
 };
 
 impl AsyncRunnable for ExampleConfigCmd {
@@ -20,23 +20,20 @@ impl AsyncRunnable for ExampleConfigCmd {
         // Serialize the example config.
         let output = ZalletConfig::generate_example();
 
-        // Write the Zallet config file.
-        let output_path = match self.output.as_deref() {
-            None => todo!("No default Zallet config path yet, use -o/--output"),
-            Some("-") => None,
-            Some(path) => Some(path),
-        };
+        // Write the Zallet config file. `--force` may overwrite only a target named
+        // explicitly with `-o`; the inferred default path is the live config, which
+        // is never overwritten.
+        let output_path = resolve_output_target(APP.config().datadir(), self.output.as_deref());
         if let Some(path) = output_path {
-            let mut f = if self.force {
-                File::create(path).await
-            } else {
-                File::create_new(path).await
-            }
-            .map_err(|e| ErrorKind::Generic.context(e))?;
-            f.write_all(output.as_bytes())
-                .await
-                .map_err(|e| ErrorKind::Generic.context(e))?;
-            println!("{}", fl!("migrate-config-written", conf = path));
+            write_config_output(
+                &path,
+                overwrite_allowed(self.force, self.output.is_some()),
+                &output,
+            )?;
+            println!(
+                "{}",
+                fl!("migrate-config-written", conf = path.display().to_string())
+            );
         } else {
             println!("{output}")
         }

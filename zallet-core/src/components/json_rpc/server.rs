@@ -2,7 +2,7 @@
 
 use jsonrpsee::{
     server::{RpcServiceBuilder, Server},
-    tracing::{info, warn},
+    tracing::info,
 };
 use std::path::PathBuf;
 use tokio::task::JoinHandle;
@@ -71,14 +71,19 @@ pub(crate) async fn spawn<C: Chain>(
 
     let timeout = config.timeout();
 
-    let has_cookie_user = config.auth.iter().any(|a| a.user == cookie::COOKIE_USER);
-    let (cookie, _cookie_guard) = if has_cookie_user {
-        warn!("{}", fl!("rpc-cookie-user-conflict"));
-        (None, None)
-    } else {
-        let (user, hash, guard) = cookie::generate_cookie(&datadir)?;
-        (Some((user, hash)), Some(guard))
-    };
+    // The cookie username is reserved. Reject the config before writing a cookie file we
+    // would only have to tear down again.
+    if config.auth.iter().any(|a| a.user == cookie::COOKIE_USER) {
+        return Err(ErrorKind::Init
+            .context(fl!(
+                "err-init-rpc-auth-cookie-user-reserved",
+                user = cookie::COOKIE_USER
+            ))
+            .into());
+    }
+
+    let (cookie_user, cookie_hash, _cookie_guard) = cookie::generate_cookie(&datadir)?;
+    let cookie = Some((cookie_user, cookie_hash));
 
     let http_middleware = tower::ServiceBuilder::new()
         .layer(
@@ -96,6 +101,11 @@ pub(crate) async fn spawn<C: Chain>(
 
     let server_instance = Server::builder()
         .http_only()
+        // Keep the server's parse limit equal to what the compatibility middleware
+        // will buffer, so neither can drift into accepting a body the other rejects.
+        .max_request_body_size(
+            http_request_compatibility::HttpRequestMiddleware::<()>::MAX_REQUEST_BODY_SIZE,
+        )
         .set_http_middleware(http_middleware)
         .set_rpc_middleware(rpc_middleware)
         .build(listen_addr)

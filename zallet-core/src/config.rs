@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::net::SocketAddr;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -28,8 +28,7 @@ use {
 /// which backends exist. A name is nonempty, lowercase alphanumeric plus hyphens; the
 /// `zallet` launcher maps a name to the `zallet-<name>` sibling binary, and each
 /// backend binary refuses to run against a config that names a backend other than the
-/// one it provides. The backends shipped in this repository are `zebra` and
-/// `zaino`.
+/// one it provides. The backend shipped in this repository is `zebra`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct BackendName(String);
@@ -106,9 +105,8 @@ pub struct ZalletConfig {
     /// the name `foo` dispatches to the `zallet-foo` binary found next to the
     /// launcher (or on the PATH). Each backend binary refuses to run against a config
     /// that names a backend other than the one it provides, since all backends
-    /// operate on the same wallet database. The backends shipped with Zallet are
-    /// `"zebra"` (the launcher's default when this key is unset) and
-    /// `"zaino"`.
+    /// operate on the same wallet database. The backend shipped with Zallet is
+    /// `"zebra"` (the launcher's default when this key is unset).
     ///
     /// When this key is unset, a directly-invoked backend binary accepts the config:
     /// choosing the binary is already an explicit choice of backend.
@@ -129,7 +127,7 @@ pub struct ZalletConfig {
     /// Settings for Zallet features.
     pub features: FeaturesSection,
 
-    /// Settings for the Zaino chain indexer.
+    /// Settings for connecting to the backing full node.
     pub indexer: IndexerSection,
 
     /// Settings for the key store.
@@ -181,9 +179,18 @@ impl ZalletConfig {
         resolve_datadir_path(self.datadir(), self.keystore.encryption_identity())
     }
 
-    /// Returns the path to the indexer's database.
-    pub fn indexer_db_path(&self) -> PathBuf {
-        resolve_datadir_path(self.datadir(), self.indexer.db_path())
+    /// Whether to require a confirmed mnemonic backup before deriving new spend authority.
+    ///
+    /// This lives here rather than on [`KeyStoreSection`] because the default when
+    /// `keystore.require_backup` is unset depends on `consensus.network`, which that
+    /// section cannot see: it is `false` on regtest, matching `zcashd`, because a regtest
+    /// wallet is disposable and an interactive confirmation would only obstruct automated
+    /// testing.
+    #[cfg(zallet_build = "wallet")]
+    pub(crate) fn require_backup(&self) -> bool {
+        self.keystore
+            .require_backup
+            .unwrap_or(!matches!(self.consensus.network, NetworkType::Regtest))
     }
 
     /// Returns the path to the wallet database.
@@ -370,6 +377,19 @@ pub struct DatabaseSection {
     /// Note that on Windows, you must either use single quotes for this field's value, or
     /// replace all backslashes `\` with forward slashes `/`.
     pub wallet: Option<PathBuf>,
+
+    /// Maximum number of connections in the wallet database connection pool.
+    ///
+    /// When unset (the default), Zallet sizes the pool automatically from the number of
+    /// CPUs, with a floor that always leaves connections free for JSON-RPC and CLI work
+    /// after the background sync engine has taken the ones it holds for the lifetime of
+    /// the process. Leave this unset unless you have a specific reason not to.
+    ///
+    /// Setting it too low starves wallet operations: the sync engine permanently retains
+    /// several connections, so a value at or below that number prevents the wallet from
+    /// servicing any JSON-RPC request. This override exists mainly so regression tests
+    /// can force a small pool; it is not recommended for production use.
+    pub max_connections: Option<NonZeroUsize>,
 }
 
 impl DatabaseSection {
@@ -578,15 +598,14 @@ pub struct ExperimentalFeaturesSection {
     pub other: BTreeMap<String, toml::Value>,
 }
 
-/// Settings for the Zaino chain indexer.
+/// Settings for connecting to the backing full node.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct IndexerSection {
     /// IP address and port of the JSON-RPC interface for the full node / validator being
     /// used as a data source.
     ///
-    /// If unset, connects on localhost to the standard JSON-RPC port for mainnet or
-    /// testnet (as appropriate).
+    /// This setting is required.
     pub validator_address: Option<String>,
 
     /// Path to the validator cookie file.
@@ -600,11 +619,7 @@ pub struct IndexerSection {
     /// Full node / validator Password.
     pub validator_password: Option<String>,
 
-    /// Path to the folder where the indexer maintains its state.
-    ///
-    /// This can be either an absolute path, or a path relative to the data directory.
-    /// Note that on Windows, you must either use single quotes for this field's value, or
-    /// replace all backslashes `\` with forward slashes `/`.
+    /// Deprecated and ignored. Formerly the Zaino indexer's state directory.
     pub db_path: Option<PathBuf>,
 
     /// Settings for reading chain state directly from a local zebrad's state database
@@ -615,25 +630,9 @@ pub struct IndexerSection {
     /// tip via zebrad's gRPC indexer interface. The JSON-RPC `[indexer]` settings above
     /// are still required, for the mempool and transaction submission.
     ///
-    /// Handling of non-best-chain (side-chain) blocks depends on the backend. The
-    /// `zebra` backend serves them from the local state (it issues any-chain read
-    /// requests, which zebrad's state answers directly). The `zaino` backend serves
-    /// only the best chain from the local state and falls back to JSON-RPC for
-    /// non-best-chain blocks.
+    /// Non-best-chain (side-chain) blocks are served from the local state, which
+    /// answers any-chain read requests directly.
     pub read_state_service: Option<ReadStateServiceSection>,
-}
-
-impl IndexerSection {
-    /// Path to the folder where the indexer maintains its state.
-    ///
-    /// This can be either an absolute path, or a path relative to the data directory.
-    ///
-    /// Default is `zaino`.
-    fn db_path(&self) -> &Path {
-        self.db_path
-            .as_deref()
-            .unwrap_or_else(|| Path::new("zaino"))
-    }
 }
 
 /// Settings for the read-state-service indexer backend.
@@ -670,10 +669,20 @@ pub struct KeyStoreSection {
     /// replace all backslashes `\` with forward slashes `/`.
     pub encryption_identity: Option<PathBuf>,
 
-    /// By default, the wallet will not allow generation of new spending keys & addresses
-    /// from the mnemonic seed until the backup of that seed has been confirmed with the
-    /// `zcashd-wallet-tool` utility. A user may start zallet with `--walletrequirebackup=false`
-    /// to allow generation of spending keys even if the backup has not yet been confirmed.
+    /// By default, the wallet will not derive new accounts from a mnemonic seed phrase it
+    /// generated, or new addresses within accounts already derived from it, until the
+    /// operator has confirmed a backup of that phrase with the `zallet confirm-backup`
+    /// command. A user may set this to `false` to allow derivation from a phrase whose
+    /// backup has not yet been confirmed.
+    ///
+    /// A phrase the operator imported themselves needs no confirmation; they necessarily
+    /// had it to hand in order to import it.
+    ///
+    /// **The default depends on the network.** It is `true` on mainnet and testnet, and
+    /// `false` on regtest — matching `zcashd`, which set `fRequireWalletBackup = false`
+    /// in its regtest chain parameters. A regtest wallet is disposable, and confirming a
+    /// backup is interactive, so requiring it would leave automated tests with no way
+    /// through. Set this explicitly if you want the same behaviour on every network.
     pub require_backup: Option<bool>,
 }
 
@@ -688,16 +697,6 @@ impl KeyStoreSection {
         self.encryption_identity
             .as_deref()
             .unwrap_or_else(|| Path::new("encryption-identity.txt"))
-    }
-
-    /// Whether to require a confirmed wallet backup.
-    ///
-    /// By default, the wallet will not allow generation of new spending keys & addresses
-    /// from the mnemonic seed until the backup of that seed has been confirmed with the
-    /// `zcashd-wallet-tool` utility. A user may start zallet with `--walletrequirebackup=false`
-    /// to allow generation of spending keys even if the backup has not yet been confirmed.
-    pub fn require_backup(&self) -> bool {
-        self.require_backup.unwrap_or(true)
     }
 }
 
@@ -772,10 +771,32 @@ pub struct RpcSection {
     ///
     /// # Security
     ///
+    /// The JSON-RPC interface is served over plaintext HTTP: neither the HTTP Basic
+    /// authentication credentials nor request bodies (which can contain wallet
+    /// passphrases and spending keys) are encrypted in transit. Zallet therefore
+    /// refuses to start if this is set to a non-loopback address, unless
+    /// `allow_insecure_remote_bind` is also set.
+    ///
+    /// For remote access, keep this bound to a loopback address and use an
+    /// authenticated, encrypted tunnel such as SSH port forwarding or a VPN.
+    ///
     /// If you bind Zallet's RPC port to a public IP address, anyone on the internet can
     /// view your transactions and spend your funds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bind: Vec<SocketAddr>,
+
+    /// Whether to allow `bind` to contain non-loopback addresses, exposing the
+    /// JSON-RPC interface to the network.
+    ///
+    /// # Security
+    ///
+    /// This is unsafe: the JSON-RPC interface is served over plaintext HTTP, so
+    /// anyone on the network path can read the RPC credentials and any wallet
+    /// passphrase sent to `walletpassphrase`, and can replay them. Only enable this
+    /// if the network path is fully trusted or separately protected, and prefer a
+    /// loopback `bind` plus an authenticated, encrypted tunnel (SSH or VPN)
+    /// instead. Zallet logs a prominent warning at startup while this is enabled.
+    pub allow_insecure_remote_bind: Option<bool>,
 
     /// Timeout (in seconds) during HTTP requests.
     pub timeout: Option<u64>,
@@ -791,6 +812,14 @@ impl RpcSection {
     /// Default is 1000.
     pub fn async_operation_limit(&self) -> usize {
         self.async_operation_limit.unwrap_or(1000)
+    }
+
+    /// Whether to allow `bind` to contain non-loopback addresses, exposing the
+    /// JSON-RPC interface to the network.
+    ///
+    /// Default is `false`.
+    pub fn allow_insecure_remote_bind(&self) -> bool {
+        self.allow_insecure_remote_bind.unwrap_or(false)
     }
 
     /// Timeout during HTTP requests.
@@ -809,6 +838,10 @@ pub struct RpcAuthSection {
     ///
     /// Each username must be unique. If duplicates are present, only one of the passwords
     /// will work.
+    ///
+    /// The username `__cookie__` is reserved for the cookie credential that Zallet
+    /// generates at startup, and cannot be configured here; Zallet will refuse to start
+    /// if it is.
     pub user: String,
 
     /// The password for this user.
@@ -903,6 +936,7 @@ impl ZalletConfig {
             ),
             consensus("regtest_nuparams", &conf.consensus.regtest_nuparams),
             database("wallet", conf.database.wallet_path()),
+            database("max_connections", conf.database.max_connections),
             external("broadcast", conf.external.broadcast()),
             external("export_dir", &conf.external.export_dir),
             external("notify", &conf.external.notify),
@@ -912,13 +946,12 @@ impl ZalletConfig {
             indexer("validator_cookie_path", &conf.indexer.validator_cookie_path),
             indexer("validator_user", &conf.indexer.validator_user),
             indexer("validator_password", &conf.indexer.validator_password),
-            indexer("db_path", conf.indexer.db_path()),
             read_state_service("grpc_address", "127.0.0.1:8230"),
             read_state_service("zebra_state_path", "/home/<username>/.cache/zebra"),
             #[cfg(zallet_build = "wallet")]
             keystore("encryption_identity", conf.keystore.encryption_identity()),
             #[cfg(zallet_build = "wallet")]
-            keystore("require_backup", conf.keystore.require_backup()),
+            keystore("require_backup", conf.require_backup()),
             #[cfg(zallet_build = "wallet")]
             note_management(
                 "min_note_value",
@@ -930,6 +963,10 @@ impl ZalletConfig {
                 conf.note_management.target_note_count(),
             ),
             rpc("async_operation_limit", conf.rpc.async_operation_limit()),
+            rpc(
+                "allow_insecure_remote_bind",
+                conf.rpc.allow_insecure_remote_bind(),
+            ),
             rpc("bind", &conf.rpc.bind),
             rpc("timeout", conf.rpc.timeout().as_secs()),
             sync("recover_batch_size", conf.sync.recover_batch_size()),
@@ -1177,6 +1214,8 @@ impl ZalletConfig {
                     ),
                     // Ignore flattened fields (present to support parsing old configs).
                     (FEATURES_DEPRECATED, "other") | (FEATURES_EXPERIMENTAL, "other") => (),
+                    // Deprecated and ignored; still parsed so that old configs load.
+                    (INDEXER, "db_path") => (),
                     // Render section field.
                     _ => write_field::<T>(
                         config,
@@ -1221,7 +1260,8 @@ impl ZalletConfig {
             .unwrap();
             match field_default {
                 Some(present) => {
-                    Serialize::serialize(&present, toml::ser::ValueSerializer::new(config)).unwrap()
+                    Serialize::serialize(&present, toml::ser::ValueSerializer::new(config))
+                        .unwrap();
                 }
                 None => write!(config, "UNSET").unwrap(),
             }
@@ -1266,7 +1306,58 @@ impl ZalletConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::BackendName;
+    use super::{BackendName, ZalletConfig};
+    use zcash_protocol::consensus::NetworkType;
+
+    #[cfg(zallet_build = "wallet")]
+    use super::{ConsensusSection, KeyStoreSection};
+
+    /// Builds a config whose only interesting content is the network and the
+    /// `keystore.require_backup` setting.
+    #[cfg(zallet_build = "wallet")]
+    fn backup_config(network: NetworkType, require_backup: Option<bool>) -> ZalletConfig {
+        ZalletConfig {
+            consensus: ConsensusSection {
+                network,
+                ..Default::default()
+            },
+            keystore: KeyStoreSection {
+                require_backup,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[cfg(zallet_build = "wallet")]
+    #[test]
+    fn require_backup_defaults_to_on_everywhere_but_regtest() {
+        // Regtest wallets are disposable and `confirm-backup` is interactive, so
+        // requiring confirmation there would leave automated tests no way through. This
+        // matches `zcashd`, which set `fRequireWalletBackup = false` in its regtest chain
+        // parameters.
+        assert!(!backup_config(NetworkType::Regtest, None).require_backup());
+
+        assert!(backup_config(NetworkType::Main, None).require_backup());
+        assert!(backup_config(NetworkType::Test, None).require_backup());
+    }
+
+    #[cfg(zallet_build = "wallet")]
+    #[test]
+    fn an_explicit_require_backup_overrides_the_network_default() {
+        // Both directions, so that regtest can opt in as well as mainnet opting out.
+        assert!(backup_config(NetworkType::Regtest, Some(true)).require_backup());
+        assert!(!backup_config(NetworkType::Main, Some(false)).require_backup());
+    }
+
+    #[test]
+    fn generated_example_is_a_valid_config_document() {
+        let document = ZalletConfig::generate_example();
+        let config: ZalletConfig =
+            toml::from_str(&document).expect("generated example is a complete config document");
+        assert_eq!(config.consensus.network, NetworkType::Main);
+        assert_eq!(config.features.as_of_version, env!("CARGO_PKG_VERSION"));
+    }
 
     #[test]
     fn backend_key_parses() {
@@ -1296,7 +1387,7 @@ mod tests {
 
         // Malformed names (charset violations) are rejected at parse time; the
         // charset keeps names safe to embed in the `zallet-<name>` binary name.
-        for bad in ["", "Zebra-State", "zebra state", "../evil", "zaino\n"] {
+        for bad in ["", "Zebra-State", "zebra state", "../evil", "zebra\n"] {
             assert!(
                 toml::from_str::<TopLevel>(&format!("backend = {}", toml::Value::from(bad)))
                     .is_err(),

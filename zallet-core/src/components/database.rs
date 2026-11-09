@@ -19,7 +19,7 @@ use crate::{
 use super::keystore;
 
 mod connection;
-pub(crate) use connection::DbConnection;
+pub(crate) use connection::{DbConnection, WalletRng};
 
 mod ext;
 
@@ -31,10 +31,11 @@ pub(crate) type DbHandle = deadpool::managed::Object<connection::WalletManager>;
 // Old databases are accepted only if the last recorded Zallet version is at
 // least the oldest release whose wallet database this binary accepts.
 //
-// Bumped to 0.1.0-alpha.4 because the embedded Zaino chain indexer made a
-// backwards-incompatible change to its database format (zingolabs/zaino#914),
-// pulled in by this release. Wallet databases last touched by 0.1.0-alpha.3 or
-// earlier must be recreated from scratch. See zcash/zallet#394.
+// Bumped to 0.1.0-alpha.4 because the Zaino chain indexer then embedded in Zallet
+// made a backwards-incompatible change to its database format
+// (zingolabs/zaino#914), pulled in by that release. Wallet databases last
+// touched by 0.1.0-alpha.3 or earlier must be recreated from scratch. See
+// zcash/zallet#394.
 const MIN_COMPATIBLE_ZALLET_VERSION: &str = "0.1.0-alpha.4";
 
 /// Returns the full list of migrations defined in Zallet, to be applied alongside the
@@ -64,6 +65,12 @@ impl fmt::Debug for Database {
 impl Database {
     pub(crate) async fn open(config: &ZalletConfig) -> Result<Self, Error> {
         let path = config.wallet_db_path();
+        // `database.max_connections` overrides the automatic sizing when set; otherwise
+        // the pool is sized by the production policy (see `connection::pool`). The
+        // override is taken literally, so a value at or below the connections sync
+        // retains will starve foreground operations (documented on the config field),
+        // and is what lets the saturated-pool regression tests force a small pool.
+        let max_connections = config.database.max_connections;
 
         // A zero-length file is not yet a SQLite database (SQLite initializes it
         // on first write), so treat it like a missing one.
@@ -74,35 +81,24 @@ impl Database {
         };
 
         // Keep the wallet database private to the owner. This must happen before
-        // SQLite opens it, as SQLite creates its journal files (which contain
+        // SQLite opens it: on Unix, SQLite creates its journal files (which contain
         // database content) with the database file's permissions. A missing
-        // database is created up front so it never exists with wider permissions.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let restrict = match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-                .await
-            {
-                Ok(_) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await
-                }
-                Err(e) => Err(e),
-            };
-            restrict.map_err(|e| {
-                ErrorKind::Init.context(fl!(
-                    "err-init-failed-to-restrict-permissions",
-                    path = path.display().to_string(),
-                    error = e.to_string(),
-                ))
-            })?;
-        }
+        // database is created up front so it never exists with wider permissions,
+        // and an existing one is tightened in case it predates this restriction.
+        crate::fs::create_or_restrict_private_file(&path).map_err(|e| {
+            ErrorKind::Init.context(fl!(
+                "err-init-failed-to-restrict-permissions",
+                path = path.display().to_string(),
+                error = e.to_string(),
+            ))
+        })?;
 
-        let db_data_pool = connection::pool(&path, config.consensus.network())?;
+        let db_data_pool = match max_connections {
+            None => connection::pool(&path, config.consensus.network())?,
+            Some(max_size) => {
+                connection::pool_with_size(&path, config.consensus.network(), max_size)?
+            }
+        };
 
         let database = Self { db_data_pool };
 
@@ -199,11 +195,46 @@ impl Database {
         Ok(database)
     }
 
+    /// Acquires a database connection from the pool, waiting (without limit) for one to
+    /// become available.
+    ///
+    /// # Deadlock avoidance
+    ///
+    /// The wallet sync tasks retain
+    /// [`sync::LONG_LIVED_SYNC_CONNECTIONS`](crate::components::sync::LONG_LIVED_SYNC_CONNECTIONS)
+    /// of the pool's connections for the lifetime of the process, so the remaining
+    /// connections must keep circulating. A task that holds a [`DbHandle`] MUST NOT
+    /// await anything that acquires another pooled connection: not this method, and not
+    /// any [`KeyStore`](crate::components::keystore::KeyStore) method that touches key
+    /// material, since those acquire their own connection internally. Instead, stage the
+    /// database reads the operation needs, drop the handle, perform the keystore work,
+    /// and reacquire a handle for the remaining database work (see zcash/zallet#708).
+    ///
+    /// This rule is enforced by `clippy::await_holding_invalid_type` (see `clippy.toml`
+    /// at the repository root): holding a pooled connection across any await is a
+    /// warning unless `#[expect]`ed with a justification.
+    ///
+    /// One-shot CLI commands are exempt: they run as a single task against an otherwise
+    /// idle pool, whose automatic sizing is always at least
+    /// [`sync::LONG_LIVED_SYNC_CONNECTIONS`](crate::components::sync::LONG_LIVED_SYNC_CONNECTIONS)
+    /// plus `MIN_FOREGROUND_CONNECTIONS` (see `connection::pool`), so a nested
+    /// acquisition there cannot exhaust the pool. The `database.max_connections` config
+    /// override can shrink the pool below that floor; its documentation warns that such
+    /// a value starves wallet operations, and it exists for the saturated-pool
+    /// regression tests rather than for deployment.
     pub(crate) async fn handle(&self) -> Result<DbHandle, Error> {
         self.db_data_pool
             .get()
             .await
             .map_err(|e| ErrorKind::Generic.context(e).into())
+    }
+
+    /// Returns the network parameters the wallet database was opened with.
+    ///
+    /// Reading them never touches the connection pool, so unlike [`Self::handle`] this
+    /// cannot block behind other database users.
+    pub(crate) fn params(&self) -> &crate::network::Network {
+        self.db_data_pool.manager().params()
     }
 }
 

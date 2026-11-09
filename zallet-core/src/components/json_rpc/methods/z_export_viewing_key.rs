@@ -7,12 +7,15 @@ use zcash_client_backend::data_api::{Account, WalletRead};
 use zcash_keys::{
     address::Address, encoding::encode_extended_full_viewing_key, keys::UnifiedSpendingKey,
 };
-use zcash_protocol::consensus::NetworkConstants;
+use zcash_protocol::consensus::Parameters;
 
 use crate::components::{
-    database::DbConnection,
+    database::Database,
     json_rpc::{
-        payments::get_account_for_address, server::LegacyCode, utils::ensure_wallet_is_unlocked,
+        payments::get_account_for_address,
+        server::LegacyCode,
+        unified_encoding::{encode_ufvk, encode_uivk},
+        utils::{ensure_wallet_is_unlocked, wallet_handle},
     },
     keystore::KeyStore,
 };
@@ -29,86 +32,102 @@ pub(super) const PARAM_ZADDR_DESC: &str = "The Sapling payment address or unifie
 pub(super) const PARAM_IVK_DESC: &str = "Whether to export the unified incoming viewing key (UIVK) instead of the full viewing key. Default is false.";
 
 pub(crate) async fn call(
-    wallet: &DbConnection,
+    wallet: &Database,
     keystore: &KeyStore,
     zaddr: &str,
     ivk: Option<bool>,
 ) -> Response {
     ensure_wallet_is_unlocked(keystore).await?;
 
-    let address = Address::decode(wallet.params(), zaddr)
+    let params = *wallet.params();
+
+    let address = Address::decode(&params, zaddr)
         .ok_or(LegacyCode::InvalidAddressOrKey.with_static("Invalid zaddr"))?;
 
     let export_ivk = ivk.unwrap_or(false);
 
     match &address {
         Address::Unified(_) => {
-            let account = get_account_for_address(wallet, &address).map_err(|e| {
-                // Align the "address not held" error with the Sapling path below;
-                // `get_account_for_address` reports it with a payment-oriented message.
-                if e.code() == LegacyCode::InvalidAddressOrKey as i32 {
-                    LegacyCode::Wallet.with_static(
-                        "Wallet does not hold private key or viewing key for this zaddr",
-                    )
-                } else {
-                    e
-                }
-            })?;
+            let account = get_account_for_address(wallet_handle(wallet).await?.as_ref(), &address)
+                .map_err(|e| {
+                    // Align the "address not held" error with the Sapling path below;
+                    // `get_account_for_address` reports it with a payment-oriented message.
+                    if e.code() == LegacyCode::InvalidAddressOrKey as i32 {
+                        LegacyCode::Wallet.with_static(
+                            "Wallet does not hold private key or viewing key for this zaddr",
+                        )
+                    } else {
+                        e
+                    }
+                })?;
             let ufvk = account.ufvk().ok_or(
                 LegacyCode::Wallet.with_static("Account does not have a unified full viewing key"),
             )?;
 
             Ok(ResultType(if export_ivk {
-                ufvk.to_unified_incoming_viewing_key()
-                    .encode(wallet.params())
+                encode_uivk(&ufvk.to_unified_incoming_viewing_key(), &params)?
             } else {
-                ufvk.encode(wallet.params())
+                encode_ufvk(ufvk, &params)?
             }))
         }
         Address::Sapling(sapling_addr) => {
-            // Look up the account by matching the Sapling address against each UFVK's
-            // Sapling component. `get_account_for_address` doesn't find bare Sapling
-            // receivers derived from unified accounts.
-            let ufvks = wallet
-                .get_unified_full_viewing_keys()
-                .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+            // Stage the account lookup on a scoped connection, released before the seed
+            // decryption below, which acquires its own connection via the keystore (see
+            // `Database::handle`).
+            let (ufvk, seed_fp, account_index) = {
+                let handle = wallet_handle(wallet).await?;
+                let wallet = handle.as_ref();
 
-            let (account_id, ufvk) = ufvks
-                .iter()
-                .find_map(|(id, ufvk)| {
-                    ufvk.sapling()
-                        .and_then(|dfvk| dfvk.decrypt_diversifier(sapling_addr))
-                        .map(|_| (*id, ufvk))
-                })
-                .ok_or_else(|| {
-                    LegacyCode::Wallet.with_static(
+                // Look up the account by matching the Sapling address against each UFVK's
+                // Sapling component. `get_account_for_address` doesn't find bare Sapling
+                // receivers derived from unified accounts.
+                let ufvks = wallet
+                    .get_unified_full_viewing_keys()
+                    .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+
+                let (account_id, ufvk) = ufvks
+                    .iter()
+                    .find_map(|(id, ufvk)| {
+                        ufvk.sapling()
+                            .and_then(|dfvk| dfvk.decrypt_diversifier(sapling_addr))
+                            .map(|_| (*id, ufvk))
+                    })
+                    .ok_or_else(|| {
+                        LegacyCode::Wallet.with_static(
+                            "Wallet does not hold private key or viewing key for this zaddr",
+                        )
+                    })?;
+
+                // The UIVK is derivable from the UFVK alone, so this also works for
+                // imported view-only accounts.
+                if export_ivk {
+                    return Ok(ResultType(encode_uivk(
+                        &ufvk.to_unified_incoming_viewing_key(),
+                        &params,
+                    )?));
+                }
+
+                let account = wallet
+                    .get_account(account_id)
+                    .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+                    .ok_or(LegacyCode::Wallet.with_static(
                         "Wallet does not hold private key or viewing key for this zaddr",
-                    )
+                    ))?;
+
+                let derivation = account.source().key_derivation().ok_or_else(|| {
+                    LegacyCode::Wallet
+                        .with_static("Cannot export viewing key for an imported view-only account")
                 })?;
 
-            // The UIVK is derivable from the UFVK alone, so this also works for
-            // imported view-only accounts.
-            if export_ivk {
-                return Ok(ResultType(
-                    ufvk.to_unified_incoming_viewing_key()
-                        .encode(wallet.params()),
-                ));
-            }
-
-            let account = wallet
-                .get_account(account_id)
-                .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
-                .ok_or(LegacyCode::Wallet.with_static(
-                    "Wallet does not hold private key or viewing key for this zaddr",
-                ))?;
-
-            let derivation = account.source().key_derivation().ok_or_else(|| {
-                LegacyCode::Wallet
-                    .with_static("Cannot export viewing key for an imported view-only account")
-            })?;
+                (
+                    ufvk.clone(),
+                    *derivation.seed_fingerprint(),
+                    derivation.account_index(),
+                )
+            };
 
             let seed = keystore
-                .decrypt_seed(derivation.seed_fingerprint())
+                .decrypt_seed(&seed_fp)
                 .await
                 .map_err(|e| match e.kind() {
                     // TODO: Improve internal error types.
@@ -119,12 +138,8 @@ pub(crate) async fn call(
                     _ => LegacyCode::Database.with_message(e.to_string()),
                 })?;
 
-            let usk = UnifiedSpendingKey::from_seed(
-                wallet.params(),
-                seed.expose_secret(),
-                derivation.account_index(),
-            )
-            .map_err(|e| LegacyCode::Wallet.with_message(e.to_string()))?;
+            let usk = UnifiedSpendingKey::from_seed(&params, seed.expose_secret(), account_index)
+                .map_err(|e| LegacyCode::Wallet.with_message(e.to_string()))?;
 
             // The account was selected by matching the address against the stored
             // UFVK, but the exported key is re-derived from the seed. Ensure the two
@@ -143,7 +158,8 @@ pub(crate) async fn call(
             #[allow(deprecated)]
             let extfvk = usk.sapling().to_extended_full_viewing_key();
 
-            let hrp = wallet.params().hrp_sapling_extended_full_viewing_key();
+            let hrp =
+                zcash_keys::constants::hrp_sapling_extended_full_viewing_key(params.network_type());
             Ok(ResultType(encode_extended_full_viewing_key(hrp, &extfvk)))
         }
         _ => Err(LegacyCode::InvalidAddressOrKey
@@ -153,6 +169,9 @@ pub(crate) async fn call(
 
 #[cfg(test)]
 mod tests {
+    use crate::components::json_rpc::unified_encoding::{encode_ufvk, encode_uivk};
+    use zcash_address::constants as address_constants;
+    use zcash_keys::constants as key_constants;
     use zcash_keys::{
         encoding::{
             decode_extended_full_viewing_key, encode_extended_full_viewing_key,
@@ -160,14 +179,12 @@ mod tests {
         },
         keys::UnifiedFullViewingKey,
     };
-    use zcash_protocol::{
-        consensus::{MAIN_NETWORK, TEST_NETWORK},
-        constants,
-    };
+    use zcash_protocol::consensus::{MAIN_NETWORK, TEST_NETWORK};
 
     /// Constructs a UFVK (with only a Sapling component) from seed `[0; 32]`.
     fn test_ufvk() -> UnifiedFullViewingKey {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk)
@@ -177,7 +194,8 @@ mod tests {
     /// Derives a Sapling extended spending key from seed [0; 32] and returns
     /// the encoded EFVK and the default payment address.
     fn test_efvk_and_address(hrp_fvk: &str, hrp_addr: &str) -> (String, String) {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let encoded_fvk = encode_extended_full_viewing_key(hrp_fvk, &extfvk);
@@ -189,17 +207,17 @@ mod tests {
     #[test]
     fn encoded_efvk_is_valid_bech32() {
         let (encoded, _) = test_efvk_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
         );
         assert!(encoded.starts_with("zxviews"));
     }
 
     #[test]
     fn encoded_efvk_round_trips() {
-        let hrp = constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
+        let hrp = key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
         let (encoded, _) =
-            test_efvk_and_address(hrp, constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS);
+            test_efvk_and_address(hrp, address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS);
         let decoded = decode_extended_full_viewing_key(hrp, &encoded).unwrap();
         let re_encoded = encode_extended_full_viewing_key(hrp, &decoded);
         assert_eq!(encoded, re_encoded);
@@ -207,8 +225,8 @@ mod tests {
 
     #[test]
     fn efvk_produces_consistent_default_address() {
-        let hrp_fvk = constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
-        let hrp_addr = constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS;
+        let hrp_fvk = key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
+        let hrp_addr = address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS;
 
         let (_, addr1) = test_efvk_and_address(hrp_fvk, hrp_addr);
         let (_, addr2) = test_efvk_and_address(hrp_fvk, hrp_addr);
@@ -218,8 +236,8 @@ mod tests {
     #[test]
     fn mainnet_address_starts_with_zs() {
         let (_, addr) = test_efvk_and_address(
-            constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
         );
         assert!(addr.starts_with("zs"));
     }
@@ -227,17 +245,17 @@ mod tests {
     #[test]
     fn testnet_efvk_has_correct_hrp() {
         let (encoded, _) = test_efvk_and_address(
-            constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
-            constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
+            key_constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            address_constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
         );
         assert!(encoded.starts_with("zxviewtestsapling"));
     }
 
     #[test]
     fn testnet_efvk_round_trips() {
-        let hrp = constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
+        let hrp = key_constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
         let (encoded, _) =
-            test_efvk_and_address(hrp, constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS);
+            test_efvk_and_address(hrp, address_constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS);
         let decoded = decode_extended_full_viewing_key(hrp, &encoded).unwrap();
         let re_encoded = encode_extended_full_viewing_key(hrp, &decoded);
         assert_eq!(encoded, re_encoded);
@@ -245,13 +263,15 @@ mod tests {
 
     #[test]
     fn different_seeds_produce_different_efvks() {
-        let hrp = constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
+        let hrp = key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
 
-        let extsk_a = sapling::zip32::ExtendedSpendingKey::master(&[0; 32]);
+        let extsk_a = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let efvk_a = encode_extended_full_viewing_key(hrp, &extsk_a.to_extended_full_viewing_key());
 
-        let extsk_b = sapling::zip32::ExtendedSpendingKey::master(&[1; 32]);
+        let extsk_b = sapling::zip32::ExtendedSpendingKey::master(&[1; 32])
+            .expect("the test seed derives a valid master key");
         #[allow(deprecated)]
         let efvk_b = encode_extended_full_viewing_key(hrp, &extsk_b.to_extended_full_viewing_key());
 
@@ -261,23 +281,46 @@ mod tests {
     #[test]
     fn ufvk_encodes_with_uview_hrp() {
         let ufvk = test_ufvk();
-        assert!(ufvk.encode(&MAIN_NETWORK).starts_with("uview1"));
-        assert!(ufvk.encode(&TEST_NETWORK).starts_with("uviewtest1"));
+        assert!(
+            encode_ufvk(&ufvk, &MAIN_NETWORK)
+                .expect("the test UFVK has an encoding")
+                .starts_with(&format!("{}1", address_constants::mainnet::HRP_UNIFIED_FVK))
+        );
+        assert!(
+            encode_ufvk(&ufvk, &TEST_NETWORK)
+                .expect("the test UFVK has an encoding")
+                .starts_with(&format!("{}1", address_constants::testnet::HRP_UNIFIED_FVK))
+        );
     }
 
     #[test]
     fn ufvk_encoding_round_trips() {
         let ufvk = test_ufvk();
-        let encoded = ufvk.encode(&MAIN_NETWORK);
+        let encoded = ufvk
+            .encode(&MAIN_NETWORK)
+            .expect("the test UFVK has an encoding");
         let decoded = UnifiedFullViewingKey::decode(&MAIN_NETWORK, &encoded).unwrap();
-        assert_eq!(encoded, decoded.encode(&MAIN_NETWORK));
+        assert_eq!(
+            encoded,
+            decoded
+                .encode(&MAIN_NETWORK)
+                .expect("the decoded UFVK has an encoding"),
+        );
     }
 
     #[test]
     fn uivk_encodes_with_uivk_hrp() {
         let uivk = test_ufvk().to_unified_incoming_viewing_key();
-        assert!(uivk.encode(&MAIN_NETWORK).starts_with("uivk1"));
-        assert!(uivk.encode(&TEST_NETWORK).starts_with("uivktest1"));
+        assert!(
+            encode_uivk(&uivk, &MAIN_NETWORK)
+                .expect("the test UIVK has an encoding")
+                .starts_with(&format!("{}1", address_constants::mainnet::HRP_UNIFIED_IVK))
+        );
+        assert!(
+            encode_uivk(&uivk, &TEST_NETWORK)
+                .expect("the test UIVK has an encoding")
+                .starts_with(&format!("{}1", address_constants::testnet::HRP_UNIFIED_IVK))
+        );
     }
 
     #[test]
@@ -291,8 +334,8 @@ mod tests {
     #[test]
     fn efvk_default_address_matches_import_flow() {
         // Exported EFVK, decoded back, should produce the same default address.
-        let hrp_fvk = constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
-        let hrp_addr = constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS;
+        let hrp_fvk = key_constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY;
+        let hrp_addr = address_constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS;
 
         let (encoded_fvk, original_addr) = test_efvk_and_address(hrp_fvk, hrp_addr);
 

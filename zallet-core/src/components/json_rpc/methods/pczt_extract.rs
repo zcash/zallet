@@ -20,10 +20,11 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee::types::ErrorObjectOwned;
 use pczt::roles::spend_finalizer::SpendFinalizer;
 use pczt::roles::tx_extractor::TransactionExtractor;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use schemars::JsonSchema;
 use serde::Serialize;
 use zcash_client_backend::data_api::{WalletRead, wallet::extract_and_store_transaction_from_pczt};
-use zcash_client_sqlite::ReceivedNoteId;
+use zcash_client_sqlite::{ReceivedNoteId, util::SystemClock};
 use zcash_primitives::transaction::Transaction;
 
 use super::pczt_common::{
@@ -32,7 +33,10 @@ use super::pczt_common::{
 };
 use super::pczt_error::PcztError;
 use crate::{
-    components::{database::DbHandle, json_rpc::server::LegacyCode},
+    components::{
+        database::Database,
+        json_rpc::{server::LegacyCode, utils::wallet_handle},
+    },
     fl,
 };
 
@@ -77,7 +81,7 @@ fn serialize_transaction(tx: &Transaction) -> Result<Vec<u8>, ErrorObjectOwned> 
 /// The PCZT must already have all required proofs and signatures in place;
 /// extraction verifies the shielded ones and fails otherwise. (Transparent
 /// script signatures are checked by the network at broadcast, not here.)
-pub(crate) async fn call(mut wallet: DbHandle, pczt_base64: &str) -> Response {
+pub(crate) async fn call(wallet: Database, pczt_base64: &str) -> Response {
     let pczt = decode_pczt_base64(pczt_base64)?;
 
     // One verifying key serves both the Orchard and Ironwood bundles: the
@@ -104,6 +108,11 @@ pub(crate) async fn call(mut wallet: DbHandle, pczt_base64: &str) -> Response {
         .await
         .expect("the proving semaphore is never closed");
 
+    // Acquire the database connection only once a proving slot is held, so a call
+    // queued behind the semaphore does not sit on one of the pool's connections (see
+    // `Database::handle`).
+    let mut wallet = wallet_handle(&wallet).await?;
+
     let (tx_bytes, txid, stored): (Vec<u8>, String, bool) =
         crate::spawn_blocking!("pczt_extract", move || -> Result<_, ErrorObjectOwned> {
             if wallet_created {
@@ -111,6 +120,8 @@ pub(crate) async fn call(mut wallet: DbHandle, pczt_base64: &str) -> Response {
                 // wallet database, and returns its ID.
                 let txid = extract_and_store_transaction_from_pczt::<_, ReceivedNoteId>(
                     wallet.as_mut(),
+                    &SystemClock,
+                    &mut UnwrapErr(SysRng),
                     pczt,
                     Some((spend_vk, output_vk)),
                     orchard_vk,
@@ -141,7 +152,9 @@ pub(crate) async fn call(mut wallet: DbHandle, pczt_base64: &str) -> Response {
                 if let Some(vk) = orchard_vk {
                     extractor = extractor.with_orchard(vk);
                 }
-                let tx = extractor.extract().map_err(PcztError::Extract)?;
+                let tx = extractor
+                    .extract(UnwrapErr(SysRng))
+                    .map_err(PcztError::Extract)?;
 
                 Ok((serialize_transaction(&tx)?, tx.txid().to_string(), false))
             }

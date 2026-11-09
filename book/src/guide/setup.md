@@ -3,6 +3,11 @@
 > WARNING: This process is currently unstable, very manual, and subject to change as we
 > make Zallet easier to use.
 
+> **Migrating from `zcashd`?** Follow [Migrating from `zcashd`](../zcashd/README.md)
+> instead of this page. It covers the same setup in the right order for an existing
+> wallet; in particular, do **not** generate a new mnemonic (below) for a wallet you
+> intend to import.
+
 ## Create a config file
 
 Zallet by default uses `$HOME/.zallet` as its data directory. You can override
@@ -45,45 +50,46 @@ zebra_state_path = "/path/to/zebrad/state/cache"
 bind = ["127.0.0.1:SOMEPORT"]
 ```
 
+> **Security note:** Zallet's own JSON-RPC interface is served over plaintext
+> HTTP. The HTTP Basic authentication it uses does not encrypt anything: an
+> observer on the network path can read the RPC credentials, as well as any
+> wallet passphrase sent to `walletpassphrase`, and replay them — including
+> against fund-moving methods such as `z_sendmany`. Always keep `rpc.bind` on a
+> loopback address (as in the example above). For remote access, use an
+> authenticated, encrypted tunnel to the wallet host, such as SSH port
+> forwarding (`ssh -L 28232:127.0.0.1:28232 wallet-host`) or a VPN. Zallet
+> refuses to start with a non-loopback `rpc.bind` unless you explicitly opt in
+> with `rpc.allow_insecure_remote_bind = true`, which is unsafe on any network
+> path you do not fully trust.
+
 In particular, you currently need to configure the `[indexer]` section to point
 at your full node's JSON-RPC endpoint. The relevant config options in that
 section are:
-- `validator_address` (if not running on localhost at the default port)
+- `validator_address` (required)
 - `validator_cookie_path` (if using cookie authentication): set it to your
   full node's cookie file. Setting this path is what enables cookie auth;
   there is no separate on/off flag.
 - `validator_user` and `validator_password` (if using basic auth)
 
-Both the default `zebra` backend and the `zaino` backend use these `[indexer]`
-settings to reach the full node over JSON-RPC. The `zebra` backend reads chain
-state directly from a co-located `zebrad` (see below) — including non-best-chain
-(side-chain) blocks and transactions, which `zebrad`'s local state tracks — so
-it uses JSON-RPC only for the mempool and transaction submission. The `zaino`
-backend uses JSON-RPC for **all** chain data, unless you also configure
-[`[indexer.read_state_service]`](#reading-chain-state-from-a-local-zebrad).
+The `zebra` backend uses these `[indexer]` settings to reach the full node over
+JSON-RPC. It reads chain state directly from a co-located `zebrad` (see below) —
+including non-best-chain (side-chain) blocks and transactions, which `zebrad`'s local
+state tracks — so it uses JSON-RPC only for the mempool and transaction submission.
 
 ### Reading chain state from a local zebrad
 
-Zallet supports two chain backends that determine how it reads chain state: the default
-`zebra` backend and the `zaino` backend. The backend is selected at runtime by the
-config file's top-level `backend` key, which the `zallet` launcher uses to dispatch to
-the matching backend binary; see
-[Choosing a chain backend](installation/README.md#choosing-a-chain-backend) for the
-comparison and for how to run each one.
+The chain backend is selected at runtime by the config file's top-level `backend` key,
+which the `zallet` launcher uses to dispatch to the matching backend binary; see
+[Choosing a chain backend](installation/README.md#choosing-a-chain-backend).
 
-Zallet can read finalized chain state directly from a co-located `zebrad`'s state
-database (opened read-only), rather than fetching every block over JSON-RPC. This is
-enabled by the `[indexer.read_state_service]` section.
-
-The default `zebra` backend **requires** this section; without one, `zallet
-start` fails with:
+The `zebra` backend reads finalized chain state directly from a co-located `zebrad`'s
+state database (opened read-only). This is configured by the
+`[indexer.read_state_service]` section, which the `zebra` backend **requires**;
+without one, `zallet start` fails with:
 
 ```
 the zebra-state backend requires an [indexer.read_state_service] config section
 ```
-
-The `zaino` backend uses the section when it is present, and otherwise fetches all
-chain data over JSON-RPC.
 
 This relies on zebrad's indexer gRPC interface, which is **not** available
 in a default `zebrad` build. You must compile `zebrad` with the `indexer` feature
@@ -117,13 +123,18 @@ Notes:
 - zebrad's on-disk state format must match Zallet's `zebra-state` version; a
   mismatch fails fast with a "no zebra-state v… database found" error rather than
   silently creating an empty database.
+- Zallet reads the state format written by Zebra 7.0.0 and later, and follows the
+  NU7 network upgrade on Mainnet (height 3,543,405) and Testnet (height 4,465,026).
+  Upgrade Zallet and `zebrad` to releases that follow NU7 before the network you run
+  on reaches its activation height. Zebra 7.0.0-rc.0 follows NU7 on Testnet but not
+  on Mainnet.
 - Regtest is supported: the backend builds a Zebra Regtest network from the wallet's
   configured `regtest_nuparams`, so it interprets zebrad's state under matching
   consensus rules.
 
 If you have an existing `zcash.conf`, you can use it as a starting point:
 ```
-$ zallet migrate-zcash-conf --datadir /path/to/zcashd/datadir -o /path/to/zallet/datadir/zallet.toml
+$ zallet migrate-zcash-conf --zcashd-datadir /path/to/zcashd/datadir -o /path/to/zallet/datadir/zallet.toml
 ```
 
 > [Reference](../cli/migrate-zcash-conf.md)
@@ -165,6 +176,11 @@ $ zallet -d /path/to/zallet/datadir init-wallet-encryption
 > [Reference](../cli/init-wallet-encryption.md)
 
 ## Generate a mnemonic phrase
+
+Skip this step if you are importing a `zcashd` wallet:
+[`zallet migrate-zcashd-wallet`](../cli/migrate-zcashd-wallet.md) brings the wallet's
+own mnemonic across, and generating one here would add an unrelated second root of
+spend authority.
 
 ```
 $ zallet -d /path/to/zallet/datadir generate-mnemonic

@@ -4,6 +4,7 @@
 
 # User guide
 
+- [Platform support](guide/platform-support.md)
 - [Installation](guide/installation/README.md)
   - [Debian packages](guide/installation/debian.md)
   - [Docker](guide/installation/docker.md)
@@ -32,6 +33,8 @@
   - [generate-mnemonic](cli/generate-mnemonic.md)
   - [import-mnemonic](cli/import-mnemonic.md)
   - [export-mnemonic](cli/export-mnemonic.md)
+  - [confirm-backup](cli/confirm-backup.md)
+  - [backup](cli/backup.md)
   - [import-address](cli/import-address.md)
   - [add-rpc-user](cli/add-rpc-user.md)
   - [rpc](cli/rpc.md)
@@ -53,4 +56,5 @@
 
 # Security
 
+- [Threat model](security/threat-model.md)
 - [Supply Chain Security (SLSA)](slsa/slsa.md)

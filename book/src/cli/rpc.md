@@ -45,6 +45,11 @@ access.
 If `[[rpc.auth]]` users are configured in `zallet.toml`, `zallet rpc` will prefer
 those credentials over the cookie file. Cookie-based auth and configured users coexist.
 
+The username `__cookie__` is reserved for the cookie credential, so it cannot be used
+for a `[[rpc.auth]]` user. Zallet refuses to start if a configured user claims it,
+rather than letting a configured password grant access under the name that clients
+treat as the cookie credential.
+
 ## Comparison to `zcash-cli`
 
 The `zcashd` full node came bundled with a `zcash-cli` binary, which served an equivalent

@@ -26,13 +26,16 @@ use bip0039::{English, Mnemonic};
 use secrecy::{SecretString, SecretVec};
 use tokio::runtime::Handle;
 use zcash_client_sqlite::zewif::SecretSink;
-use zcash_keys::encoding::{decode_extended_spending_key, encode_extended_full_viewing_key};
-use zcash_protocol::consensus::NetworkConstants;
+use zcash_keys::{
+    constants::{hrp_sapling_extended_full_viewing_key, hrp_sapling_extended_spending_key},
+    encoding::{decode_extended_spending_key, encode_extended_full_viewing_key},
+};
+use zcash_protocol::consensus::NetworkType;
 use zip32::fingerprint::SeedFingerprint;
 
 use crate::error::Error;
 
-use super::{Encryptor, KeyStore};
+use super::{BackupStatus, Encryptor, KeyStore};
 
 macro_rules! wfl {
     ($f:ident, $message_id:literal) => {
@@ -61,19 +64,19 @@ pub(crate) fn decode_seed_fingerprint(
 
 /// A [`SecretSink`] that persists ZeWIF secret material in the Zallet
 /// keystore.
-pub(crate) struct KeyStoreSecretSink<'a, N> {
+pub(crate) struct KeyStoreSecretSink<'a> {
     keystore: &'a KeyStore,
-    network: N,
+    network: NetworkType,
     runtime: Handle,
     encryptor: Encryptor,
     sprout_keys_ignored: usize,
     unified_keys_ignored: usize,
 }
 
-impl<'a, N: NetworkConstants> KeyStoreSecretSink<'a, N> {
+impl<'a> KeyStoreSecretSink<'a> {
     /// Constructs a sink that persists secrets with `keystore`, decoding
     /// network-dependent key encodings for `network`.
-    pub(crate) async fn new(keystore: &'a KeyStore, network: N) -> Result<Self, Error> {
+    pub(crate) async fn new(keystore: &'a KeyStore, network: NetworkType) -> Result<Self, Error> {
         let encryptor = keystore.encryptor().await?;
         Ok(Self {
             keystore,
@@ -124,7 +127,7 @@ impl<'a, N: NetworkConstants> KeyStoreSecretSink<'a, N> {
     }
 }
 
-impl<N: NetworkConstants> SecretSink for KeyStoreSecretSink<'_, N> {
+impl SecretSink for KeyStoreSecretSink<'_> {
     type Error = SecretSinkError;
 
     fn store_seed(&mut self, entry: &zewif::SeedEntry) -> Result<(), Self::Error> {
@@ -141,8 +144,17 @@ impl<N: NetworkConstants> SecretSink for KeyStoreSecretSink<'_, N> {
                 }
                 let mnemonic = Mnemonic::<English>::from_phrase(mnemonic.mnemonic())
                     .map_err(SecretSinkError::InvalidMnemonic)?;
-                self.block_on(self.keystore.encrypt_and_store_mnemonic(mnemonic))
-                    .map_err(SecretSinkError::Keystore)?
+                // A `zcashd` wallet recorded whether its operator had confirmed a backup
+                // of this phrase, but ZeWIF does not carry that flag, so we cannot
+                // distinguish an operator who wrote the phrase down from one who never
+                // saw it. Import it as unconfirmed: asking again costs an operator who
+                // already has it one `zallet confirm-backup` run, whereas assuming
+                // wrongly is what this whole mechanism exists to prevent.
+                self.block_on(
+                    self.keystore
+                        .encrypt_and_store_mnemonic(mnemonic, BackupStatus::Unconfirmed),
+                )
+                .map_err(SecretSinkError::Keystore)?
             }
             zewif::SeedMaterial::LegacySeed(seed) => {
                 let seed_bytes = SecretVec::new(seed.as_bytes().to_vec());
@@ -158,7 +170,7 @@ impl<N: NetworkConstants> SecretSink for KeyStoreSecretSink<'_, N> {
         entry: &zewif::TransparentKeyEntry,
     ) -> Result<(), Self::Error> {
         let encoded = SecretString::new(entry.spending_key().encoding().to_string());
-        let key = zcash_keys::keys::transparent::Key::decode_base58(&self.network, &encoded)
+        let key = zcash_keys::keys::transparent::Key::decode_base58(self.network, &encoded)
             .map_err(|_| SecretSinkError::TransparentKeyDecoding)?;
 
         // Verify the decoded key against the public key it is stored under.
@@ -185,7 +197,7 @@ impl<N: NetworkConstants> SecretSink for KeyStoreSecretSink<'_, N> {
 
     fn store_sapling_key(&mut self, entry: &zewif::SaplingKeyEntry) -> Result<(), Self::Error> {
         let extsk = decode_extended_spending_key(
-            self.network.hrp_sapling_extended_spending_key(),
+            hrp_sapling_extended_spending_key(self.network),
             entry.spending_key().encoding(),
         )
         .map_err(|e| SecretSinkError::SaplingKeyDecoding(e.to_string()))?;
@@ -194,7 +206,7 @@ impl<N: NetworkConstants> SecretSink for KeyStoreSecretSink<'_, N> {
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let encoded_fvk = encode_extended_full_viewing_key(
-            self.network.hrp_sapling_extended_full_viewing_key(),
+            hrp_sapling_extended_full_viewing_key(self.network),
             &extfvk,
         );
         if encoded_fvk != entry.fvk().encoding() {

@@ -1,9 +1,9 @@
 //! Generates the Debian copyright file for the union of the dependency graphs
 //! of every binary the `zallet` deb ships.
 //!
-//! The deb contains three binaries built from three separate cargo workspaces
-//! (the `zallet` launcher, `zallet-zebra`, and `zallet-zaino`), so a
-//! single build-script collection pass cannot see all shipped code. This tool
+//! The deb contains binaries built from separate cargo workspaces (the
+//! `zallet` launcher and `zallet-zebra`), so a single build-script collection
+//! pass cannot see all shipped code. This tool
 //! resolves each binary's graph — locked, with the exact feature set the
 //! release builds use — and emits one merged machine-readable copyright file.
 //!
@@ -59,7 +59,6 @@ fn crate_info(package: &Package) -> Result<Crate, Box<dyn Error>> {
 const SHIPPED: &[(&str, &[&str])] = &[
     ("zallet/Cargo.toml", &[]),
     ("backends/zebra/Cargo.toml", &["zcashd-import", "rpc-cli"]),
-    ("backends/zaino/Cargo.toml", &["zcashd-import", "rpc-cli"]),
 ];
 
 fn repo_root() -> PathBuf {

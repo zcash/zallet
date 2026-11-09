@@ -41,16 +41,27 @@ CREATE TABLE ext_zallet_keystore_age_recipients (
 ///   [BIP 39 mnemonic phrase]. This is present to enable quick lookups of which mnemonic
 ///   needs to be decrypted at spend time (rather than trial-decrypting every mnemonic).
 /// - `encrypted_mnemonic` is a [BIP 39 mnemonic phrase] in an [age encrypted file].
+/// - `backup_confirmed` records whether the wallet operator is known to hold a copy of
+///   this phrase outside the wallet. It is set for a phrase the operator supplied
+///   themselves (which they must already have had in order to type it), and for one
+///   they have read back to `zallet confirm-backup`. While it is unset and
+///   `keystore.require_backup` is in effect, Zallet refuses to derive new spend
+///   authority from this seed.
 ///
 /// [ZIP 32 fingerprint]: https://zips.z.cash/zip-0032#seed-fingerprints
 /// [BIP 39 mnemonic phrase]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
 /// [BIP 39 passphrase]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki#from-mnemonic-to-seed
 /// [age encrypted file]: https://c2sp.org/age#encrypted-file-format
+//
+// `backup_confirmed` sits outside the parentheses' original formatting because SQLite
+// records an `ALTER TABLE ... ADD COLUMN` by splicing the column definition in ahead of
+// the closing parenthesis. This constant must match that text, since `verify_schema`
+// compares it against `sqlite_schema` with only whitespace normalized.
 pub(crate) const TABLE_MNEMONICS: &str = r#"
 CREATE TABLE ext_zallet_keystore_mnemonics (
     hd_seed_fingerprint BLOB NOT NULL UNIQUE,
     encrypted_mnemonic BLOB NOT NULL
-)
+, backup_confirmed INTEGER NOT NULL DEFAULT FALSE)
 "#;
 
 /// Stores encrypted raw HD seeds. These are likely to only be produced via `zcashd` wallet import.

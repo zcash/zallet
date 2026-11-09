@@ -273,16 +273,16 @@ conflicts.
   clippy warnings need not be resolved, but new ones introduced by a PR will
   block merging. The first case described above for work-in-progress commits is
   excepted from these requirements.
-- The repository contains three cargo workspaces (the root workspace with
-  `zallet-core`, the launcher, and tools; and `backends/zebra` +
-  `backends/zaino`, one per chain backend), each with its own lockfile. Build
+- The repository contains several cargo workspaces (the root workspace with
+  `zallet-core`, the launcher, and tools; and one per chain backend under
+  `backends/`, currently `backends/zebra`), each with its own lockfile. Build
   and lint commands apply per workspace: run them at the root and with
-  `--manifest-path backends/{zebra,zaino}/Cargo.toml`. The backend lockfiles
-  may deliberately diverge on the `zebra-*`/`zaino-*` dependency trees — that
-  is the point of the split — but crates that touch the shared wallet database
-  (the librustzcash `[patch.crates-io]` set, `zcash_client_sqlite`, `rusqlite`)
-  must resolve identically everywhere; `./utils/check-lockstep.sh` enforces
-  this in CI. Keep the `[patch.crates-io]` blocks of the three workspace
+  `--manifest-path backends/<backend>/Cargo.toml`. A backend lockfile may
+  deliberately diverge on its own chain-source dependency tree (`zebra-*`) —
+  that is the point of the split — but crates that touch the shared wallet
+  database (the librustzcash `[patch.crates-io]` set, `zcash_client_sqlite`,
+  `rusqlite`) must resolve identically everywhere; `./utils/check-lockstep.sh`
+  enforces this in CI. Keep the `[patch.crates-io]` blocks of the workspace
   manifests in sync when updating pins.
 
 #### Pull Requests
@@ -386,7 +386,7 @@ containing the commits from the original.
 
 ### Changelog Entries
 
-Zallet keeps four changelogs, because the things it ships have four different
+Zallet keeps three changelogs, because the things it ships have three different
 audiences. They are how each of those audiences discovers what it must do in
 order to upgrade, so we hold them to the same standard as the code.
 
@@ -395,9 +395,8 @@ order to upgrade, so we hold them to the same standard as the code.
 | `CHANGELOG.md` | The `zallet` user interface | People who run Zallet and integrate against it |
 | `zallet-core/CHANGELOG.md` | The `zallet-core` public Rust API | People implementing a chain backend against it |
 | `backends/zebra/CHANGELOG.md` | The `zallet-zebra` binary | Operators running the Zebra read-state backend |
-| `backends/zaino/CHANGELOG.md` | The `zallet-zaino` binary | Operators running the Zaino indexer backend |
 
-All four packages ship in release lockstep under one version number, so every
+All three packages ship in release lockstep under one version number, so every
 release heading appears in every file. A component that saw no changes for its
 own audience gets an empty section for that release; that is expected, and is
 more informative than omitting the heading.
@@ -406,7 +405,7 @@ more informative than omitting the heading.
 
 Route an entry by **who needs to read it**, not by which crate the diff touched.
 Most user-visible behavior is implemented in `zallet-core`, but a new JSON-RPC
-method is news for the people calling it, not for the two backends that link the
+method is news for the people calling it, not for the backends that link the
 crate, so it belongs in the root changelog. Conversely, a change to the `Chain`
 seam is invisible to a wallet user and essential to a backend implementor.
 
@@ -426,7 +425,7 @@ semver-incompatible versions of a crate do not unify, so a backend has to upgrad
 in lockstep.
 
 An entry belongs in a **backend's** changelog if it changes what that backend
-requires of its chain source: the `zebrad` or Zaino versions it is built against,
+requires of its chain source: the `zebrad` versions it is built against,
 the on-disk formats it can read, or backend-specific configuration. Write these
 for an operator: say whether existing on-disk data survives the upgrade.
 
@@ -480,7 +479,7 @@ entries either.
 Note that "no user-visible effect" is not the same as "no effect": a dependency
 bump invisible to a wallet user may still force a backend implementor to upgrade
 in lockstep, or change which `zebrad` an operator must run. Before dismissing one,
-check each of the four audiences.
+check each of the three audiences.
 
 #### Published sections record what shipped
 
@@ -498,7 +497,7 @@ records of what their audience was told at the time.
 
 The `## [Unreleased]` heading itself is permanent: it stays at the top of every
 changelog even when it is empty following a release. At release time
-`utils/bump-version.sh` promotes that section in all four files at once; do not
+`utils/bump-version.sh` promotes that section in all three files at once; do not
 hand-roll the promotion.
 
 ### Coding Style

@@ -19,14 +19,21 @@ use zcash_client_backend::{
     fees::{orchard::InputView as _, sapling::InputView as _},
     wallet::NoteId,
 };
+use zcash_client_sqlite::error::SqliteClientError;
 use zcash_keys::address::Address;
-use zcash_protocol::{ShieldedPool, consensus::BlockHeight, value::Zatoshis};
+use zcash_protocol::{
+    ShieldedPool,
+    consensus::{BlockHeight, COINBASE_MATURITY_BLOCKS},
+    memo::Memo,
+    value::Zatoshis,
+};
 use zip32::Scope;
 
 use crate::components::{
     database::DbConnection,
     json_rpc::{
         server::LegacyCode,
+        unified_encoding::encode_unified_address,
         utils::{JsonZec, parse_as_of_height, parse_minconf, value_from_zatoshis},
     },
 };
@@ -83,6 +90,14 @@ pub(crate) struct UnspentOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     generated: Option<bool>,
 
+    /// Number of blocks remaining until this coinbase output reaches maturity
+    /// and becomes spendable. `0` if already mature.
+    ///
+    /// Omitted for non-coinbase transparent outputs and all shielded outputs.
+    #[serde(rename = "blockstomaturity")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocks_to_maturity: Option<u32>,
+
     /// The value of the output in ZEC.
     value: JsonZec,
 
@@ -92,7 +107,9 @@ pub(crate) struct UnspentOutput {
 
     /// Hexadecimal string representation of the memo field.
     ///
-    /// Omitted if this is a transparent output.
+    /// Omitted if this is a transparent output, if the wallet has not yet fetched the
+    /// memo (the note's transaction has not been enhanced), or if the memo could not
+    /// be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     memo: Option<String>,
 
@@ -311,25 +328,26 @@ pub(crate) fn call(
             })?;
 
         let get_memo = |txid, protocol, output_index| -> RpcResult<_> {
-            Ok(wallet
-                .get_memo(NoteId::new(txid, protocol, output_index))
+            let lookup = memo_fields(wallet.get_memo(NoteId::new(txid, protocol, output_index)))
                 .map_err(|e| {
                     RpcError::owned(
                         LegacyCode::Database.into(),
                         "WalletDb::get_memo failed",
                         Some(format!("{e}")),
                     )
-                })?
-                .map(|memo| {
-                    (
-                        hex::encode(memo.encode().as_array()),
-                        match memo {
-                            zcash_protocol::memo::Memo::Text(text_memo) => Some(text_memo.into()),
-                            _ => None,
-                        },
-                    )
-                })
-                .unwrap_or(("TODO: Always enhance every note".into(), None)))
+                })?;
+            Ok(match lookup {
+                MemoLookup::Read { memo, memo_str } => (Some(memo), memo_str),
+                MemoLookup::Absent => (None, None),
+                MemoLookup::Unavailable(e) => {
+                    // The entry is rendered without memo fields and the response
+                    // carries no trace of the cause, so surface it to the operator.
+                    tracing::warn!(
+                        "Memo for note ({txid}, {protocol:?}, {output_index}) is unavailable: {e}"
+                    );
+                    (None, None)
+                }
+            })
         };
 
         let get_mined_height = |txid| {
@@ -371,10 +389,11 @@ pub(crate) fn call(
                 address: (!is_internal).then(|| note.note().recipient().encode(wallet.params())),
                 value: value_from_zatoshis(note.value()),
                 value_zat: u64::from(note.value()),
-                memo: Some(memo),
+                memo,
                 memo_str,
                 wallet_internal: is_internal,
                 generated: None,
+                blocks_to_maturity: None,
             })
         }
 
@@ -412,16 +431,23 @@ pub(crate) fn call(
                 account_uuid: account_id.expose_uuid().to_string(),
                 // TODO: Ensure we generate the same kind of shielded address as `zcashd`.
                 address: (!wallet_internal).then(|| {
-                    UnifiedAddress::from_receivers(Some(note.note().recipient()), None, None)
-                        .expect("valid")
-                        .encode(wallet.params())
+                    UnifiedAddress::from_receivers(
+                        Some(note.note().recipient()),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .map(|ua| encode_unified_address(&ua, wallet.params()))
+                    .expect("valid")
                 }),
                 value: value_from_zatoshis(note.value()),
                 value_zat: u64::from(note.value()),
-                memo: Some(memo),
+                memo,
                 memo_str,
                 wallet_internal,
                 generated: None,
+                blocks_to_maturity: None,
             })
         }
 
@@ -463,21 +489,84 @@ pub(crate) fn call(
                 account_uuid: account_id.expose_uuid().to_string(),
                 // TODO: Ensure we generate the same kind of shielded address as `zcashd`.
                 address: (!wallet_internal).then(|| {
-                    UnifiedAddress::from_receivers(Some(note.note().recipient()), None, None)
-                        .expect("valid")
-                        .encode(wallet.params())
+                    UnifiedAddress::from_receivers(
+                        Some(note.note().recipient()),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .map(|ua| encode_unified_address(&ua, wallet.params()))
+                    .expect("valid")
                 }),
                 value: value_from_zatoshis(note.value()),
                 value_zat: u64::from(note.value()),
-                memo: Some(memo),
+                memo,
                 memo_str,
                 wallet_internal,
                 generated: None,
+                blocks_to_maturity: None,
             })
         }
     }
 
     Ok(ResultType(unspent_outputs))
+}
+
+/// Renders the outcome of a note's memo lookup as the `memo` and `memoStr` fields of
+/// its `z_listunspent` entry: the memo's hex encoding, plus its text when it is a
+/// valid UTF-8 text memo.
+///
+/// A note is a valid unspent output whether or not its memo can be produced, so a memo
+/// that is itself unavailable — not yet fetched by enhancement, stored but undecodable
+/// ([`SqliteClientError::InvalidMemo`]), or unsupported for the note's pool
+/// ([`SqliteClientError::UnsupportedPoolType`]) — yields an entry without memo fields,
+/// rather than failing a request that must also report every other unspent output.
+/// Errors that instead describe the health of the database propagate, so that an
+/// unreliable wallet database is not reported as a complete result.
+/// The outcome of a memo lookup for a `z_listunspent` entry.
+#[derive(Debug)]
+enum MemoLookup {
+    /// The memo was read; the entry carries the `memo` field (and `memoStr` for a
+    /// text memo).
+    Read {
+        memo: String,
+        memo_str: Option<String>,
+    },
+    /// No memo is recorded for the note (for example, its transaction has not been
+    /// enhanced); the entry omits the memo fields.
+    Absent,
+    /// A memo exists but cannot be read; the entry omits the memo fields, and the
+    /// caller surfaces the carried cause to the operator.
+    Unavailable(SqliteClientError),
+}
+
+/// Classifies a [`WalletRead::get_memo`] result into how a `z_listunspent` entry
+/// renders it.
+///
+/// This is the single decision point for which lookup errors degrade to an entry
+/// without memo fields ([`MemoLookup::Unavailable`]) rather than failing the whole
+/// request: an unreadable memo does not make the note any less unspent. Anything
+/// else — like an underlying database failure — is a real error, since degrading it
+/// would silently return results from a wallet database that cannot be read
+/// reliably.
+fn memo_fields(
+    lookup: Result<Option<Memo>, SqliteClientError>,
+) -> Result<MemoLookup, SqliteClientError> {
+    match lookup {
+        Ok(Some(memo)) => Ok(MemoLookup::Read {
+            memo: hex::encode(memo.encode().as_array()),
+            memo_str: match memo {
+                Memo::Text(text_memo) => Some(text_memo.into()),
+                _ => None,
+            },
+        }),
+        Ok(None) => Ok(MemoLookup::Absent),
+        Err(
+            e @ (SqliteClientError::InvalidMemo(_) | SqliteClientError::UnsupportedPoolType(_)),
+        ) => Ok(MemoLookup::Unavailable(e)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Builds the `z_listunspent` entry for a transparent UTXO.
@@ -508,6 +597,11 @@ fn transparent_unspent_output(
         account_uuid,
         wallet_internal,
         generated: Some(generated),
+        blocks_to_maturity: if generated {
+            Some(COINBASE_MATURITY_BLOCKS.saturating_sub(confirmations))
+        } else {
+            None
+        },
         value: value_from_zatoshis(value),
         value_zat: u64::from(value),
         memo: None,
@@ -518,10 +612,17 @@ fn transparent_unspent_output(
 #[cfg(test)]
 mod tests {
     use zcash_client_backend::data_api::wallet::TargetHeight;
-    use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
+    use zcash_client_sqlite::error::SqliteClientError;
+    use zcash_protocol::{
+        PoolType, ShieldedPool,
+        consensus::BlockHeight,
+        memo::{Memo, MemoBytes},
+        value::Zatoshis,
+    };
 
     use super::{
-        UnspentOutput, confirmation_count, confirmations_in_range, transparent_unspent_output,
+        MemoLookup, UnspentOutput, confirmation_count, confirmations_in_range, memo_fields,
+        transparent_unspent_output,
     };
     use crate::components::json_rpc::utils::value_from_zatoshis;
 
@@ -634,15 +735,178 @@ mod tests {
     }
 
     #[test]
+    fn transparent_coinbase_output_reports_blocks_to_maturity() {
+        // 10 confirmations, 90 blocks remaining until mature (100 - 10).
+        let rendered = rendered_transparent(true);
+        assert_eq!(rendered["blockstomaturity"], serde_json::json!(90));
+    }
+
+    #[test]
+    fn transparent_mature_coinbase_output_reports_zero_blocks_to_maturity() {
+        let rendered = serde_json::to_value(transparent_unspent_output(
+            "3ec4c1b4b1e61a13c11ec5b0ba1240cca66f0e0d5b1e0303403d0a44ae7d0219".into(),
+            0,
+            100, // exactly at maturity
+            false,
+            Some("t1UYsZVJkLPeMjxEtACvSxfWuNmddpWfxzs".into()),
+            "3ad46f88-8f11-407b-b768-a2d587e971c9".into(),
+            false,
+            Zatoshis::const_from_u64(625_000_000),
+            true,
+        ))
+        .unwrap();
+        assert_eq!(rendered["blockstomaturity"], serde_json::json!(0));
+    }
+
+    #[test]
     fn transparent_non_coinbase_output_is_not_generated() {
         let rendered = rendered_transparent(false);
         assert_eq!(rendered["generated"], serde_json::json!(false));
     }
 
     #[test]
-    fn shielded_output_omits_generated() {
-        // Shielded notes never set `generated`; the field must be omitted entirely
-        // rather than rendered as `null`.
+    fn transparent_non_coinbase_output_omits_blocks_to_maturity() {
+        let rendered = rendered_transparent(false);
+        assert!(rendered.get("blockstomaturity").is_none());
+    }
+
+    /// A memo lookup error for a stored memo that cannot be decoded, as
+    /// `WalletRead::get_memo` reports it.
+    ///
+    /// The decode error comes from feeding `Memo::from_bytes` an over-long blob, so
+    /// the test tracks whatever `zcash_protocol` actually rejects rather than a
+    /// hand-copied ZIP 302 limit.
+    fn undecodable_memo_error() -> SqliteClientError {
+        let too_long = [0u8; 513];
+        SqliteClientError::InvalidMemo(Memo::from_bytes(&too_long).unwrap_err())
+    }
+
+    #[test]
+    fn text_memo_renders_hex_and_text() {
+        let memo = Memo::from_bytes(b"hello").unwrap();
+        let expected_hex = hex::encode(memo.encode().as_array());
+
+        match memo_fields(Ok(Some(memo))).unwrap() {
+            MemoLookup::Read { memo, memo_str } => {
+                assert_eq!(memo, expected_hex);
+                assert_eq!(memo_str.as_deref(), Some("hello"));
+            }
+            other => panic!("a text memo must be read, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_text_memo_renders_hex_only() {
+        let expected_hex = hex::encode(MemoBytes::empty().as_array());
+
+        match memo_fields(Ok(Some(Memo::Empty))).unwrap() {
+            MemoLookup::Read { memo, memo_str } => {
+                assert_eq!(memo, expected_hex);
+                assert_eq!(memo_str, None);
+            }
+            other => panic!("an empty memo must be read, got {other:?}"),
+        }
+    }
+
+    // Regression: a note whose memo the wallet has not yet fetched previously rendered
+    // the placeholder text "TODO: Always enhance every note" in the `memo` field, which
+    // is documented as hexadecimal. An unknown memo now omits both memo fields.
+    #[test]
+    fn absent_memo_omits_memo_fields() {
+        assert!(matches!(memo_fields(Ok(None)).unwrap(), MemoLookup::Absent));
+    }
+
+    // Regression for https://github.com/zcash/zallet/issues/695: a stored memo that
+    // cannot be decoded previously failed the entire `z_listunspent` request, hiding
+    // every other unspent output. The note is now reported without memo fields.
+    #[test]
+    fn undecodable_memo_omits_memo_fields_instead_of_failing() {
+        assert!(matches!(
+            memo_fields(Err(undecodable_memo_error())).unwrap(),
+            MemoLookup::Unavailable(SqliteClientError::InvalidMemo(_))
+        ));
+    }
+
+    // Regression for https://github.com/zcash/zallet/issues/695: a database layer that
+    // does not support memo lookups for a note's pool is the typed error identifying
+    // the unsupported state; the note is a valid unspent output regardless, so it is
+    // reported without memo fields rather than failing the request.
+    #[test]
+    fn unsupported_pool_memo_omits_memo_fields_instead_of_failing() {
+        assert!(matches!(
+            memo_fields(Err(SqliteClientError::UnsupportedPoolType(
+                PoolType::Shielded(ShieldedPool::Ironwood)
+            )))
+            .unwrap(),
+            MemoLookup::Unavailable(SqliteClientError::UnsupportedPoolType(_))
+        ));
+    }
+
+    // ... but a genuine database failure must still fail the lookup: degrading it to an
+    // absent memo would silently return results from a wallet database that cannot be
+    // read reliably.
+    #[test]
+    fn database_failure_still_fails_memo_lookup() {
+        let lookup = memo_fields(Err(SqliteClientError::DbError(
+            rusqlite::Error::QueryReturnedNoRows,
+        )));
+        assert!(matches!(lookup, Err(SqliteClientError::DbError(_))));
+    }
+
+    // Entry-level regression for https://github.com/zcash/zallet/issues/695: an
+    // unspent Ironwood note whose memo cannot be decoded still renders as a complete
+    // `z_listunspent` entry. The memo fields are omitted entirely, not rendered as
+    // `null`.
+    #[test]
+    fn ironwood_note_with_undecodable_memo_still_renders() {
+        let (memo, memo_str) = match memo_fields(Err(undecodable_memo_error())).unwrap() {
+            MemoLookup::Unavailable(_) => (None, None),
+            other => panic!("an undecodable memo must be unavailable, got {other:?}"),
+        };
+
+        let rendered = serde_json::to_value(UnspentOutput {
+            txid: "3ec4c1b4b1e61a13c11ec5b0ba1240cca66f0e0d5b1e0303403d0a44ae7d0219".into(),
+            pool: "ironwood".into(),
+            outindex: 0,
+            confirmations: 10,
+            is_watch_only: false,
+            address: None,
+            account_uuid: "3ad46f88-8f11-407b-b768-a2d587e971c9".into(),
+            wallet_internal: true,
+            generated: None,
+            blocks_to_maturity: None,
+            value: value_from_zatoshis(Zatoshis::const_from_u64(100_000)),
+            value_zat: 100_000,
+            memo,
+            memo_str,
+        })
+        .unwrap();
+
+        // Compare the whole rendered value, so an unexpected extra field or a `null`
+        // sneaking in fails the test rather than going unnoticed.
+        assert_eq!(
+            rendered,
+            serde_json::json!({
+                "txid": "3ec4c1b4b1e61a13c11ec5b0ba1240cca66f0e0d5b1e0303403d0a44ae7d0219",
+                "pool": "ironwood",
+                "outindex": 0,
+                "confirmations": 10,
+                "is_watch_only": false,
+                "account_uuid": "3ad46f88-8f11-407b-b768-a2d587e971c9",
+                "walletInternal": true,
+                "value": serde_json::to_value(value_from_zatoshis(Zatoshis::const_from_u64(
+                    100_000
+                )))
+                .unwrap(),
+                "valueZat": 100_000,
+            }),
+        );
+    }
+
+    #[test]
+    fn shielded_output_omits_generated_and_blocks_to_maturity() {
+        // Shielded notes never set `generated` or `blockstomaturity`; the fields
+        // must be omitted entirely rather than rendered as `null`.
         let output = UnspentOutput {
             txid: "3ec4c1b4b1e61a13c11ec5b0ba1240cca66f0e0d5b1e0303403d0a44ae7d0219".into(),
             pool: "sapling".into(),
@@ -653,6 +917,7 @@ mod tests {
             account_uuid: "3ad46f88-8f11-407b-b768-a2d587e971c9".into(),
             wallet_internal: true,
             generated: None,
+            blocks_to_maturity: None,
             value: value_from_zatoshis(Zatoshis::const_from_u64(100_000)),
             value_zat: 100_000,
             memo: Some("f600".into()),
@@ -661,5 +926,6 @@ mod tests {
 
         let rendered = serde_json::to_value(output).unwrap();
         assert!(rendered.get("generated").is_none());
+        assert!(rendered.get("blockstomaturity").is_none());
     }
 }

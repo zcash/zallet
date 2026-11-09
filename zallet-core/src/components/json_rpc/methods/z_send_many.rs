@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use abscissa_core::Application;
 
 use jsonrpsee::core::{JsonValue, RpcResult};
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::ExposeSecret;
 use serde_json::json;
 use zcash_client_backend::data_api::wallet::SpendingKeys;
@@ -18,25 +19,28 @@ use zcash_client_backend::{
     fees::StandardFeeRule,
     wallet::OvkPolicy,
 };
-use zcash_client_sqlite::{AccountUuid, ReceivedNoteId};
+use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, util::SystemClock};
 use zcash_keys::{
     address::Address,
     keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
 };
 use zcash_proofs::prover::LocalTxProver;
+use zcash_protocol::TxId;
 
+use super::pczt_common::PROVING_SLOTS;
 use crate::{
     components::{
         chain::Chain,
-        database::DbHandle,
+        database::Database,
         json_rpc::{
             asyncop::{ContextInfo, OperationId},
             payments::{
-                AmountParameter, SendResult, build_request, confirmations_policy_for_minconf,
-                get_account_for_address, get_legacy_pool_account, parse_privacy_policy,
-                propose_and_check, spend_policy_for, verify_and_broadcast_transactions,
+                AmountParameter, SendResult, broadcast_transactions, build_request,
+                confirmations_policy_for_minconf, get_account_for_address, get_legacy_pool_account,
+                parse_privacy_policy, propose_and_check, spend_policy_for, verify_transactions,
             },
             server::LegacyCode,
+            utils::wallet_handle,
         },
         keystore::KeyStore,
     },
@@ -45,7 +49,9 @@ use crate::{
 };
 
 #[cfg(feature = "zcashd-import")]
-use crate::components::json_rpc::utils::collect_standalone_transparent_keys;
+use crate::components::json_rpc::utils::{
+    decrypt_standalone_transparent_keys, standalone_transparent_receivers,
+};
 
 /// Response to a `z_sendmany` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -84,7 +90,7 @@ fn legacy_pool_spend_policy() -> SpendPolicy {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn call<C: Chain>(
-    mut wallet: DbHandle,
+    wallet: Database,
     keystore: KeyStore,
     chain: C,
     fromaddress: String,
@@ -106,58 +112,86 @@ pub(crate) async fn call<C: Chain>(
 
     let request = build_request(&amounts)?;
 
-    let (account, spend_policy) = match fromaddress.as_str() {
-        // Select from the legacy transparent address pool, which this wallet holds in a
-        // single account. Enabled by `features.legacy_pool_seed_fingerprint`.
-        "ANY_TADDR" => (
-            get_legacy_pool_account(wallet.as_ref())?,
-            legacy_pool_spend_policy(),
-        ),
-        // Select the account corresponding to the given address.
-        _ => {
-            let address = Address::decode(wallet.params(), &fromaddress).ok_or_else(|| {
-                LegacyCode::InvalidAddressOrKey.with_static(
-                "Invalid from address: should be a taddr, zaddr, UA, or the string 'ANY_TADDR'.",
-            )
-            })?;
-
-            let account = get_account_for_address(wallet.as_ref(), &address)?;
-
-            (account, spend_policy_for(&address))
-        }
-    };
-
-    let privacy_policy = parse_privacy_policy(privacy_policy.as_deref())?;
-
-    // Reject an oversized recipient set before input selection and proving, which both
-    // scale with it. Every recipient needs at least one output in its pool, so this only
-    // rejects requests the post-proposal per-pool check would reject anyway.
-    //
-    // TODO: also bound the serialized transaction size.
-    // https://github.com/zcash/zallet/issues/255
-    let actions_limit: usize = APP.config().builder.limits.orchard_actions().into();
-    if amounts.len() > actions_limit {
-        return Err(LegacyCode::Misc.with_message(fl!(
-            "err-excess-recipients",
-            count = amounts.len(),
-            limit = actions_limit,
-            config = "-orchardactionlimit=N",
-            bound = format!("N >= %u"),
-        )));
-    }
-
-    let confirmations_policy = confirmations_policy_for_minconf(minconf)?;
-
     let params = *wallet.params();
-    let proposal = propose_and_check(
-        wallet.as_mut(),
-        &params,
-        account.id(),
-        request,
-        privacy_policy,
-        confirmations_policy,
-        &spend_policy,
-    )?;
+
+    // Stage the account resolution and the proposal on a connection scoped to this
+    // block, so it is provably released before the keystore decryptions below, which
+    // acquire their own connection (see `Database::handle`). The block contains no
+    // await point, which is what lets `clippy::await_holding_invalid_type` check the
+    // staging.
+    let staged = {
+        let mut handle = wallet_handle(&wallet).await?;
+
+        let (account, spend_policy) = match fromaddress.as_str() {
+            // Select from the legacy transparent address pool, which this wallet holds
+            // in a single account. Enabled by `features.legacy_pool_seed_fingerprint`.
+            "ANY_TADDR" => (
+                get_legacy_pool_account(handle.as_ref())?,
+                legacy_pool_spend_policy(),
+            ),
+            // Select the account corresponding to the given address.
+            _ => {
+                let address = Address::decode(&params, &fromaddress).ok_or_else(|| {
+                    LegacyCode::InvalidAddressOrKey.with_static(
+                        "Invalid from address: should be a taddr, zaddr, UA, or the string 'ANY_TADDR'.",
+                    )
+                })?;
+
+                let account = get_account_for_address(handle.as_ref(), &address)?;
+
+                (account, spend_policy_for(&address))
+            }
+        };
+
+        let privacy_policy = parse_privacy_policy(privacy_policy.as_deref())?;
+
+        // Reject an oversized recipient set before input selection and proving, which
+        // both scale with it. Every recipient needs at least one output in its pool, so
+        // this only rejects requests the post-proposal per-pool check would reject
+        // anyway.
+        //
+        // TODO: also bound the serialized transaction size.
+        // https://github.com/zcash/zallet/issues/255
+        let actions_limit: usize = APP.config().builder.limits.orchard_actions().into();
+        if amounts.len() > actions_limit {
+            return Err(LegacyCode::Misc.with_message(fl!(
+                "err-excess-recipients",
+                count = amounts.len(),
+                limit = actions_limit,
+                config = "-orchardactionlimit=N",
+                bound = "N >= %u".to_string(),
+            )));
+        }
+
+        let confirmations_policy = confirmations_policy_for_minconf(minconf)?;
+
+        let proposal = propose_and_check(
+            handle.as_mut(),
+            &params,
+            account.id(),
+            request,
+            privacy_policy,
+            confirmations_policy,
+            &spend_policy,
+        )?;
+
+        // Read which of the account's receivers are standalone imports while the staged
+        // connection is still held; the matching keys are decrypted below, after it is
+        // released.
+        #[cfg(feature = "zcashd-import")]
+        let standalone_addrs = standalone_transparent_receivers(handle.as_ref(), account.id())?;
+
+        (
+            account,
+            proposal,
+            #[cfg(feature = "zcashd-import")]
+            standalone_addrs,
+        )
+    };
+    #[cfg(feature = "zcashd-import")]
+    let (account, proposal, standalone_addrs) = staged;
+    #[cfg(not(feature = "zcashd-import"))]
+    let (account, proposal) = staged;
 
     let derivation = account.source().key_derivation().ok_or_else(|| {
         LegacyCode::InvalidAddressOrKey.with_message(fl!("err-from-address-no-payment-source"))
@@ -175,17 +209,13 @@ pub(crate) async fn call<C: Chain>(
             }
             _ => LegacyCode::Database.with_message(e.to_string()),
         })?;
-    let usk = UnifiedSpendingKey::from_seed(
-        wallet.params(),
-        seed.expose_secret(),
-        derivation.account_index(),
-    )
-    .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
+    let usk =
+        UnifiedSpendingKey::from_seed(&params, seed.expose_secret(), derivation.account_index())
+            .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
 
     #[cfg(feature = "zcashd-import")]
     let standalone_keys =
-        collect_standalone_transparent_keys(wallet.as_ref(), &keystore, account.id(), &proposal)
-            .await?;
+        decrypt_standalone_transparent_keys(&keystore, &standalone_addrs, &proposal).await?;
 
     // TODO: verify that the proposal satisfies the requested privacy policy
 
@@ -225,20 +255,39 @@ pub(crate) async fn call<C: Chain>(
 /// 2. #1360 Note selection is not optimal.
 /// 3. #1277 Spendable notes are not locked, so an operation running in parallel
 ///    could also try to use them.
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "transaction construction writes through this connection inside the blocking \
+              task, so the hold across that one await is inherent; it is bounded by the \
+              proving permit, and the connection is dropped before the broadcast await"
+)]
 async fn run<C: Chain>(
-    mut wallet: DbHandle,
+    wallet: Database,
     chain: C,
     account_id: AccountUuid,
     ufvk: UnifiedFullViewingKey,
     proposal: Proposal<StandardFeeRule, ReceivedNoteId>,
     spending_keys: SpendingKeys,
 ) -> RpcResult<SendResult> {
+    // Transaction construction is CPU-bound proving, so it runs under a proving slot.
+    // The permit is taken BEFORE the connection, for the same reasons as `pczt_extract`:
+    // it keeps the semaphore-then-pool acquisition order consistent, and it bounds how
+    // many of the pool's foreground connections send operations can hold during proving
+    // (`AsyncOperation::new` spawns the operation immediately, so every accepted
+    // operation runs concurrently rather than waiting in a queue).
+    let permit = PROVING_SLOTS
+        .acquire()
+        .await
+        .expect("the proving semaphore is never closed");
+    let mut wallet = wallet_handle(&wallet).await?;
     let prover = LocalTxProver::bundled();
     let (wallet, proposal, txids) = crate::spawn_blocking!("z_sendmany prover", move || {
         let params = *wallet.params();
         create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             wallet.as_mut(),
             &params,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             &prover,
             &prover,
             &spending_keys,
@@ -254,13 +303,24 @@ async fn run<C: Chain>(
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
 
-    verify_and_broadcast_transactions(&wallet, chain, account_id, &ufvk, &proposal, txids.into())
-        .await
+    // Proving is done; release the slot.
+    drop(permit);
+
+    // Verify the built transactions synchronously, then release the connection before
+    // the broadcast: a slow or unresponsive node must not pin a pooled connection per
+    // in-flight send (see `Database::handle`).
+    let txids: Vec<TxId> = txids.into();
+    let transactions = verify_transactions(wallet.as_ref(), account_id, &ufvk, &proposal, &txids)?;
+    drop(wallet);
+
+    broadcast_transactions(chain, txids, transactions).await
 }
 
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
+    use std::collections::BTreeSet;
+
     use zcash_client_backend::{
         data_api::wallet::input_selection::{CoinbasePolicy, TransparentSource},
         fees::TransparentChangePolicy,
@@ -269,7 +329,7 @@ mod tests {
         address::{Address, UnifiedAddress},
         keys::{UnifiedAddressRequest, UnifiedSpendingKey},
     };
-    use zcash_protocol::consensus::Network;
+    use zcash_protocol::{ShieldedPool, consensus::Network};
     use zip32::AccountId;
 
     use super::{SpendPolicy, legacy_pool_spend_policy};
@@ -395,19 +455,107 @@ mod tests {
             account in arb_account(),
         ) {
             let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            // Some seeds derive an address without every shielded receiver; those
+            // receiver-restricted cases are covered by
+            // `unified_source_spends_only_its_receivers_pools`.
+            prop_assume!(ua.orchard().is_some() && ua.sapling().is_some());
 
-            let policy = spend_policy_for(&Address::Unified(ua));
+            let policy = spend_policy_for(&Address::Unified(Box::new(ua)));
 
             prop_assert!(
                 policy.transparent().is_none(),
                 "a shielded source must not permit transparent spending",
             );
 
-            // Shielded selection is left exactly as it was before transparent spending
-            // existed. Comparing against the default's pool set keeps that true for any
-            // pool added later, rather than pinning today's three.
+            // The address carries every shielded receiver type, so its permitted pools
+            // are exactly the full set. Comparing against the default's pool set keeps
+            // that true for any pool added later, rather than pinning today's three.
             let unchanged = SpendPolicy::default();
             prop_assert_eq!(policy.shielded(), unchanged.shielded());
+        }
+
+        /// A bare Sapling source draws only on the Sapling pool, never on the account's
+        /// Orchard or Ironwood notes, and on no transparent UTXO.
+        #[test]
+        fn sapling_source_spends_only_the_sapling_pool(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+        ) {
+            let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            let Some(saddr) = ua.sapling().cloned() else { return Ok(()) };
+
+            let policy = spend_policy_for(&Address::Sapling(Box::new(saddr)));
+
+            prop_assert_eq!(
+                policy.shielded(),
+                &BTreeSet::from([ShieldedPool::Sapling]),
+                "a Sapling source must draw only on the Sapling pool",
+            );
+            prop_assert!(
+                policy.transparent().is_none(),
+                "a shielded source must not permit transparent spending",
+            );
+        }
+
+        /// A receiver-restricted unified address selects inputs only from the value pools
+        /// its receivers name, as the `z_sendmany` documentation promises. An Orchard
+        /// receiver names both the Orchard pool and the Ironwood pool (where payments to
+        /// Orchard receivers are accounted once Ironwood is active).
+        #[test]
+        fn unified_source_spends_only_its_receivers_pools(
+            seed in any::<[u8; 32]>(),
+            account in arb_account(),
+            include_transparent in any::<bool>(),
+        ) {
+            let Some(ua) = ua_from(&seed, account) else { return Ok(()) };
+            let orchard = ua.orchard().copied();
+            let sapling = ua.sapling().cloned();
+            // The transparent receiver's presence must make no difference to the
+            // permitted pools, so the property quantifies over it.
+            let transparent = include_transparent
+                .then(|| ua.transparent().copied())
+                .flatten();
+
+            let orchard_pools = BTreeSet::from([ShieldedPool::Orchard, ShieldedPool::Ironwood]);
+            let sapling_pools = BTreeSet::from([ShieldedPool::Sapling]);
+
+            // Each combo pairs a receiver subset with the exact pool set it must permit.
+            // Some seeds derive an address without every shielded receiver, so only the
+            // combos this seed can express are exercised.
+            let mut combos = Vec::new();
+            if orchard.is_some() {
+                combos.push((orchard, None, orchard_pools.clone()));
+            }
+            if sapling.is_some() {
+                combos.push((None, sapling, sapling_pools.clone()));
+            }
+            if orchard.is_some() && sapling.is_some() {
+                combos.push((
+                    orchard,
+                    sapling,
+                    orchard_pools.union(&sapling_pools).copied().collect(),
+                ));
+            }
+
+            for (orchard, sapling, expected) in combos {
+                let Some(ua) =
+                    UnifiedAddress::from_receivers(orchard, sapling, transparent, None, None)
+                else {
+                    continue;
+                };
+
+                let policy = spend_policy_for(&Address::Unified(Box::new(ua)));
+
+                prop_assert_eq!(
+                    policy.shielded(),
+                    &expected,
+                    "permitted pools must be exactly those named by the source's receivers",
+                );
+                prop_assert!(
+                    policy.transparent().is_none(),
+                    "a shielded source must not permit transparent spending",
+                );
+            }
         }
 
         /// Change may be returned to the transparent pool exactly when the source could spend
@@ -427,7 +575,7 @@ mod tests {
                 "a fully transparent send keeps its change transparent",
             );
 
-            let shielded_source = spend_policy_for(&Address::Unified(ua));
+            let shielded_source = spend_policy_for(&Address::Unified(Box::new(ua)));
             prop_assert_eq!(
                 transparent_change_policy_for(&shielded_source),
                 TransparentChangePolicy::ShieldChange,

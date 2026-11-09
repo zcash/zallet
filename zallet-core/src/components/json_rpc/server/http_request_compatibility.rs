@@ -6,10 +6,10 @@ use std::future::Future;
 use std::pin::Pin;
 
 use futures::FutureExt;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::{StatusCode, header};
 use jsonrpsee::{
-    core::BoxError,
+    core::{BoxError, TEN_MB_SIZE_BYTES},
     server::{HttpBody, HttpRequest, HttpResponse},
     types::{ErrorCode, ErrorObject},
 };
@@ -96,16 +96,50 @@ impl<S> HttpRequestMiddleware<S> {
         }
     }
 
+    /// The maximum HTTP request body size this middleware will buffer.
+    ///
+    /// This middleware buffers the complete body before `jsonrpsee` parses the
+    /// request, so `jsonrpsee`'s own limit cannot protect the buffering here; an
+    /// authenticated caller could otherwise stream an arbitrarily large body into
+    /// memory.
+    ///
+    /// This must not exceed the limit `jsonrpsee` applies to the requests it parses,
+    /// or the middleware would buffer bodies the server then rejects — the memory
+    /// exhaustion this exists to prevent. Rather than duplicating `jsonrpsee`'s
+    /// default and hoping the two stay in step, [`super::spawn`] configures the
+    /// server from this same constant, so there is one value to change.
+    pub(super) const MAX_REQUEST_BODY_SIZE: u32 = TEN_MB_SIZE_BYTES;
+
     /// Maps whatever JSON-RPC version the client is using to JSON-RPC 2.0.
+    ///
+    /// Returns an error response to send back instead, if the request body could
+    /// not be buffered: `413 Payload Too Large` if it exceeds
+    /// [`Self::MAX_REQUEST_BODY_SIZE`], or `400 Bad Request` if reading it failed.
+    // The `Err` variant is `jsonrpsee::server::HttpResponse` (an upstream type
+    // we cannot shrink); allow clippy's large-error lint rather than boxing it
+    // and paying a heap allocation on the error path.
+    #[allow(clippy::result_large_err)]
     async fn request_to_json_rpc_2(
         request: HttpRequest<HttpBody>,
-    ) -> (JsonRpcVersion, HttpRequest<HttpBody>) {
+    ) -> Result<(JsonRpcVersion, HttpRequest<HttpBody>), HttpResponse> {
         let (parts, body) = request.into_parts();
-        let bytes = body
+        let bytes = match Limited::new(body, Self::MAX_REQUEST_BODY_SIZE as usize)
             .collect()
             .await
-            .expect("Failed to collect body data")
-            .to_bytes();
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                let status = if e.is::<LengthLimitError>() {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                return Err(HttpResponse::builder()
+                    .status(status)
+                    .body(HttpBody::empty())
+                    .expect("status and empty body are always valid"));
+            }
+        };
 
         let (version, bytes) = match serde_json::from_slice::<'_, JsonRpcRequest>(bytes.as_ref()) {
             Ok(request) => {
@@ -122,10 +156,10 @@ impl<S> HttpRequestMiddleware<S> {
             _ => (JsonRpcVersion::Unknown, bytes),
         };
 
-        (
+        Ok((
             version,
             HttpRequest::from_parts(parts, HttpBody::from(bytes.as_ref().to_vec())),
-        )
+        ))
     }
 
     /// Maps JSON-2.0 to whatever JSON-RPC version the client is using.
@@ -217,7 +251,10 @@ where
         let mut service = self.service.clone();
 
         async move {
-            let (version, request) = Self::request_to_json_rpc_2(request).await;
+            let (version, request) = match Self::request_to_json_rpc_2(request).await {
+                Ok(mapped) => mapped,
+                Err(error_response) => return Ok(error_response),
+            };
             let response = service.call(request).await.map_err(Into::into)?;
             Ok(Self::response_from_json_rpc_2(version, response).await)
         }
@@ -272,6 +309,80 @@ impl JsonRpcRequest {
     fn into_2(mut self) -> Self {
         self.jsonrpc = Some("2.0".into());
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The middleware is generic over the wrapped service, but the request mapping
+    /// never touches it, so any type parameter works for exercising it.
+    type Middleware = HttpRequestMiddleware<()>;
+
+    fn request_with_body(body: Vec<u8>) -> HttpRequest<HttpBody> {
+        HttpRequest::builder()
+            .body(HttpBody::from(body))
+            .expect("valid request")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oversized_body_is_rejected_not_buffered() {
+        let body = vec![b'0'; Middleware::MAX_REQUEST_BODY_SIZE as usize + 1];
+        let response = Middleware::request_to_json_rpc_2(request_with_body(body))
+            .await
+            .expect_err("a body over the limit must be rejected");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn body_at_the_limit_is_accepted() {
+        // Not valid JSON-RPC, so the mapping passes it through untouched for
+        // `jsonrpsee` to reject; what matters here is that buffering succeeds.
+        let body = vec![b'0'; Middleware::MAX_REQUEST_BODY_SIZE as usize];
+        let (version, _request) = Middleware::request_to_json_rpc_2(request_with_body(body))
+            .await
+            .expect("a body at the limit must be buffered");
+        assert!(matches!(version, JsonRpcVersion::Unknown));
+    }
+
+    /// A body whose stream fails for a reason other than the size limit maps to
+    /// `400 Bad Request`, not the `413` reserved for oversized bodies.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unreadable_body_is_a_bad_request() {
+        // A stream that yields an error rather than data: the read fails without ever
+        // reaching the length limit.
+        let failing = HttpBody::new(http_body_util::StreamBody::new(futures::stream::once(
+            async {
+                Err(Box::<dyn std::error::Error + Send + Sync>::from(
+                    "peer went away mid-body",
+                ))
+            },
+        )));
+        let request = HttpRequest::builder().body(failing).expect("valid request");
+
+        let response = Middleware::request_to_json_rpc_2(request)
+            .await
+            .expect_err("an unreadable body must be rejected");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn small_request_is_mapped_to_json_rpc_2() {
+        let body = br#"{"method":"getinfo","params":[],"id":1}"#.to_vec();
+        let (version, request) = Middleware::request_to_json_rpc_2(request_with_body(body))
+            .await
+            .expect("a small body must be buffered");
+        assert!(matches!(version, JsonRpcVersion::Bitcoind));
+
+        let bytes = request
+            .into_body()
+            .collect()
+            .await
+            .expect("body was buffered")
+            .to_bytes();
+        let mapped: JsonRpcRequest = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(mapped.jsonrpc.as_deref(), Some("2.0"));
     }
 }
 

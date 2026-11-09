@@ -29,7 +29,7 @@
 FROM rust:1.95.0-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS builder
 
 # Build deps: protobuf (tonic/PROTOC), clang+llvm (bindgen / *-sys C/C++ deps),
-# pkg-config, and git (zaino-state's build.rs embeds the commit).
+# and pkg-config.
 #
 # These versions are NOT implied by the digest-pinned base: apt resolves them
 # against the live bookworm archive, which only ever serves the CURRENT revision
@@ -51,7 +51,6 @@ RUN apt-get update \
         libclang-dev=1:14.0-55.7~deb12u1 \
         protobuf-compiler=3.21.12-3+deb12u1 \
         pkg-config=1.8.1-1 \
-        git=1:2.39.5-0+deb12u3 \
         ca-certificates=20230311+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 

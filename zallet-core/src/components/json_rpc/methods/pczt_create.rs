@@ -10,6 +10,7 @@ use documented::Documented;
 use jsonrpsee::core::{JsonValue, RpcResult};
 use pczt::Pczt;
 use pczt::roles::updater::Updater;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use schemars::JsonSchema;
 use serde::Serialize;
 use zcash_client_backend::{
@@ -22,7 +23,7 @@ use zcash_client_backend::{
     wallet::OvkPolicy,
     zip321::TransactionRequest,
 };
-use zcash_client_sqlite::{AccountUuid, ReceivedNoteId};
+use zcash_client_sqlite::{AccountUuid, ReceivedNoteId, util::SystemClock};
 use zcash_keys::address::Address;
 use zcash_primitives::transaction::builder::BundlePadding;
 
@@ -222,6 +223,8 @@ pub(super) fn build_pczt(
     let pczt = create_pczt_from_proposal::<_, _, Infallible, _, Infallible, _>(
         wallet.as_mut(),
         &params,
+        &SystemClock,
+        &mut UnwrapErr(SysRng),
         account.id(),
         OvkPolicy::Sender,
         &proposal,

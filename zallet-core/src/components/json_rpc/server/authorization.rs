@@ -14,7 +14,7 @@ use jsonrpsee::{
     core::BoxError,
     server::{HttpBody, HttpRequest, HttpResponse},
 };
-use rand::{Rng, rngs::OsRng};
+use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::{ExposeSecret, SecretString};
 #[allow(deprecated)]
 use sha2::{
@@ -24,6 +24,7 @@ use sha2::{
 use tower::Service;
 use tracing::{info, warn};
 
+use super::cookie;
 use crate::{config::RpcAuthSection, fl};
 
 type SaltedPasswordHash = CtOutput<Hmac<Sha256>>;
@@ -96,7 +97,7 @@ impl fmt::Display for PasswordHash {
 
 impl PasswordHash {
     pub(crate) fn from_bare(password: &str) -> Self {
-        let salt: [u8; 16] = OsRng.r#gen();
+        let salt: [u8; 16] = UnwrapErr(SysRng).random();
         let salt = hex::encode(salt);
         let hash = hash_password(password, &salt);
         Self { salt, hash }
@@ -161,23 +162,33 @@ impl AuthorizationLayer {
 
         let mut users: HashMap<String, PasswordHash> = auth
             .into_iter()
-            .map(|a| match (a.password, a.pwhash) {
-                // An empty password provides no authentication; treat it as an
-                // invalid config rather than an open RPC interface.
-                (Some(password), None) if !password.expose_secret().is_empty() => {
-                    using_bare_password = true;
-                    Ok((a.user, PasswordHash::from_bare(password.expose_secret())))
+            .map(|a| {
+                // The cookie username is reserved for the credential that Zallet
+                // generates at startup. Honouring a configured entry under that name
+                // would grant long-lived access via the username that clients treat as
+                // the short-lived, filesystem-protected cookie credential.
+                if a.user == cookie::COOKIE_USER {
+                    return Err(());
                 }
-                (None, Some(pwhash)) => {
-                    using_pwhash = true;
-                    let hash: PasswordHash = pwhash.parse()?;
-                    // Reject empty passwords.
-                    if hash.check("") {
-                        return Err(());
+
+                match (a.password, a.pwhash) {
+                    // An empty password provides no authentication; treat it as an
+                    // invalid config rather than an open RPC interface.
+                    (Some(password), None) if !password.expose_secret().is_empty() => {
+                        using_bare_password = true;
+                        Ok((a.user, PasswordHash::from_bare(password.expose_secret())))
                     }
-                    Ok((a.user, hash))
+                    (None, Some(pwhash)) => {
+                        using_pwhash = true;
+                        let hash: PasswordHash = pwhash.parse()?;
+                        // Reject empty passwords.
+                        if hash.check("") {
+                            return Err(());
+                        }
+                        Ok((a.user, hash))
+                    }
+                    _ => Err(()),
                 }
-                _ => Err(()),
             })
             .collect::<Result<_, _>>()?;
 
@@ -250,8 +261,6 @@ mod tests {
 
     use hyper::header::HeaderValue;
 
-    use tower::Layer;
-
     use super::{Authorization, AuthorizationLayer, PasswordHash};
     use crate::components::json_rpc::server::cookie;
 
@@ -286,7 +295,7 @@ mod tests {
         use crate::config::RpcAuthSection;
 
         let auth = vec![RpcAuthSection {
-            user: "__cookie__".to_string(),
+            user: "user1".to_string(),
             password: None,
             pwhash: Some(PasswordHash::from_bare("").to_string()),
         }];
@@ -355,21 +364,50 @@ mod tests {
         assert!(!auth.is_authorized(&header));
     }
 
+    /// The cookie username is reserved for the credential Zallet generates at startup. A
+    /// config that claims it must be rejected, not silently honoured: otherwise a
+    /// configured password grants access under the name that clients trust to be the
+    /// short-lived, filesystem-permission-protected cookie.
     #[test]
-    fn configured_cookie_user_works_without_generated_cookie() {
+    fn configured_cookie_user_is_rejected() {
         use crate::config::RpcAuthSection;
         use secrecy::SecretString;
 
-        let password = "mypassword";
         let auth = vec![RpcAuthSection {
             user: cookie::COOKIE_USER.to_string(),
-            password: Some(SecretString::new(password.to_string())),
+            password: Some(SecretString::new("mypassword".to_string())),
             pwhash: None,
         }];
-        let layer = AuthorizationLayer::new(auth, None).unwrap();
-        let auth = layer.layer(());
-        let header = basic_auth_header(cookie::COOKIE_USER, password);
-        assert!(auth.is_authorized(&header));
+        assert!(AuthorizationLayer::new(auth, None).is_err());
+
+        let auth = vec![RpcAuthSection {
+            user: cookie::COOKIE_USER.to_string(),
+            password: None,
+            pwhash: Some(PasswordHash::from_bare("mypassword").to_string()),
+        }];
+        assert!(AuthorizationLayer::new(auth, None).is_err());
+    }
+
+    /// The reserved username is rejected even alongside valid entries, so a config cannot
+    /// smuggle it in behind an otherwise-fine user list.
+    #[test]
+    fn configured_cookie_user_is_rejected_alongside_valid_users() {
+        use crate::config::RpcAuthSection;
+        use secrecy::SecretString;
+
+        let auth = vec![
+            RpcAuthSection {
+                user: "user1".to_string(),
+                password: Some(SecretString::new("abadpassword".to_string())),
+                pwhash: None,
+            },
+            RpcAuthSection {
+                user: cookie::COOKIE_USER.to_string(),
+                password: Some(SecretString::new("mypassword".to_string())),
+                pwhash: None,
+            },
+        ];
+        assert!(AuthorizationLayer::new(auth, None).is_err());
     }
 
     #[cfg(feature = "rpc-cli")]

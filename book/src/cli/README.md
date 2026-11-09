@@ -14,6 +14,7 @@ The following sections provide in-depth information on the different commands av
 - [`zallet generate-mnemonic`](generate-mnemonic.md)
 - [`zallet import-mnemonic`](import-mnemonic.md)
 - [`zallet export-mnemonic`](export-mnemonic.md)
+- [`zallet confirm-backup`](confirm-backup.md)
 - [`zallet import-address`](import-address.md)
 - [`zallet add-rpc-user`](add-rpc-user.md)
 - [`zallet rpc`](rpc.md)

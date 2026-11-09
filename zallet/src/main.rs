@@ -1,8 +1,8 @@
 //! The Zallet launcher.
 //!
-//! Zallet's chain backends are separate binaries (`zallet-zebra`,
-//! `zallet-zaino`), each built in its own cargo workspace so their `zebra-state`
-//! dependency versions can move independently (see zcash/zallet#540). This binary is
+//! Zallet's chain backends are separate binaries (currently `zallet-zebra`), each
+//! built in its own cargo workspace so their `zebra-state` dependency versions can
+//! move independently (see zcash/zallet#540). This binary is
 //! the user-facing `zallet` command: it reads the config file's top-level `backend`
 //! key and hands the entire invocation over to the corresponding backend binary.
 //!
@@ -387,8 +387,8 @@ mod tests {
             Ok("zebra".into()),
         );
         assert_eq!(
-            backend_from_config("backend = \"zaino\"\n"),
-            Ok("zaino".into()),
+            backend_from_config("backend = \"other\"\n"),
+            Ok("other".into()),
         );
         // Backend names are an open namespace: whether a backend by this name is
         // installed is discovered at dispatch time.
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn backend_binary_names_follow_the_convention() {
         assert_eq!(backend_binary_name("zebra"), "zallet-zebra");
-        assert_eq!(backend_binary_name("zaino"), "zallet-zaino");
+        assert_eq!(backend_binary_name("other"), "zallet-other");
         assert_eq!(backend_binary_name("frobnicator"), "zallet-frobnicator");
     }
 }

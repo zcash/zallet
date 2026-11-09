@@ -17,14 +17,11 @@ use zcash_protocol::{
 use zip32::DiversifierIndex;
 
 use super::server::LegacyCode;
+use crate::components::database::{Database, DbHandle};
 
 #[cfg(zallet_build = "wallet")]
 use {
-    crate::components::{
-        chain::{Chain, ChainView},
-        database::DbConnection,
-        keystore::KeyStore,
-    },
+    crate::components::{chain::ChainView, keystore::KeyStore},
     std::collections::HashSet,
     zcash_client_backend::data_api::{Account, AccountBirthday, WalletRead, chain::ChainState},
     zcash_primitives::block::BlockHash,
@@ -34,6 +31,7 @@ use {
 
 #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
 use {
+    crate::components::database::DbConnection,
     crate::error::ErrorKind,
     std::collections::HashMap,
     transparent::address::TransparentAddress,
@@ -48,6 +46,18 @@ use {
 #[cfg(zallet_build = "wallet")]
 pub(super) const ZCASH_LEGACY_ACCOUNT: u32 = 0x7fff_ffff;
 
+/// Acquires a wallet database connection, mapping a pool failure to the internal-error
+/// RPC code.
+///
+/// The deadlock-avoidance rule on [`Database::handle`] applies: do not call this (or any
+/// keystore method that touches key material) while already holding a [`DbHandle`].
+pub(super) async fn wallet_handle(wallet: &Database) -> RpcResult<DbHandle> {
+    wallet
+        .handle()
+        .await
+        .map_err(|_| RpcErrorCode::InternalError.into())
+}
+
 #[cfg(zallet_build = "wallet")]
 pub(super) async fn ensure_wallet_is_unlocked(keystore: &KeyStore) -> RpcResult<()> {
     // TODO: Consider returning some kind of unlock guard to ensure the caller doesn't
@@ -60,28 +70,52 @@ pub(super) async fn ensure_wallet_is_unlocked(keystore: &KeyStore) -> RpcResult<
     }
 }
 
-/// Collects the standalone (non-HD) transparent spending keys required to sign the
-/// transparent inputs of `proposal`.
+/// Returns an error if new spend authority must not be derived from the given seed
+/// because the operator has not confirmed that they hold its mnemonic phrase.
 ///
-/// Determines which transparent receivers in this account were imported standalone
-/// (vs. HD-derived). Only those have an associated entry in the keystore's
-/// standalone-key table; HD-derived receivers are signed for using `usk` and must not
-/// be looked up via `decrypt_standalone_transparent_key` (which would error with
-/// `QueryReturnedNoRows`).
-///
-/// Gated on `zcashd-import` because the keystore's standalone-key table (and the
-/// `decrypt_standalone_transparent_key` accessor) only exists under that feature.
-/// Also gated on the `wallet` build because its only callers (`z_send_many` and
-/// `z_shieldcoinbase`) are wallet-only, and the `DbConnection`/`KeyStore` types it
-/// uses are only imported in that build.
-#[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
-pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
-    wallet: &DbConnection,
+/// A phrase Zallet generated exists nowhere but this wallet until the operator records it
+/// somewhere durable, so funds sent to addresses derived from it before then are lost with
+/// the wallet. `keystore.require_backup` governs whether that is refused or merely true.
+#[cfg(zallet_build = "wallet")]
+pub(super) async fn ensure_seed_is_backed_up(
     keystore: &KeyStore,
+    seed_fp: &SeedFingerprint,
+) -> RpcResult<()> {
+    let required = keystore
+        .backup_required(seed_fp)
+        .await
+        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+
+    if required {
+        Err(LegacyCode::WalletBackupRequired.with_static(
+            "Error: Please acknowledge that you have backed up the wallet's emergency recovery phrase \
+             by using the zallet confirm-backup command first.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Determines which transparent receivers in this account were imported standalone
+/// (vs. HD-derived).
+///
+/// This is the database half of collecting the standalone (non-HD) transparent spending
+/// keys needed to sign a proposal's transparent inputs; run it while a wallet connection
+/// is held, then release that connection and pass the result to
+/// [`decrypt_standalone_transparent_keys`] (which acquires its own connection via the
+/// keystore, and so must not run while the caller still holds one; see
+/// [`Database::handle`]).
+///
+/// Gated on `zcashd-import` because its only callers (`z_send_many` and
+/// `z_shieldcoinbase`) sign for standalone keys under that feature, and on the
+/// `wallet` build because those callers are wallet-only and the
+/// `DbConnection`/`KeyStore` types it uses are only imported in that build.
+#[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+pub(super) fn standalone_transparent_receivers(
+    wallet: &DbConnection,
     account_id: AccountUuid,
-    proposal: &Proposal<StandardFeeRule, NoteRef>,
-) -> RpcResult<HashMap<TransparentAddress, Vec<secp256k1::SecretKey>>> {
-    let standalone_addrs: HashSet<TransparentAddress> = wallet
+) -> RpcResult<HashSet<TransparentAddress>> {
+    Ok(wallet
         .get_transparent_receivers(account_id, true, true)
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
         .into_iter()
@@ -93,8 +127,23 @@ pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
             TransparentAddressSource::StandaloneAddress => None,
             TransparentAddressSource::Derived { .. } => None,
         })
-        .collect();
+        .collect())
+}
 
+/// Decrypts the standalone transparent spending keys required to sign the transparent
+/// inputs of `proposal`.
+///
+/// `standalone_addrs` is the output of [`standalone_transparent_receivers`]: only those
+/// addresses have an associated entry in the keystore's standalone-key table; HD-derived
+/// receivers are signed for using the account's unified spending key and must not be
+/// looked up via `decrypt_standalone_transparent_key` (which would error with
+/// `QueryReturnedNoRows`).
+#[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
+pub(super) async fn decrypt_standalone_transparent_keys<NoteRef>(
+    keystore: &KeyStore,
+    standalone_addrs: &HashSet<TransparentAddress>,
+    proposal: &Proposal<StandardFeeRule, NoteRef>,
+) -> RpcResult<HashMap<TransparentAddress, Vec<secp256k1::SecretKey>>> {
     let mut keys: HashMap<TransparentAddress, Vec<secp256k1::SecretKey>> = HashMap::new();
     for step in proposal.steps() {
         for input in step.transparent_inputs() {
@@ -128,10 +177,14 @@ pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
 /// For height 0 (genesis), returns a birthday with an empty chain state since the
 /// commitment trees are empty. For non-zero heights, fetches the real treestate from
 /// the chain indexer so the sync engine can validate note commitment tree continuity.
+///
+/// `recover_until`, when provided, tells the sync engine to scan forward from the
+/// birthday until (and including) that height before switching to steady-state mode.
 #[cfg(zallet_build = "wallet")]
-pub(super) async fn fetch_account_birthday<C: Chain>(
-    chain: &C,
+pub(super) async fn fetch_account_birthday<V: ChainView>(
+    chain_view: &V,
     height: BlockHeight,
+    recover_until: Option<BlockHeight>,
 ) -> RpcResult<AccountBirthday> {
     if height == BlockHeight::from_u32(0) {
         // The chain state is the state of the note commitment trees *as of the block
@@ -141,20 +194,13 @@ pub(super) async fn fetch_account_birthday<C: Chain>(
         // would be wrong: that is the hash of block 0 itself, not of the block before it.)
         return Ok(AccountBirthday::from_parts(
             ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
-            None,
+            recover_until,
         ));
     }
 
     // The chain state anchoring the birthday is the note commitment tree state as of the
     // block *preceding* the birthday height.
     let treestate_height = height.saturating_sub(1);
-    let chain_view = chain.snapshot().await.map_err(|e| {
-        ErrorObjectOwned::owned(
-            RpcErrorCode::InternalError.code(),
-            format!("Failed to obtain a chain snapshot: {e}"),
-            None::<()>,
-        )
-    })?;
     let chain_state = chain_view
         .tree_state_as_of(treestate_height)
         .await
@@ -175,7 +221,7 @@ pub(super) async fn fetch_account_birthday<C: Chain>(
             )
         })?;
 
-    Ok(AccountBirthday::from_parts(chain_state, None))
+    Ok(AccountBirthday::from_parts(chain_state, recover_until))
 }
 
 pub(crate) fn parse_txid(txid_str: &str) -> RpcResult<TxId> {
@@ -210,8 +256,12 @@ pub(crate) fn parse_seedfp(
 }
 
 /// Parses the `account` parameter present in many wallet RPCs.
+///
+/// Takes the database rather than a connection, acquiring one itself only for the
+/// numeric (ZIP 32 account index) form: callers must not already hold a [`DbHandle`],
+/// per the deadlock-avoidance rule on [`Database::handle`].
 pub(super) async fn parse_account_parameter(
-    #[cfg(zallet_build = "wallet")] wallet: &DbConnection,
+    #[cfg(zallet_build = "wallet")] wallet: &Database,
     #[cfg(zallet_build = "wallet")] keystore: &KeyStore,
     account: &JsonValue,
 ) -> RpcResult<AccountUuid> {
@@ -231,16 +281,22 @@ pub(super) async fn parse_account_parameter(
             let mut distinct_seeds = HashSet::new();
             let mut account_id = None;
 
+            // Query the keystore before acquiring a wallet connection: the keystore
+            // takes its own connection from the same pool.
             let legacy_seeds = keystore
                 .list_legacy_seed_fingerprints()
                 .await
                 .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
+            let wallet = wallet_handle(wallet).await?;
+
             for candidate_account_id in wallet
+                .as_ref()
                 .get_account_ids()
                 .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
             {
                 let account = wallet
+                    .as_ref()
                     .get_account(candidate_account_id)
                     .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
                     // This would be a race condition between this and account deletion.
@@ -598,11 +654,70 @@ mod tests {
 
     #[cfg(zallet_build = "wallet")]
     use {
-        super::{parse_fixed_point, zatoshis_from_value},
-        crate::components::json_rpc::utils::parse_seedfp_parameter,
+        super::{ensure_seed_is_backed_up, parse_fixed_point, zatoshis_from_value},
+        crate::components::{
+            json_rpc::{server::LegacyCode, utils::parse_seedfp_parameter},
+            keystore::{
+                BackupStatus,
+                testing::{keystore_with_config, phrase, run_async},
+            },
+        },
+        tempfile::tempdir,
         zcash_protocol::value::Zatoshis,
         zip32::fingerprint::SeedFingerprint,
     };
+
+    /// The gate must report exactly `zcashd`'s `RPC_WALLET_BACKUP_REQUIRED`, since
+    /// integrators inherited that code from `zcashd`.
+    #[cfg(zallet_build = "wallet")]
+    #[test]
+    fn unconfirmed_backup_is_refused_with_the_legacy_error_code() {
+        let datadir = tempdir().unwrap();
+
+        run_async(|| async {
+            let keystore = keystore_with_config(&datadir, |config| {
+                config.keystore.require_backup = Some(true);
+            })
+            .await;
+
+            let seed_fp = keystore
+                .encrypt_and_store_mnemonic(phrase([1; 32]), BackupStatus::Unconfirmed)
+                .await
+                .unwrap();
+
+            let err = ensure_seed_is_backed_up(&keystore, &seed_fp)
+                .await
+                .expect_err("an unconfirmed seed must be refused");
+            assert_eq!(err.code(), LegacyCode::WalletBackupRequired as i32);
+
+            keystore.confirm_backup(&seed_fp).await.unwrap();
+            ensure_seed_is_backed_up(&keystore, &seed_fp)
+                .await
+                .expect("a confirmed seed must be permitted");
+        });
+    }
+
+    #[cfg(zallet_build = "wallet")]
+    #[test]
+    fn the_gate_is_bypassed_when_require_backup_is_off() {
+        let datadir = tempdir().unwrap();
+
+        run_async(|| async {
+            let keystore = keystore_with_config(&datadir, |config| {
+                config.keystore.require_backup = Some(false);
+            })
+            .await;
+
+            let seed_fp = keystore
+                .encrypt_and_store_mnemonic(phrase([2; 32]), BackupStatus::Unconfirmed)
+                .await
+                .unwrap();
+
+            ensure_seed_is_backed_up(&keystore, &seed_fp)
+                .await
+                .expect("require_backup = false must permit an unconfirmed seed");
+        });
+    }
 
     #[cfg(zallet_build = "wallet")]
     #[test]

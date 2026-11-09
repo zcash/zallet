@@ -1,20 +1,18 @@
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::ops::{ControlFlow, Range};
 
 use futures::TryStreamExt as _;
 use jsonrpsee::tracing::info;
-use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
 use zcash_client_backend::{
     data_api::{
-        BlockMetadata, WalletCommitmentTrees, WalletRead, WalletWrite, scanning::ScanRange,
+        BlockMetadata, WalletCommitmentTrees, WalletRead, WalletWrite, chain::ChainState,
+        scanning::ScanRange,
     },
     scanning::{
-        Nullifiers,
+        SpendIdentifiers,
         full::{self, ScanBlockError},
     },
 };
-use zcash_client_sqlite::AccountUuid;
 use zcash_primitives::block::Block;
 use zcash_protocol::consensus::BlockHeight;
 
@@ -66,22 +64,6 @@ pub(super) async fn update_subtree_roots<C: Chain>(
     Ok(())
 }
 
-/// An index from transparent address to the wallet account that controls it.
-type TransparentAddressIndex =
-    HashMap<TransparentAddress, (AccountUuid, Option<TransparentKeyScope>)>;
-
-/// Collects the wallet's transparent receivers, for detecting transparent outputs while
-/// scanning full blocks.
-fn transparent_address_index(db_data: &DbConnection) -> Result<TransparentAddressIndex, SyncError> {
-    let mut index = HashMap::new();
-    for account in db_data.get_account_ids()? {
-        for (address, metadata) in db_data.get_transparent_receivers(account, true, true)? {
-            index.insert(address, (account, metadata.scope()));
-        }
-    }
-    Ok(index)
-}
-
 /// Maps the error type produced by [`full::scan_block`] into a [`SyncError`].
 fn scan_block_error(e: ScanBlockError<Infallible>) -> SyncError {
     match e {
@@ -120,6 +102,33 @@ fn clamp_to_boundary(
     }
 }
 
+/// Loads a predecessor tree state and a complete contiguous block range from one chain
+/// view.
+///
+/// The returned batch is all-or-nothing. If the view expires while its block stream is
+/// in flight, the partial vector is dropped with the error before any block is queued for
+/// decryption or written to the wallet database.
+async fn collect_block_range<V: ChainView>(
+    chain_view: &V,
+    range: &Range<BlockHeight>,
+) -> Result<Option<(ChainState, Vec<Block>)>, SyncError> {
+    let Some(from_state) = chain_view
+        .tree_state_as_of(range.start - 1)
+        .await
+        .map_err(SyncError::Chain)?
+    else {
+        return Ok(None);
+    };
+
+    let blocks = chain_view
+        .stream_blocks(range)
+        .try_collect()
+        .await
+        .map_err(SyncError::Chain)?;
+
+    Ok(Some((from_state, blocks)))
+}
+
 /// Scans a contiguous sequence of blocks in the main chain.
 pub(super) async fn scan_blocks<V: ChainView>(
     chain_view: V,
@@ -145,20 +154,16 @@ pub(super) async fn scan_blocks<V: ChainView>(
         scan_range
     };
 
-    // Ignore scan ranges beyond the end of the current chain tip (which indicates a race
-    // with a chain reorg).
-    if let Some(from_state) = chain_view
-        .tree_state_as_of(scan_range.block_range().start - 1)
-        .await
-        .map_err(SyncError::Chain)?
+    // Load the whole fixed-view batch before beginning decryption or database work. An
+    // expired view therefore discards every block collected from that view.
+    if let Some((from_state, blocks_to_apply)) =
+        collect_block_range(&chain_view, scan_range.block_range()).await?
     {
         info!("Scanning blocks {}", scan_range);
-        let blocks_to_apply = chain_view.stream_blocks(scan_range.block_range());
-        tokio::pin!(blocks_to_apply);
 
         // Queue the blocks for batch decryption.
         let mut batch = Vec::with_capacity(scan_range.len());
-        while let Some(block) = blocks_to_apply.try_next().await.map_err(SyncError::Chain)? {
+        for block in blocks_to_apply {
             let height = block.claimed_height();
             let result = decryptor
                 .queue_block(block)
@@ -175,10 +180,10 @@ pub(super) async fn scan_blocks<V: ChainView>(
             Some(from_state.final_ironwood_tree().tree_size() as u32),
         ));
 
-        // Get the nullifiers for the unspent notes we are tracking, and the transparent
+        // Get the identifiers of the unspent outputs we are tracking, and the transparent
         // addresses we control.
-        let mut nullifiers = Nullifiers::unspent(db_data)?;
-        let addresses = transparent_address_index(db_data)?;
+        let mut spend_ids = SpendIdentifiers::unspent(db_data)?;
+        let addresses = db_data.get_transparent_receiver_accounts()?;
 
         // Now wait on the batch and scan each block as it becomes available.
         let mut scanned_blocks = Vec::with_capacity(scan_range.len());
@@ -193,13 +198,13 @@ pub(super) async fn scan_blocks<V: ChainView>(
                 &header,
                 vtx,
                 &scanning_keys,
-                &nullifiers,
+                &spend_ids,
                 prior_block_metadata.as_ref(),
                 |address| Ok::<_, Infallible>(addresses.get(address).copied()),
             )
             .map_err(scan_block_error)?;
 
-            nullifiers.update_with(&scanned_block);
+            spend_ids.update_with(&scanned_block);
             prior_block_metadata = Some(scanned_block.to_block_metadata());
             scanned_blocks.push(scanned_block);
         }
@@ -264,10 +269,10 @@ pub(super) async fn scan_block<V: ChainView>(
         Some(from_state.final_ironwood_tree().tree_size() as u32),
     ));
 
-    // Get the nullifiers for the unspent notes we are tracking, and the transparent
+    // Get the identifiers of the unspent outputs we are tracking, and the transparent
     // addresses we control.
-    let nullifiers = Nullifiers::unspent(db_data)?;
-    let addresses = transparent_address_index(db_data)?;
+    let spend_ids = SpendIdentifiers::unspent(db_data)?;
+    let addresses = db_data.get_transparent_receiver_accounts()?;
 
     let (scanning_keys, header, vtx) = result
         .await
@@ -279,7 +284,7 @@ pub(super) async fn scan_block<V: ChainView>(
         &header,
         vtx,
         &scanning_keys,
-        &nullifiers,
+        &spend_ids,
         prior_block_metadata.as_ref(),
         |address| Ok::<_, Infallible>(addresses.get(address).copied()),
     )

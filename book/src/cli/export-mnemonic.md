@@ -2,8 +2,21 @@
 
 `zallet export-mnemonic` enables a BIP 39 mnemonic to be exported from a Zallet wallet.
 
-The command takes the UUID of the account for which the mnemonic should be exported. You
-can obtain this from a running Zallet wallet with `zallet rpc z_listaccounts`.
+The command names the mnemonic to export in one of three ways:
+
+- the UUID of an account derived from it, obtainable from a running Zallet wallet with
+  `zallet rpc z_listaccounts`;
+- `--seedfp`, its ZIP 32 seed fingerprint, as printed by
+  [`zallet generate-mnemonic`](generate-mnemonic.md) and
+  [`zallet import-mnemonic`](import-mnemonic.md); or
+- neither, if the wallet holds exactly one mnemonic.
+
+A freshly generated mnemonic has no accounts derived from it yet, so it can only be named
+by the latter two.
+
+Exporting decrypts the stored phrase in order to re-encrypt it for output, so it needs the
+wallet's age encryption identity. If that identity file is passphrase-encrypted, you will
+be prompted for the passphrase.
 
 The mnemonic is encrypted to the same `age` identity that the wallet uses to internally
 encrypt key material. Decrypting the exported file therefore requires that same identity

@@ -36,20 +36,18 @@ ENV RUSTFLAGS="\
 WORKDIR /usr/src/zallet
 COPY . .
 
-# Fetch dependencies for all three resolution graphs (zcash/zallet#540): the
-# root workspace (launcher + zallet-core + tools) and the two backend
-# workspaces, each with its own lockfile.
+# Fetch dependencies for both resolution graphs (zcash/zallet#540): the root
+# workspace (launcher + zallet-core + tools) and the backend workspace, each
+# with its own lockfile.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo fetch --locked --target ${TARGET_ARCH} \
     && cargo fetch --locked --target ${TARGET_ARCH} \
-        --manifest-path backends/zebra/Cargo.toml \
-    && cargo fetch --locked --target ${TARGET_ARCH} \
-        --manifest-path backends/zaino/Cargo.toml
+        --manifest-path backends/zebra/Cargo.toml
 
-# Build the two backend binaries (each from its own workspace) and the
-# user-facing `zallet` launcher, which dispatches to whichever backend binary
-# the config's `backend` key names, installed next to itself.
+# Build the backend binary (from its own workspace) and the user-facing
+# `zallet` launcher, which dispatches to whichever backend binary the config's
+# `backend` key names, installed next to itself.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/usr/src/zallet/target \
@@ -57,12 +55,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         --frozen \
         --path backends/zebra \
         --bin zallet-zebra \
-        --target ${TARGET_ARCH} \
-        --features rpc-cli,zcashd-import \
-    && cargo install \
-        --frozen \
-        --path backends/zaino \
-        --bin zallet-zaino \
         --target ${TARGET_ARCH} \
         --features rpc-cli,zcashd-import \
     && cargo install \
@@ -79,7 +71,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp -a "${OUT}/completions" /usr/local/share/zallet/completions \
     && cp -a "${OUT}/manpages"  /usr/local/share/zallet/manpages \
     \
-    # Generate the Debian copyright file across the UNION of the three shipped
+    # Generate the Debian copyright file across the UNION of the shipped
     # binaries' dependency graphs (gen-copyright resolves each workspace's
     # lockfile; the per-binary graphs differ, so no single build can see all).
     #
@@ -89,7 +81,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     # cargo codepath than an explicit `--target` invocation: it fails to build
     # `serde_derive`'s proc-macro crate-type for that target ("cannot produce
     # proc-macro ... as the target x86_64-unknown-linux-musl does not support
-    # these crate types"), even though the three `cargo install --target
+    # these crate types"), even though the `cargo install --target
     # ${TARGET_ARCH}` calls above build serde_derive-dependent crates for the
     # exact same target successfully. Passing --target explicitly here too
     # (matching the pattern that already works above) avoids the bare-cargo
@@ -100,10 +92,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # --- Stage 2: layer for local binary extraction ---
 FROM scratch AS export
 
-# All three binaries at the root: the launcher + the two real backend binaries.
+# Both binaries at the root: the launcher + the real backend binary.
 COPY --from=builder /usr/local/cargo/bin/zallet /zallet
 COPY --from=builder /usr/local/cargo/bin/zallet-zebra /zallet-zebra
-COPY --from=builder /usr/local/cargo/bin/zallet-zaino /zallet-zaino
 
 # Export the whole zallet share tree (completions, manpages, metadata, etc.)
 COPY --from=builder /usr/local/share/zallet /usr/local/share/zallet
@@ -113,11 +104,8 @@ FROM scratch AS runtime
 USER 1000:1000
 # `zallet` is the launcher: it reads the config's `backend` key (default
 # `zebra-state`) and execs the matching backend binary installed next to it.
-# Consumers that want a specific backend can also run `zallet-zebra` or
-# `zallet-zaino` directly (e.g. z3, or anyone whose zebrad is NOT built with
-# the `indexer` feature, runs the zaino backend).
+# Consumers that want a specific backend can also run `zallet-zebra` directly.
 COPY --from=export /zallet /usr/local/bin/zallet
 COPY --from=export /zallet-zebra /usr/local/bin/zallet-zebra
-COPY --from=export /zallet-zaino /usr/local/bin/zallet-zaino
 WORKDIR /var/lib/zallet
 ENTRYPOINT ["zallet"]

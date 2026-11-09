@@ -6,6 +6,8 @@ use jsonrpsee::{
 use schemars::JsonSchema;
 use serde::Serialize;
 use zcash_address::unified;
+#[cfg(zallet_build = "wallet")]
+use zcash_client_backend::data_api::{Account as _, WalletRead};
 use zcash_client_backend::{
     data_api::WalletWrite,
     keys::{AddressGenerationError, ReceiverRequirement, UnifiedAddressRequest},
@@ -13,15 +15,16 @@ use zcash_client_backend::{
 use zcash_client_sqlite::error::SqliteClientError;
 
 use crate::components::{
-    database::DbConnection,
+    database::Database,
     json_rpc::{
         server::LegacyCode,
-        utils::{parse_account_parameter, parse_diversifier_index},
+        unified_encoding::encode_unified_address,
+        utils::{parse_account_parameter, parse_diversifier_index, wallet_handle},
     },
 };
 
 #[cfg(zallet_build = "wallet")]
-use crate::components::keystore::KeyStore;
+use crate::components::{json_rpc::utils::ensure_seed_is_backed_up, keystore::KeyStore};
 
 /// Response to a `z_getaddressforaccount` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -54,7 +57,7 @@ pub(super) const PARAM_RECEIVER_TYPES_DESC: &str =
 pub(super) const PARAM_DIVERSIFIER_INDEX_DESC: &str = "A specific diversifier index to derive at.";
 
 pub(crate) async fn call(
-    wallet: &mut DbConnection,
+    wallet: &Database,
     #[cfg(zallet_build = "wallet")] keystore: KeyStore,
     account: JsonValue,
     receiver_types: Option<Vec<String>>,
@@ -68,6 +71,35 @@ pub(crate) async fn call(
         &account,
     )
     .await?;
+
+    // Deriving a fresh address invites new funds into the account, so it is gated on the
+    // account's seed having a confirmed backup just as account creation is.
+    //
+    // Since accounts can no longer be created from an unconfirmed seed at all, in practice
+    // this catches new usage of accounts that already existed before that gate was added:
+    // a wallet whose phrase Zallet generated, and whose operator never recorded it.
+    // Accounts with no key derivation (an imported viewing key, say) are not covered by
+    // any mnemonic, so there is nothing to have backed up and nothing to check.
+    #[cfg(zallet_build = "wallet")]
+    {
+        // The wallet connection is scoped to this read and released before the backup
+        // check, which queries the keystore on its own connection (see
+        // `Database::handle`).
+        let seed_fp = wallet_handle(wallet)
+            .await?
+            .as_ref()
+            .get_account(account_id)
+            .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+            .and_then(|account| {
+                account
+                    .source()
+                    .key_derivation()
+                    .map(|derivation| *derivation.seed_fingerprint())
+            });
+        if let Some(seed_fp) = seed_fp {
+            ensure_seed_is_backed_up(&keystore, &seed_fp).await?;
+        }
+    }
 
     let (receiver_types, request) = match receiver_types {
         Some(receiver_types) if !receiver_types.is_empty() => {
@@ -128,8 +160,12 @@ pub(crate) async fn call(
 
     let diversifier_index = diversifier_index.map(parse_diversifier_index).transpose()?;
 
+    // The checks above are complete; reacquire a connection to derive the address.
+    let mut wallet = wallet_handle(wallet).await?;
+
     let (address, diversifier_index) = if let Some(diversifier_index) = diversifier_index {
         match wallet
+            .as_mut()
             .get_address_for_index(account_id, diversifier_index, request)
             .map_err(|e| map_sqlite_error(e, &account))?
         {
@@ -143,6 +179,7 @@ pub(crate) async fn call(
         }
     } else {
         wallet
+            .as_mut()
             .get_next_available_address(account_id, request)
             .map_err(|e| map_sqlite_error(e, &account))?
             // This would be a race condition between this and account deletion.
@@ -161,7 +198,7 @@ pub(crate) async fn call(
         account,
         diversifier_index: diversifier_index.into(),
         receiver_types,
-        address: address.encode(wallet.params()),
+        address: encode_unified_address(&address, wallet.params()),
     })
 }
 
@@ -186,7 +223,7 @@ fn map_address_generation_error(
             "Error: ran out of diversifier indices. Generate a new account with z_getnewaccount"
         ),
         AddressGenerationError::ReceiverTypeNotSupported(typecode) => match typecode {
-            unified::Typecode::P2sh =>  LegacyCode::Wallet.with_static(
+            unified::Typecode::P2SH =>  LegacyCode::Wallet.with_static(
                 "Error: P2SH addresses can not be created using this RPC method.",
             ),
             _ => LegacyCode::Wallet.with_message(format!(
@@ -198,7 +235,7 @@ fn map_address_generation_error(
                 "Error: account {account} cannot generate a receiver component with type {typecode:?}.",
             ))
         }
-        AddressGenerationError::ShieldedReceiverRequired => {
+        AddressGenerationError::NoSatisfiableReceiver => {
             LegacyCode::Wallet.with_static(
                 "Error: cannot generate an address containing no shielded receivers."
             )
