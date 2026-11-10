@@ -99,24 +99,37 @@ impl WalletTxOutput {
                 SqliteClientError::CorruptedData(format!("Invalid output value {value}: {e:?}"))
             })?),
             is_change,
-            memo: memo
-                .as_ref()
-                .and_then(|b| {
-                    MemoBytes::from_bytes(b)
-                        .and_then(Memo::try_from)
-                        .map(|m| match m {
-                            Memo::Empty => None,
-                            Memo::Text(text_memo) => Some(text_memo.to_string()),
-                            Memo::Future(memo_bytes) => Some(hex::encode(memo_bytes.as_slice())),
-                            Memo::Arbitrary(m) => Some(hex::encode(&m[..])),
-                        })
-                        .transpose()
-                })
-                .transpose()
-                .map_err(|e| {
-                    SqliteClientError::CorruptedData(format!("Invalid memo data: {e:?}"))
-                })?,
+            memo: render_memo(memo.as_deref()),
         }))
+    }
+}
+
+/// Renders a stored memo as the `memo` field of a `z_listtransactions` output.
+///
+/// Text memos render as text and empty memos are omitted. Anything else (arbitrary
+/// data, a future memo type, or text that is not valid UTF-8) renders as the hex of
+/// the full 512-byte memo, the same value `z_viewtransaction` and `z_listunspent`
+/// report. This cannot fail: the sender chooses the memo, and one undecodable memo
+/// must not take down the whole history (#794). A stored blob too long to be a memo
+/// renders as the hex of the stored bytes, with a warning so the operator can see it.
+fn render_memo(memo: Option<&[u8]>) -> Option<String> {
+    let bytes = memo?;
+    let memo_bytes = match MemoBytes::from_bytes(bytes) {
+        Ok(memo_bytes) => memo_bytes,
+        Err(e) => {
+            tracing::warn!(
+                "Stored memo of {} bytes is not a valid memo ({e}); rendering as hex",
+                bytes.len()
+            );
+            return Some(hex::encode(bytes));
+        }
+    };
+    match Memo::try_from(memo_bytes.clone()) {
+        Ok(Memo::Empty) => None,
+        Ok(Memo::Text(text_memo)) => Some(text_memo.into()),
+        Ok(Memo::Future(_) | Memo::Arbitrary(_)) | Err(_) => {
+            Some(hex::encode(memo_bytes.as_array()))
+        }
     }
 }
 
@@ -366,4 +379,103 @@ pub(crate) async fn call(
             .map_err(|e| LegacyCode::Database.with_message(format!("{e}")))?,
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use zcash_protocol::memo::{Memo, MemoBytes};
+
+    use super::{POOL_IRONWOOD, WalletTxOutput, render_memo};
+
+    /// The `v_tx_outputs` pool code for Ironwood (see `WalletTxOutput::parse_pool_code`).
+    const IRONWOOD_POOL_CODE: i64 = 4;
+    const OUTPUT_INDEX: u32 = 1;
+    const OUTPUT_VALUE: i64 = 10_000_000;
+    const TEXT_MEMO: &str = "hello";
+    /// 0xAB is a UTF-8 continuation byte, so this is a text-type memo that is not valid
+    /// UTF-8: the #794 trigger.
+    const INVALID_UTF8_MEMO: [u8; 10] = [0xab; 10];
+    /// Type byte of an arbitrary (non-text) memo.
+    const ARBITRARY_MEMO_PREFIX: u8 = 0xff;
+
+    /// Hex of the full 512-byte memo, as the other RPC methods report `memo`.
+    fn full_memo_hex(bytes: &[u8]) -> String {
+        hex::encode(MemoBytes::from_bytes(bytes).unwrap().as_array())
+    }
+
+    #[test]
+    fn no_stored_memo_renders_as_absent() {
+        assert_eq!(render_memo(None), None);
+    }
+
+    #[test]
+    fn empty_memo_renders_as_absent() {
+        assert_eq!(render_memo(Some(MemoBytes::empty().as_slice())), None);
+    }
+
+    #[test]
+    fn text_memo_renders_as_its_text() {
+        let full = Memo::from_bytes(TEXT_MEMO.as_bytes()).unwrap().encode();
+        assert_eq!(
+            render_memo(Some(full.as_slice())),
+            Some(TEXT_MEMO.to_string())
+        );
+        // Unpadded stored bytes decode the same way.
+        assert_eq!(
+            render_memo(Some(TEXT_MEMO.as_bytes())),
+            Some(TEXT_MEMO.to_string())
+        );
+    }
+
+    #[test]
+    fn arbitrary_memo_renders_as_full_hex() {
+        let mut bytes = vec![ARBITRARY_MEMO_PREFIX];
+        bytes.extend_from_slice(TEXT_MEMO.as_bytes());
+        assert!(matches!(
+            Memo::from_bytes(&bytes).unwrap(),
+            Memo::Arbitrary(_)
+        ));
+        assert_eq!(render_memo(Some(&bytes)), Some(full_memo_hex(&bytes)));
+    }
+
+    #[test]
+    fn invalid_utf8_text_memo_renders_as_full_hex_instead_of_failing() {
+        assert!(matches!(
+            Memo::from_bytes(&INVALID_UTF8_MEMO),
+            Err(zcash_protocol::memo::Error::InvalidUtf8(_))
+        ));
+        assert_eq!(
+            render_memo(Some(&INVALID_UTF8_MEMO)),
+            Some(full_memo_hex(&INVALID_UTF8_MEMO))
+        );
+    }
+
+    #[test]
+    fn over_long_stored_memo_renders_as_hex_of_the_stored_bytes() {
+        let bytes = vec![ARBITRARY_MEMO_PREFIX; MemoBytes::empty().as_array().len() + 1];
+        assert!(matches!(
+            MemoBytes::from_bytes(&bytes),
+            Err(zcash_protocol::memo::Error::TooLong(_))
+        ));
+        assert_eq!(render_memo(Some(&bytes)), Some(hex::encode(&bytes)));
+    }
+
+    #[test]
+    fn output_with_invalid_utf8_memo_is_rendered_rather_than_rejected() {
+        let output = WalletTxOutput::new(
+            IRONWOOD_POOL_CODE,
+            OUTPUT_INDEX,
+            None,
+            None,
+            None,
+            OUTPUT_VALUE,
+            false,
+            Some(INVALID_UTF8_MEMO.to_vec()),
+        )
+        .expect("an undecodable memo must not fail the output")
+        .expect("every known pool is rendered");
+        assert_eq!(output.pool, POOL_IRONWOOD);
+        assert_eq!(output.memo, Some(full_memo_hex(&INVALID_UTF8_MEMO)));
+        assert_eq!(output.value, OUTPUT_VALUE as u64);
+    }
 }
