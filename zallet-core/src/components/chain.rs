@@ -942,9 +942,11 @@ mod tests {
 
         async fn tree_state_as_of(
             &self,
-            _height: BlockHeight,
+            height: BlockHeight,
         ) -> Result<Option<ChainState>, ChainError> {
-            Ok(None)
+            // The mock only knows its tip, so that is the only chain state it serves.
+            Ok((height == self.tip.height())
+                .then(|| ChainState::empty(self.tip.height(), self.tip.hash())))
         }
 
         async fn get_block_header(

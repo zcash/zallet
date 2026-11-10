@@ -144,9 +144,8 @@ fn z_getnewaccount_completes_on_a_fresh_wallet_with_a_saturated_pool() {
             .update_chain_tip(recorded_tip(db.params()))
             .expect("records the chain tip");
 
-        // A chain view whose tip is at genesis: the birthday is clamped to the view's
-        // tip, and a genesis birthday needs no treestate (which `MockChainView` does
-        // not serve).
+        // A chain view with its tip at genesis: the birthday is the block after it, and
+        // the tip's chain state is the only one `MockChainView` serves.
         let chain = MockChain::reporting(Vec::new(), 0);
         let (decryptor, _engine) = WalletSync::build_decryptor();
 
