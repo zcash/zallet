@@ -44,6 +44,13 @@ be considered breaking changes.
 
 ### Fixed
 
+- `z_sendmany`, `z_sendfromaccount` and `pczt_create` now reject a payment of
+  less than 54 zatoshis to a transparent address (P2PKH, P2SH or TEX) as an
+  invalid parameter, instead of building, signing and recording a transaction
+  that the node then refuses as non-standard (#942). The rejected transaction
+  was kept in the wallet as pending, so the account's balance was reduced and
+  the notes it spent stayed unavailable until it expired, about 40 blocks
+  later. The threshold is the dust rule zcashd and zebra apply when relaying.
 - Wallet JSON-RPC methods no longer risk waiting forever for a database
   connection while wallet sync is running (#708). Methods that use both the
   database and stored key material (`z_getnewaccount`, `z_recoveraccounts`,

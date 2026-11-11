@@ -79,10 +79,42 @@ impl AmountParameter {
     }
 }
 
+/// Smallest value a P2PKH or P2SH output can carry and still be relayed.
+///
+/// Both zcashd and zebra reject a transaction with a smaller non-`OP_RETURN` transparent
+/// output as non-standard, so it would never reach the mempool. The node applies this
+/// rule only at broadcast, after the wallet has signed and recorded the transaction, so
+/// we check it up front. Value and formula follow `CTxOut::GetDustThreshold`:
+/// `3 * (rate * (output_size + 148) / 1000)` with a rate of 100 zat/kB.
+pub(super) const TRANSPARENT_DUST_THRESHOLD: Zatoshis = {
+    let p2pkh = transparent_dust_threshold(P2PKH_OUTPUT_SIZE);
+    let p2sh = transparent_dust_threshold(P2SH_OUTPUT_SIZE);
+    Zatoshis::const_from_u64(if p2pkh > p2sh { p2pkh } else { p2sh })
+};
+
+/// Relay fee rate used by the dust rule, in zatoshis per 1000 bytes (`DEFAULT_MIN_RELAY_TX_FEE / 10`
+/// in zcashd, `ONE_THIRD_DUST_THRESHOLD_RATE` in zebra).
+const DUST_THRESHOLD_RATE: u64 = 100;
+
+/// Serialized size of a P2PKH output: 8-byte value, 1-byte script length, 25-byte script.
+const P2PKH_OUTPUT_SIZE: u64 = 8 + 1 + 25;
+
+/// Serialized size of a P2SH output: 8-byte value, 1-byte script length, 23-byte script.
+const P2SH_OUTPUT_SIZE: u64 = 8 + 1 + 23;
+
+/// Dust threshold in zatoshis for a transparent output of the given serialized size.
+///
+/// Spending an output costs about 148 bytes of input, so the node treats an output
+/// as dust when that input would cost more than a third of the output's value at the
+/// relay fee rate.
+const fn transparent_dust_threshold(output_size: u64) -> u64 {
+    3 * (DUST_THRESHOLD_RATE * (output_size + 148) / 1000)
+}
+
 /// Parses an array of output amounts into a ZIP 321 transaction request.
 ///
-/// Rejects an empty array, duplicate recipient addresses, malformed addresses, and total
-/// output value overflow.
+/// Rejects an empty array, duplicate recipient addresses, malformed addresses, dust
+/// outputs to transparent recipients, and total output value overflow.
 pub(super) fn build_request(amounts: &[AmountParameter]) -> RpcResult<TransactionRequest> {
     if amounts.is_empty() {
         return Err(
@@ -111,6 +143,15 @@ pub(super) fn build_request(amounts: &[AmountParameter]) -> RpcResult<Transactio
 
         let memo = amount.memo().as_deref().map(parse_memo).transpose()?;
         let value = zatoshis_from_value(amount.amount())?;
+
+        if addr.is_transparent_only() && value < TRANSPARENT_DUST_THRESHOLD {
+            return Err(LegacyCode::InvalidParameter.with_message(format!(
+                "Invalid parameter, amount {} zatoshis to transparent recipient {} is below the dust threshold of {} zatoshis",
+                u64::from(value),
+                amount.address(),
+                u64::from(TRANSPARENT_DUST_THRESHOLD),
+            )));
+        }
 
         let payment = Payment::new(addr, Some(value), memo, None, None, vec![]).map_err(|e| {
             LegacyCode::InvalidParameter.with_static(match e {
@@ -1902,6 +1943,65 @@ mod build_request_tests {
             msg,
             "Invalid parameter, unknown address format: not-an-address",
         );
+    }
+
+    #[test]
+    fn dust_threshold_matches_the_node_rule() {
+        // zcashd `CTxOut::GetDustThreshold` / zebra `transparent::Output::is_dust` at a
+        // rate of 100 zat/kB: 54 zatoshis for both standard output kinds.
+        assert_eq!(transparent_dust_threshold(P2PKH_OUTPUT_SIZE), 54);
+        assert_eq!(transparent_dust_threshold(P2SH_OUTPUT_SIZE), 54);
+        assert_eq!(u64::from(TRANSPARENT_DUST_THRESHOLD), 54);
+    }
+
+    #[test]
+    fn rejects_dust_output_to_p2pkh_recipient() {
+        for zat in [1u64, 53] {
+            let msg = err_message(&[amount(T_ADDR_1, &zec_str(zat))]);
+            assert_eq!(
+                msg,
+                format!(
+                    "Invalid parameter, amount {zat} zatoshis to transparent recipient {T_ADDR_1} is below the dust threshold of 54 zatoshis"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_dust_output_to_p2sh_recipient() {
+        let msg = err_message(&[amount(T_ADDR_2, "0.00000053")]);
+        assert_eq!(
+            msg,
+            format!(
+                "Invalid parameter, amount 53 zatoshis to transparent recipient {T_ADDR_2} is below the dust threshold of 54 zatoshis"
+            ),
+        );
+    }
+
+    #[test]
+    fn accepts_smallest_non_dust_transparent_output() {
+        let request = build_request(&[
+            amount(T_ADDR_1, "0.00000054"),
+            amount(T_ADDR_2, "0.00000054"),
+        ])
+        .expect("54 zatoshis is the smallest standard transparent output");
+        assert_eq!(request.payments().len(), 2);
+    }
+
+    #[test]
+    fn dust_rule_does_not_apply_to_shielded_or_unified_recipients() {
+        // Shielded outputs have no dust rule; a UA with shielded receivers is paid shielded.
+        for addr in [SAPLING_ADDR, UNIFIED_ADDR_1] {
+            let request = build_request(&[amount(addr, "0.00000001")]).expect("valid request");
+            assert_eq!(request.payments().len(), 1);
+        }
+    }
+
+    #[test]
+    fn dust_check_runs_before_the_total_is_accumulated() {
+        // A dust recipient is reported even when it is not the first payment.
+        let msg = err_message(&[amount(SAPLING_ADDR, "1"), amount(T_ADDR_1, "0.00000001")]);
+        assert!(msg.contains("below the dust threshold"), "{msg}");
     }
 
     #[test]
