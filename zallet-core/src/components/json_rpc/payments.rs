@@ -2052,16 +2052,20 @@ mod build_request_tests {
         }
 
         /// An exchange-style batch withdrawal: any set of distinct recipients drawn from the
-        /// mixed-protocol pool, each with its own amount, builds a request with exactly that
-        /// many payments. Exercises N recipients spanning the transparent, Sapling, and
-        /// unified (Orchard) protocols simultaneously.
+        /// mixed-protocol pool, each with its own amount at or above the transparent dust
+        /// threshold, builds a request with exactly that many payments. Exercises N
+        /// recipients spanning the transparent, Sapling, and unified (Orchard) protocols
+        /// simultaneously.
         #[test]
         fn builds_distinct_mixed_protocol_batches(
             pool_indices in prop::sample::subsequence(
                 (0..ADDR_POOL.len()).collect::<Vec<_>>(),
                 1..=ADDR_POOL.len(),
             ),
-            zatoshis in prop::collection::vec(1u64..=1_000_000_000, ADDR_POOL.len()),
+            zatoshis in prop::collection::vec(
+                u64::from(TRANSPARENT_DUST_THRESHOLD)..=1_000_000_000,
+                ADDR_POOL.len(),
+            ),
         ) {
             let amounts = pool_indices
                 .iter()
@@ -2072,6 +2076,35 @@ mod build_request_tests {
             let request = build_request(&amounts)
                 .expect("a batch of distinct mixed-protocol recipients should build a request");
             prop_assert_eq!(request.payments().len(), pool_indices.len());
+        }
+
+        /// Any amount below the dust threshold is rejected for a transparent recipient and
+        /// accepted for a shielded or unified one, wherever it sits in the batch.
+        #[test]
+        fn dust_rejection_depends_only_on_the_recipient_kind(
+            pool_idx in 0..ADDR_POOL.len(),
+            zat in 1u64..u64::from(TRANSPARENT_DUST_THRESHOLD),
+            dust_first in any::<bool>(),
+        ) {
+            let dust = amount(ADDR_POOL[pool_idx], &zec_str(zat));
+            let other = ADDR_POOL
+                .iter()
+                .find(|a| **a != ADDR_POOL[pool_idx])
+                .map(|a| amount(a, "1"))
+                .expect("pool has more than one address");
+            let amounts = if dust_first { [dust, other] } else { [other, dust] };
+
+            let result = build_request(&amounts);
+            if ZcashAddress::try_from_encoded(ADDR_POOL[pool_idx])
+                .expect("pool addresses are valid")
+                .is_transparent_only()
+            {
+                let err = result.expect_err("dust to a transparent recipient is rejected");
+                prop_assert!(err.message().contains("below the dust threshold"), "{}", err.message());
+            } else {
+                let request = result.expect("shielded recipients have no dust rule");
+                prop_assert_eq!(request.payments().len(), 2);
+            }
         }
 
         /// A Sprout recipient is rejected as an invalid parameter, as in `zcashd`, on
