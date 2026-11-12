@@ -89,7 +89,10 @@ The following sections cover every command required to validate a tagged release
 
 ### Tooling prerequisites
 
-- `cosign` ≥ 2.1 (Sigstore verification + SBOM downloads)
+- `cosign` ≥ 3.1.3 (Sigstore verification + SBOM downloads). The commands below
+  rely on Cosign v3 behaviour, and v3.1.3 is the first release that fixes all of
+  GHSA-whqx-f9j3-ch6m, GHSA-wfqv-66vq-46rm, GHSA-w6c6-c85g-mmv6 and
+  GHSA-fx35-mq7g-6g98, which affect verification.
 - `rekor-cli` ≥ 1.2 (transparency log inspection)
 - `crane` or `skopeo` (digest lookup)
 - `oras` (optional SBOM pull)
@@ -103,7 +106,8 @@ Example installation on Debian/Ubuntu:
 ```bash
 sudo apt-get update && sudo apt-get install -y jq gnupg coreutils
 go install -v github.com/sigstore/rekor/cmd/rekor-cli@latest
-go install github.com/sigstore/cosign/v2/cmd/cosign@latest
+go install github.com/sigstore/cosign/v3/cmd/cosign@latest
+cosign version  # must report v3.1.3 or later
 go install github.com/google/go-containerregistry/cmd/crane@latest
 export PATH="$PATH:$HOME/go/bin"
 ```
