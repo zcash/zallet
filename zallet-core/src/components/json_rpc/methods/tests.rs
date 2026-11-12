@@ -17,13 +17,22 @@
 //! the connections sync retains, such a test must force a small pool to reproduce a
 //! regression on a many-core CI host.
 
+use std::convert::Infallible;
 use std::future::Future;
 use std::num::NonZeroUsize;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
 use std::time::Duration;
 
 use jsonrpsee::core::JsonValue;
 use tempfile::TempDir;
-use zcash_client_backend::data_api::{AccountBirthday, WalletRead, WalletWrite, chain::ChainState};
+use zcash_client_backend::{
+    data_api::{AccountBirthday, BlockMetadata, WalletRead, WalletWrite, chain::ChainState},
+    proto::compact_formats::CompactBlock,
+    scanning::{ScanningKeys, SpendIdentifiers, scan_block},
+};
 use zcash_client_sqlite::AccountUuid;
 use zcash_keys::encoding::{AddressCodec, encode_extended_spending_key, encode_payment_address};
 use zcash_primitives::block::BlockHash;
@@ -34,7 +43,7 @@ use super::{
     z_export_viewing_key, z_get_balance_for_account,
 };
 use crate::components::{
-    chain::MockChain,
+    chain::{MockChain, TreeStateHook},
     database::Database,
     json_rpc::server::LegacyCode,
     keystore::{
@@ -164,6 +173,172 @@ fn z_getnewaccount_completes_on_a_fresh_wallet_with_a_saturated_pool() {
             .get_account_ids()
             .expect("lists accounts");
         assert_eq!(account_ids.len(), 1);
+    });
+}
+
+/// The hash `MockChainView` gives its tip, and so the parent hash of the block scanned
+/// on top of it.
+const MOCK_TIP_HASH: BlockHash = BlockHash([0u8; 32]);
+
+/// Scans an empty block at `height` into the wallet, on top of the chain state at
+/// `height - 1` that `MockChainView` serves for its tip, as the sync engine's
+/// `scan_blocks` step does.
+async fn scan_empty_block(db: &Database, height: BlockHeight) {
+    let prior = BlockMetadata::from_parts(height - 1, MOCK_TIP_HASH, Some(0), Some(0), Some(0));
+    let block = CompactBlock {
+        height: u64::from(u32::from(height)),
+        hash: vec![1u8; 32],
+        prev_hash: MOCK_TIP_HASH.0.to_vec(),
+        ..Default::default()
+    };
+    let scanned = scan_block::<_, AccountUuid, (), Infallible>(
+        db.params(),
+        block,
+        &ScanningKeys::empty(),
+        &SpendIdentifiers::empty(),
+        Some(&prior),
+        |_| Ok(None),
+    )
+    .expect("scans an empty block");
+    db.handle()
+        .await
+        .expect("acquires a connection")
+        .as_mut()
+        .put_blocks(&ChainState::empty(height - 1, MOCK_TIP_HASH), vec![scanned])
+        .expect("stores the scanned block");
+}
+
+/// The heights `z_getnewaccount` chooses a birthday from are read before the account is
+/// created, and the sync engine can scan the chosen birthday block in between. Creating the
+/// account then would rewind the wallet to before that block (#941), so the call must
+/// notice and choose again from fresh heights.
+#[test]
+fn z_getnewaccount_rechooses_the_birthday_when_the_wallet_scans_past_it() {
+    let datadir = tempfile::tempdir().unwrap();
+
+    run_async(|| async {
+        let (keystore, db) = keystore_and_database_with_config(&datadir, None, |_| {}).await;
+        keystore
+            .encrypt_and_store_mnemonic(phrase([1; 32]), BackupStatus::Confirmed)
+            .await
+            .expect("stores the mnemonic");
+        let tip = recorded_tip(db.params());
+        db.handle()
+            .await
+            .expect("acquires a connection")
+            .as_mut()
+            .update_chain_tip(tip)
+            .expect("records the chain tip");
+
+        // Wallet and chain view both at `tip`, so the first birthday chosen is `tip + 1`.
+        // Between that choice and the account's creation, the sync engine scans `tip + 1`
+        // and the chain moves to it. The retry then sees both at `tip + 1`.
+        let chain = MockChain::reporting(Vec::new(), tip.into());
+        let attempts = Arc::new(AtomicU32::new(0));
+        let hook: TreeStateHook = {
+            let (db, chain, attempts) = (db.clone(), chain.clone(), attempts.clone());
+            Arc::new(move || {
+                let (db, chain, attempts) = (db.clone(), chain.clone(), attempts.clone());
+                Box::pin(async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        scan_empty_block(&db, tip + 1).await;
+                        db.handle()
+                            .await
+                            .expect("acquires a connection")
+                            .as_mut()
+                            .update_chain_tip(tip + 1)
+                            .expect("records the chain tip");
+                        chain.set_tip(u32::from(tip) + 1);
+                    }
+                })
+            })
+        };
+        let chain = chain.before_tree_state(hook);
+        let (decryptor, _engine) = WalletSync::build_decryptor();
+
+        get_new_account::call(&db, &keystore, chain, &decryptor, "default", None)
+            .await
+            .expect("creates the account");
+
+        // One retry: the first birthday was abandoned, the second taken.
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let handle = db.handle().await.expect("acquires a connection");
+        assert_eq!(handle.as_ref().get_account_ids().unwrap().len(), 1);
+        // The account was born after the block the wallet scanned in the meantime, and
+        // that block is still scanned: the wallet was not rewound.
+        assert_eq!(
+            handle.as_ref().get_wallet_birthday().unwrap(),
+            Some(tip + 2)
+        );
+        assert_eq!(
+            handle
+                .as_ref()
+                .block_max_scanned()
+                .unwrap()
+                .map(|block| block.block_height()),
+            Some(tip + 1),
+        );
+    });
+}
+
+/// With the chain view stuck behind the wallet, every birthday `z_getnewaccount` chooses is
+/// a block the wallet has already scanned. Rather than rewind the wallet to the view's tip,
+/// the call gives up after its retries and leaves the wallet untouched.
+#[test]
+fn z_getnewaccount_refuses_to_rewind_when_the_chain_view_stays_behind_the_wallet() {
+    let datadir = tempfile::tempdir().unwrap();
+
+    run_async(|| async {
+        let (keystore, db) = keystore_and_database_with_config(&datadir, None, |_| {}).await;
+        keystore
+            .encrypt_and_store_mnemonic(phrase([1; 32]), BackupStatus::Confirmed)
+            .await
+            .expect("stores the mnemonic");
+        let tip = recorded_tip(db.params());
+        db.handle()
+            .await
+            .expect("acquires a connection")
+            .as_mut()
+            .update_chain_tip(tip)
+            .expect("records the chain tip");
+
+        // The wallet scans `tip + 1` after the first heights are read; the chain view
+        // never moves off `tip`, so every birthday chosen afterwards is `tip + 1`.
+        let chain = MockChain::reporting(Vec::new(), tip.into());
+        let attempts = Arc::new(AtomicU32::new(0));
+        let hook: TreeStateHook = {
+            let (db, attempts) = (db.clone(), attempts.clone());
+            Arc::new(move || {
+                let (db, attempts) = (db.clone(), attempts.clone());
+                Box::pin(async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        scan_empty_block(&db, tip + 1).await;
+                    }
+                })
+            })
+        };
+        let chain = chain.before_tree_state(hook);
+        let (decryptor, _engine) = WalletSync::build_decryptor();
+
+        let err = get_new_account::call(&db, &keystore, chain, &decryptor, "default", None)
+            .await
+            .expect_err("refuses to rewind the wallet");
+
+        assert_equal_warmup_code(&err);
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            get_new_account::MAX_BIRTHDAY_ATTEMPTS
+        );
+        let handle = db.handle().await.expect("acquires a connection");
+        assert!(handle.as_ref().get_account_ids().unwrap().is_empty());
+        assert_eq!(
+            handle
+                .as_ref()
+                .block_max_scanned()
+                .unwrap()
+                .map(|block| block.block_height()),
+            Some(tip + 1),
+        );
     });
 }
 
