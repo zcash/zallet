@@ -108,10 +108,10 @@ impl WalletTxOutput {
 ///
 /// Text memos render as text and empty memos are omitted. Anything else (arbitrary
 /// data, a future memo type, or text that is not valid UTF-8) renders as the hex of
-/// the full 512-byte memo, the same value `z_viewtransaction` and `z_listunspent`
-/// report. This cannot fail: the sender chooses the memo, and one undecodable memo
-/// must not take down the whole history (#794). A stored blob too long to be a memo
-/// renders as the hex of the stored bytes, with a warning so the operator can see it.
+/// the full 512-byte memo, the same value `z_viewtransaction` reports for the output.
+/// This cannot fail: the sender chooses the memo, and one undecodable memo must not
+/// take down the whole history (#794). A stored blob too long to be a memo renders as
+/// the hex of the stored bytes, with a warning so the operator can see it.
 fn render_memo(memo: Option<&[u8]>) -> Option<String> {
     let bytes = memo?;
     let memo_bytes = match MemoBytes::from_bytes(bytes) {
