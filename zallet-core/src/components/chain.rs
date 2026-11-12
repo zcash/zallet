@@ -877,14 +877,19 @@ pub enum SpendStatus {
 }
 
 #[cfg(test)]
-pub(crate) use tests::MockChain;
+pub(crate) use tests::{MockChain, TreeStateHook};
 
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
 
     use futures::{
         StreamExt as _,
+        future::BoxFuture,
         stream::{self, BoxStream},
     };
     use proptest::prelude::*;
@@ -921,7 +926,12 @@ mod tests {
     #[derive(Clone)]
     pub(crate) struct MockChainView {
         tip: ChainBlock,
+        /// See [`MockChain::before_tree_state`].
+        before_tree_state: Option<TreeStateHook>,
     }
+
+    /// A test hook [`MockChainView::tree_state_as_of`] awaits before answering.
+    pub(crate) type TreeStateHook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 
     impl ChainView for MockChainView {
         async fn tip(&self) -> Result<ChainBlock, ChainError> {
@@ -942,9 +952,14 @@ mod tests {
 
         async fn tree_state_as_of(
             &self,
-            _height: BlockHeight,
+            height: BlockHeight,
         ) -> Result<Option<ChainState>, ChainError> {
-            Ok(None)
+            if let Some(hook) = &self.before_tree_state {
+                hook().await;
+            }
+            // The mock only knows its tip, so that is the only chain state it serves.
+            Ok((height == self.tip.height())
+                .then(|| ChainState::empty(self.tip.height(), self.tip.hash())))
         }
 
         async fn get_block_header(
@@ -1026,7 +1041,10 @@ mod tests {
             height: BlockHeight::from_u32(42),
             hash: BlockHash([7u8; 32]),
         };
-        let view = MockChainView { tip };
+        let view = MockChainView {
+            tip,
+            before_tree_state: None,
+        };
         assert_eq!(view.tip().await.unwrap(), tip);
         // The fork point resolves when the locator includes the view's own tip, and
         // not for a locator that excludes it.
@@ -1429,7 +1447,10 @@ mod tests {
     pub(crate) struct MockChain {
         params: super::Network,
         upgrades: Vec<ReportedUpgrade>,
-        tip: BlockHeight,
+        /// Shared with every clone, so a test can advance the tip a caller's later
+        /// snapshots see while an earlier snapshot keeps the tip it was taken at.
+        tip: Arc<AtomicU32>,
+        before_tree_state: Option<TreeStateHook>,
     }
 
     impl MockChain {
@@ -1437,8 +1458,24 @@ mod tests {
             Self {
                 params: super::Network::Consensus(Network::MainNetwork),
                 upgrades,
-                tip: BlockHeight::from_u32(tip),
+                tip: Arc::new(AtomicU32::new(tip)),
+                before_tree_state: None,
             }
+        }
+
+        /// Runs `hook` inside every snapshot's `tree_state_as_of`, before it answers.
+        ///
+        /// That is the point in `z_getnewaccount` between reading the heights the birthday
+        /// is chosen from and creating the account, so a hook that scans a block into the
+        /// wallet there reproduces the sync engine racing the call.
+        pub(crate) fn before_tree_state(mut self, hook: TreeStateHook) -> Self {
+            self.before_tree_state = Some(hook);
+            self
+        }
+
+        /// Moves the tip that later snapshots see; existing snapshots are unaffected.
+        pub(crate) fn set_tip(&self, tip: u32) {
+            self.tip.store(tip, Ordering::SeqCst);
         }
     }
 
@@ -1486,9 +1523,10 @@ mod tests {
         async fn snapshot(&self) -> Result<Self::View, ChainError> {
             Ok(MockChainView {
                 tip: ChainBlock {
-                    height: self.tip,
+                    height: BlockHeight::from_u32(self.tip.load(Ordering::SeqCst)),
                     hash: BlockHash([0u8; 32]),
                 },
+                before_tree_state: self.before_tree_state.clone(),
             })
         }
     }

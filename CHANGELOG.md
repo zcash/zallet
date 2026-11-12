@@ -44,6 +44,15 @@ be considered breaking changes.
 
 ### Fixed
 
+- `z_getnewaccount` on a synced wallet no longer makes `getwalletstatus` lose
+  its `wallet_tip` and `fully_synced_height`, hide every shielded balance, and
+  fail spends with an insufficient-balance error until the next block arrives
+  (#941). The new account's birthday is now the block after the wallet's tip
+  rather than the tip itself, so creating it no longer rewinds the wallet's
+  already-scanned tip block. If wallet sync scans that block before the account
+  is created, the birthday is chosen again; if the node's chain view stays
+  behind the wallet, the call fails with the in-warmup error instead of
+  rewinding the wallet to the view's tip.
 - Wallet JSON-RPC methods no longer risk waiting forever for a database
   connection while wallet sync is running (#708). Methods that use both the
   database and stored key material (`z_getnewaccount`, `z_recoveraccounts`,
