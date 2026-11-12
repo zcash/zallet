@@ -70,28 +70,30 @@ below:
 | Hostname, domain, or IP address   | Only IP address                    |
 | `zcash-cli <method> [<param> ..]` | `zallet rpc <method> [<param> ..]` |
 
-For parameter parsing, `zallet rpc` is (as of the beta releases) both more and less
-flexible than `zcash-cli`:
+## Parameter parsing
 
-- It is more flexible because `zcash-cli` implements type-checking on method parameters,
-  which means that it cannot be used with Zallet JSON-RPC methods where the parameters
-  have [changed](../zcashd/json_rpc.md). `zallet rpc` currently lacks this, which means
-  that:
-    - `zallet rpc` will work against both `zcashd` and `zallet` processes, which can be
-      useful during the migration phase.
-    - As the alpha and beta phases of Zallet progress, we can easily make changes to RPC
-      methods as necessary.
+`zallet rpc` uses parameter metadata generated from the RPC traits in the local Zallet
+binary. For a method in that table, it validates the positional argument count locally
+before reading any indirect parameters. Known string positions accept either a bare value
+such as `string` or the backwards-compatible JSON-quoted shell argument `'"string"'`.
+A nullable string treats bare `null` as JSON null and `'"null"'` as the string `null`.
 
-- It is less flexible because parameters need to be valid JSON:
-  - Strings need to be quoted in order to parse as JSON strings.
-  - Parameters that contain strings need to be externally quoted.
+Known non-string positions still require valid JSON. Arrays and objects therefore need
+shell protection so their JSON syntax reaches Zallet unchanged. An `@PATH` parameter is
+read only after count validation and always produces a JSON string, regardless of the
+position's normal conversion.
+
+Methods absent from the local generated table retain JSON-only parameter parsing and have
+no local argument-count limit. This allows calls to remote-only methods, but it is not full
+compatibility with a divergent `zcashd` server: a same-named method always follows the
+local Zallet binary's parameter table.
 
 | `zcash-cli` parameter | `zallet rpc` parameter |
 |-----------------------|------------------------|
 | `null`                | `null`                 |
 | `true`                | `true`                 |
 | `42`                  | `42`                   |
-| `string`              | `'"string"'`           |
+| `string`              | `string` or `'"string"'` |
 | `[42]`                | `[42]`                 |
 | `["string"]`          | `'["string"]'`         |
 | `{"key": <value>}`    | `'{"key": <value>}'`   |
