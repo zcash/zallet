@@ -2605,4 +2605,256 @@ mod tests {
             Some(BlockHeight::from_u32(0))
         );
     }
+
+    /// Tests that the standalone Sapling spending keys of a migrated wallet end up
+    /// tracked by accounts.
+    mod sapling_key_accounts {
+        use sapling::zip32::ExtendedSpendingKey;
+        use tempfile::tempdir;
+        use zcash_client_backend::data_api::{Account as _, WalletRead as _};
+        use zcash_client_sqlite::{
+            AccountUuid,
+            zewif::{DiscardSecrets, SecretSink as _},
+        };
+        use zcash_keys::{
+            address::Address,
+            constants::{hrp_sapling_extended_full_viewing_key, hrp_sapling_extended_spending_key},
+            encoding::{encode_extended_full_viewing_key, encode_extended_spending_key},
+        };
+        use zcash_protocol::{
+            consensus::{BlockHeight, NetworkType},
+            constants::testnet::COIN_TYPE,
+        };
+        use zip32::{ChildIndex, fingerprint::SeedFingerprint};
+
+        use crate::components::{
+            database::{Database, DbHandle},
+            keystore::{
+                KeyStore,
+                testing::{keystore_and_database_with_config, phrase, run_async},
+                zewif::KeyStoreSecretSink,
+            },
+        };
+
+        use super::super::{
+            MigrateError, ZCASHD_LEGACY_ACCOUNT_INDEX, ZCASHD_LEGACY_SOURCE, enriched_document,
+            finish_import,
+        };
+
+        /// The network of the wallet database that the keystore test helper builds.
+        const NETWORK: NetworkType = NetworkType::Test;
+        /// The ZIP 32 purpose of shielded key derivation.
+        const ZIP32_PURPOSE: u32 = 32;
+        /// Entropy of the migrated wallet's mnemonic seed phrase.
+        const MNEMONIC_ENTROPY: [u8; 32] = [0x11; 32];
+        /// Seed of a Sapling key unrelated to the wallet's mnemonic, standing for a key
+        /// that was brought into `zcashd` with `z_importkey`.
+        const IMPORTED_KEY_SEED: [u8; 32] = [0x22; 32];
+        /// The address index of the first key `zcashd` derives for `z_getnewaddress`.
+        const FIRST_ADDRESS_INDEX: u32 = 0;
+        /// The name `zewif-zcashd` gives the synthesized legacy account.
+        const LEGACY_ACCOUNT_NAME: &str = "Legacy";
+        /// The export height recorded in the document.
+        const EXPORT_HEIGHT: u32 = 2_700_000;
+        /// The block hash recorded in the document for its export height.
+        const EXPORT_BLOCK_HASH: [u8; 32] = [0x09; 32];
+        /// The wallet birthday that a migration without a chain backend estimates.
+        const BIRTHDAY_ESTIMATE: u32 = 2_600_000;
+
+        /// The Sapling key that `zcashd` v4.7.0 and later derives for `z_getnewaddress`:
+        /// `m/32'/coin_type'/0x7FFFFFFF'/index'` from the mnemonic seed.
+        fn legacy_child_key(index: u32) -> ExtendedSpendingKey {
+            let master = ExtendedSpendingKey::master(&phrase(MNEMONIC_ENTROPY).to_seed(""))
+                .expect("valid master key");
+            ExtendedSpendingKey::from_path(
+                &master,
+                &[
+                    ChildIndex::hardened(ZIP32_PURPOSE),
+                    ChildIndex::hardened(COIN_TYPE),
+                    ChildIndex::hardened(ZCASHD_LEGACY_ACCOUNT_INDEX),
+                    ChildIndex::hardened(index),
+                ],
+            )
+            .expect("valid child key")
+        }
+
+        /// A Sapling key with no relation to the wallet's seed.
+        fn imported_key() -> ExtendedSpendingKey {
+            ExtendedSpendingKey::master(&IMPORTED_KEY_SEED).expect("valid master key")
+        }
+
+        /// The secret-store entry `zewif-zcashd` writes for a Sapling spending key.
+        fn secret_entry(key: &ExtendedSpendingKey) -> zewif::SaplingKeyEntry {
+            #[allow(deprecated)]
+            let extfvk = key.to_extended_full_viewing_key();
+            zewif::SaplingKeyEntry::new(
+                zewif::sapling::SaplingExtendedFullViewingKey::new(
+                    encode_extended_full_viewing_key(
+                        hrp_sapling_extended_full_viewing_key(NETWORK),
+                        &extfvk,
+                    ),
+                ),
+                zewif::sapling::SaplingExtendedSpendingKey::new(encode_extended_spending_key(
+                    hrp_sapling_extended_spending_key(NETWORK),
+                    key,
+                )),
+            )
+        }
+
+        /// A document as `zewif-zcashd` builds it for a wallet that holds `keys` as
+        /// Sapling spending keys outside any unified account, with the enrichments of a
+        /// migration that runs without a chain backend. Each key is in the secret store,
+        /// and its default address is listed on the legacy account, whose viewing key
+        /// covers transparent addresses only.
+        fn document(db: &Database, keys: &[ExtendedSpendingKey]) -> zewif::Zewif {
+            let mnemonic = phrase(MNEMONIC_ENTROPY);
+            let seed_fp = SeedFingerprint::from_seed(&mnemonic.to_seed(""))
+                .expect("BIP 39 seeds have a valid length");
+            let seed_fp = zewif_zcashd::zcashd_wallet::encode_seed_fingerprint(&seed_fp.to_bytes());
+
+            let mut store = zewif::SecretStore::new();
+            store.add_seed(zewif::SeedEntry::new(
+                seed_fp.clone(),
+                zewif::SeedMaterial::Bip39Mnemonic(zewif::Bip39Mnemonic::new(
+                    mnemonic.phrase(),
+                    Some(zewif::MnemonicLanguage::English),
+                )),
+            ));
+
+            let mut legacy = zewif::Account::new(zewif::AccountViewingKey::TransparentAddressSet);
+            legacy.set_name(LEGACY_ACCOUNT_NAME);
+            legacy.set_key_source(zewif::KeySource::Derived(zewif::DerivedKeySource::new(
+                seed_fp.clone(),
+                ZCASHD_LEGACY_ACCOUNT_INDEX,
+                None,
+            )));
+            legacy.set_provenance(ZCASHD_LEGACY_SOURCE);
+            legacy.set_purpose(zewif::AccountPurpose::Spending);
+            for key in keys {
+                let (_, address) = key.default_address();
+                let mut address = zewif::Address::new(zewif::ProtocolAddress::Sapling(Box::new(
+                    zewif::sapling::Address::new(
+                        Address::Sapling(Box::new(address)).encode(db.params()),
+                    ),
+                )));
+                address.set_scope(zewif::KeyScope::External);
+                legacy.add_address(address);
+                store.add_sapling_key(secret_entry(key));
+            }
+
+            let mut wallet = zewif::ZewifWallet::new(zewif::Network::Testnet);
+            wallet.add_account(legacy);
+            let mut document = zewif::Zewif::new(
+                zewif::BlockHeight::from_u32(EXPORT_HEIGHT),
+                zewif::BlockHash::from_bytes(EXPORT_BLOCK_HASH),
+            );
+            document.add_wallet(wallet);
+
+            enriched_document(
+                &document,
+                Some(store),
+                Some(&seed_fp),
+                None,
+                None,
+                Some(BlockHeight::from_u32(BIRTHDAY_ESTIMATE)),
+            )
+        }
+
+        /// Runs `document` through the steps of the migration that follow its
+        /// construction: the secrets go into the keystore, the document is imported, and
+        /// the post-import steps run.
+        async fn migrate(
+            db: &Database,
+            keystore: &KeyStore,
+            document: &zewif::Zewif,
+        ) -> Result<(), MigrateError> {
+            let mut sink = KeyStoreSecretSink::new(keystore, NETWORK).await?;
+            if let Some(zewif::Secrets::Plain(store)) = document.secrets() {
+                for entry in store.seeds() {
+                    sink.store_seed(entry).map_err(MigrateError::SecretSink)?;
+                }
+                for entry in store.sapling_keys() {
+                    sink.store_sapling_key(entry)
+                        .map_err(MigrateError::SecretSink)?;
+                }
+            }
+
+            let mut db_data = db.handle().await?;
+            let report = db_data
+                .with_mut(|mut wdb| {
+                    zcash_client_sqlite::zewif::import_wallet(
+                        &mut wdb,
+                        document,
+                        &mut DiscardSecrets,
+                    )
+                })
+                .map_err(MigrateError::Import)?;
+            finish_import(
+                &mut db_data,
+                document,
+                &report,
+                BlockHeight::from_u32(BIRTHDAY_ESTIMATE),
+                false,
+            )
+        }
+
+        /// The accounts whose viewing key sees the default address of `key`.
+        fn accounts_tracking(db_data: &DbHandle, key: &ExtendedSpendingKey) -> Vec<AccountUuid> {
+            let (_, address) = key.default_address();
+            db_data
+                .get_account_ids()
+                .expect("account ids are readable")
+                .into_iter()
+                .filter(|id| {
+                    db_data
+                        .get_account(*id)
+                        .expect("account is readable")
+                        .expect("account exists for just-retrieved id")
+                        .ufvk()
+                        .and_then(|ufvk| ufvk.sapling())
+                        .is_some_and(|dfvk| dfvk.decrypt_diversifier(&address).is_some())
+                })
+                .collect()
+        }
+
+        /// A Sapling spending key that the migration stores in the keystore must be
+        /// tracked by an account: otherwise no viewing key in the wallet sees its
+        /// addresses, and funds sent to them are never detected. This holds both for a
+        /// key `zcashd` derived for `z_getnewaddress` and for one it was handed with
+        /// `z_importkey`.
+        #[test]
+        fn stored_sapling_keys_are_tracked_by_accounts() {
+            let datadir = tempdir().unwrap();
+
+            run_async(|| async {
+                let (keystore, db) =
+                    keystore_and_database_with_config(&datadir, None, |_| {}).await;
+                let keys = [legacy_child_key(FIRST_ADDRESS_INDEX), imported_key()];
+
+                migrate(&db, &keystore, &document(&db, &keys))
+                    .await
+                    .expect("the migration succeeds");
+
+                for key in &keys {
+                    let (_, address) = key.default_address();
+                    assert!(
+                        keystore
+                            .decrypt_standalone_sapling_key(&address)
+                            .await
+                            .expect("the keystore is readable")
+                            .is_some(),
+                        "the migration stored the spending key",
+                    );
+                }
+                let db_data = db.handle().await.unwrap();
+                for key in &keys {
+                    assert_eq!(
+                        accounts_tracking(&db_data, key).len(),
+                        1,
+                        "a stored Sapling spending key is tracked by exactly one account",
+                    );
+                }
+            });
+        }
+    }
 }
