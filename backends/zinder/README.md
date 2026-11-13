@@ -5,22 +5,35 @@ This directory contains Zallet's `zallet-zinder` native backend process. When
 sibling executable. It reads `[zinder].wallet_query_endpoint` from Zallet
 configuration, fails before network access when the field is absent, and
 connects only through the typed native wallet-query client from the released
-Zinder 0.6.0 client package.
+Zinder 0.10.0 client package.
+
+The endpoint must run Zinder 0.10.0, which serves native contract revision 8.
+Construction's `ServerInfo` request fails against an endpoint below revision 8,
+and builds of this backend on earlier Zinder clients fail against a revision 8
+endpoint, so upgrade this backend and its Zinder deployment together.
 
 ## Dependency graph
 
-The backend uses Rust 1.95 because the released Zinder 0.6.0 crates declare that MSRV.
+The backend uses Rust 1.95 because the released Zinder 0.10.0 crates declare that MSRV.
 This does not require a root Zallet toolchain change: backend crates are
 independent workspaces, and the current Zallet core still compiles under the
 newer toolchain.
 
 The backend workspace pins the wallet-critical librustzcash packages to the
 same source revision used by the current Zallet, Zebra, and Zaino lockfiles:
-`375fc8e51acb2903777f3512bf92b28dc0ac42ef`. This keeps persisted wallet types
+`1f6bb2072e7fcb142b0d90ff7b267a8699a84818`. This keeps persisted wallet types
 and migrations source-coherent across the independent workspaces. The Zinder
-boundary itself is exact: `zinder-client = 0.6.0` and the test-only
-`zinder-core = 0.6.0`; those are the released Zinder 0.6.0 packages, not a
+boundary itself is exact: `zinder-client = 0.10.0` and the test-only
+`zinder-core = 0.10.0`; those are the released Zinder 0.10.0 packages, not a
 compatibility alias for an earlier release.
+
+`zinder-core` 0.10.0 links its own crates.io `zcash_address` 0.14 and
+`zcash_protocol` 0.11, with their `f4jumble` and `zcash_encoding`
+dependencies, for internal use. None of their types cross the backend
+boundary: the backend exchanges hashes, heights, and raw block and transaction
+bytes with Zinder and decodes them with the pinned librustzcash cohort. Every
+other wallet-critical crate in the backend lockfile resolves to the same
+version and source as the root `Cargo.lock`.
 
 ## Wallet-runtime capability contract
 
@@ -190,7 +203,7 @@ cargo +1.95.0 fmt --manifest-path backends/zinder/Cargo.toml -- --check
 cargo +1.95.0 test --manifest-path backends/zinder/Cargo.toml --all-targets
 cargo +1.95.0 check --manifest-path backends/zinder/Cargo.toml --all-targets
 cargo +1.95.0 clippy --manifest-path backends/zinder/Cargo.toml --all-targets -- -D warnings
-cargo +1.95.0 tree --manifest-path backends/zinder/Cargo.toml -i zcash_protocol@0.10.4
+cargo +1.95.0 tree --manifest-path backends/zinder/Cargo.toml -i zcash_protocol@0.10.5
 ```
 
 Passing these checks is necessary but does not replace the retained

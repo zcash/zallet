@@ -761,7 +761,6 @@ async fn transparent_address_tx_ids<S: TransparentAddressSnapshot>(
             end_height: range.end,
             max_entries: Some(max_entries),
             from_cursor: requested_cursor.clone(),
-            descending: false,
             at_epoch_id: Some(expected_epoch.id),
         };
         let mut stream = snapshot
@@ -2607,7 +2606,6 @@ mod tests {
                 query.max_entries,
                 NonZeroU32::new(TRANSPARENT_ADDRESS_HISTORY_PAGE_SIZE)
             );
-            assert!(!query.descending);
             assert_eq!(query.at_epoch_id, Some(CAPTURED_CHAIN_EPOCH_ID));
         }
         assert!(queries[0].from_cursor.is_none());
