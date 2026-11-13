@@ -59,6 +59,15 @@ be considered breaking changes.
   CPU quotas, so a container limited to one or two CPUs was the most common
   way to hit this. The connection pool is now also always sized with headroom
   above the connections sync retains.
+- `migrate-zcashd-wallet` now registers an account for each Sapling spending key
+  that `zcashd` held outside a unified account (keys from `z_getnewaddress` and
+  `z_importkey`), so funds sent to those addresses are detected and counted in
+  balances (#838). Previously these keys were stored in the keystore but no
+  account tracked their addresses. Each key becomes an imported account named
+  `zcashd Sapling key <address>`, with the same birthday as the wallet's other
+  accounts. Zallet cannot spend from these accounts yet (#582); `z_exportkey`
+  returns their keys. A wallet that was migrated before this fix is not changed
+  by it.
 
 ## [0.1.0-beta.4] - 2026-11-01
 

@@ -142,7 +142,12 @@ you need.
 
 - Mnemonic seeds and the keys derived from them. Accounts are re-created following the
   structure of the `zcashd` wallet.
-- Standalone (imported) Sapling spending keys and transparent keys.
+- Standalone (imported) Sapling spending keys and transparent keys. Each Sapling
+  spending key that was not part of a `zcashd` unified account (a key from
+  `z_getnewaddress` or `z_importkey`) becomes an account of its own, named
+  `zcashd Sapling key <address>`, so its funds are detected and counted in balances.
+  Zallet cannot spend from these accounts yet ([#582]). Until it can, keep `zcashd`
+  and your `wallet.dat` to move those funds; `z_exportkey` also returns each key.
 - Transparent watch-only entries that include their public key or redeem script.
 - Account birthdays, so that chain scanning starts from the right height.
 
@@ -168,6 +173,7 @@ which is dropped silently:
   no warning at all, so a `wallet.dat` written by an unusual `zcashd` build may lose
   data without any sign of it in the log.
 
+[#582]: https://github.com/zcash/zallet/issues/582
 [#774]: https://github.com/zcash/zallet/issues/774
 
 Not every skip is merely reported. A transparent *spending* key that cannot be imported
