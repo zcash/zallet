@@ -59,6 +59,8 @@ be considered breaking changes.
   CPU quotas, so a container limited to one or two CPUs was the most common
   way to hit this. The connection pool is now also always sized with headroom
   above the connections sync retains.
+- Address-based transparent-history recovery now fails before advancing its
+  scan watermark when the selected chain view omits a referenced transaction.
 
 ## [0.1.0-beta.4] - 2026-11-01
 
