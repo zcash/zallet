@@ -41,7 +41,7 @@ use crate::components::{
         BackupStatus, KeyStore,
         testing::{keystore_and_database_with_config, phrase, run_async},
     },
-    sync::WalletSync,
+    sync::{WalletSync, WalletSyncReconfiguration},
 };
 
 /// A connection pool of exactly one connection: the smallest pool on which a correctly
@@ -81,6 +81,14 @@ fn genesis_birthday() -> AccountBirthday {
         ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
         None,
     )
+}
+
+/// Reconfiguration admission for a wallet whose sync engine is not running, so the
+/// post-mutation key reload reports shutdown instead of waiting for an acknowledgement.
+fn stopped_sync_reconfiguration() -> WalletSyncReconfiguration {
+    let (decryptor, engine) = WalletSync::build_decryptor();
+    drop(engine);
+    WalletSyncReconfiguration::new(decryptor)
 }
 
 /// Builds a wallet on a single-connection pool, holding one account derived from a
@@ -148,10 +156,15 @@ fn z_getnewaccount_completes_on_a_fresh_wallet_with_a_saturated_pool() {
         // tip, and a genesis birthday needs no treestate (which `MockChainView` does
         // not serve).
         let chain = MockChain::reporting(Vec::new(), 0);
-        let (decryptor, _engine) = WalletSync::build_decryptor();
+        let reconfiguration = stopped_sync_reconfiguration();
 
         completes(get_new_account::call(
-            &db, &keystore, chain, &decryptor, "default", None,
+            &db,
+            &keystore,
+            chain,
+            &reconfiguration,
+            "default",
+            None,
         ))
         .await
         .expect("creates the account");
@@ -331,10 +344,14 @@ fn z_recoveraccounts_completes_on_a_saturated_pool() {
             serde_json::from_str(&params_json).expect("well-formed account parameters");
 
         let chain = MockChain::reporting(Vec::new(), 0);
-        let (decryptor, _engine) = WalletSync::build_decryptor();
+        let reconfiguration = stopped_sync_reconfiguration();
 
         completes(recover_accounts::call(
-            &db, &keystore, chain, &decryptor, accounts,
+            &db,
+            &keystore,
+            chain,
+            &reconfiguration,
+            accounts,
         ))
         .await
         .expect("recovers the account");
@@ -382,13 +399,13 @@ fn z_importkey_completes_on_a_saturated_pool() {
         );
 
         let chain = MockChain::reporting(Vec::new(), 0);
-        let (decryptor, _engine) = WalletSync::build_decryptor();
+        let reconfiguration = stopped_sync_reconfiguration();
 
         completes(import_key::call(
             &db,
             &keystore,
             chain,
-            &decryptor,
+            &reconfiguration,
             &encoded,
             Some("yes"),
             None,

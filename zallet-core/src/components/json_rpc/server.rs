@@ -19,7 +19,7 @@ use super::methods::{RpcImpl, RpcServer as _};
 #[cfg(zallet_build = "wallet")]
 use {
     super::methods::{WalletRpcImpl, WalletRpcServer},
-    crate::components::{keystore::KeyStore, sync::WalletDecryptorHandle},
+    crate::components::{keystore::KeyStore, sync::WalletSyncReconfiguration},
 };
 
 mod error;
@@ -39,7 +39,7 @@ pub(crate) async fn spawn<C: Chain>(
     wallet: Database,
     #[cfg(zallet_build = "wallet")] keystore: KeyStore,
     chain: C,
-    #[cfg(zallet_build = "wallet")] decryptor: WalletDecryptorHandle,
+    #[cfg(zallet_build = "wallet")] reconfiguration: WalletSyncReconfiguration,
     sync_status: SyncStatusReader,
 ) -> Result<ServerTask, Error> {
     // Caller should make sure `bind` only contains a single address (for now).
@@ -57,7 +57,7 @@ pub(crate) async fn spawn<C: Chain>(
         wallet.clone(),
         keystore.clone(),
         chain.clone(),
-        decryptor,
+        reconfiguration,
         sync_status.clone(),
         config.async_operation_limit(),
     );

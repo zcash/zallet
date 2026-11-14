@@ -15,7 +15,7 @@ use crate::components::{
         },
     },
     keystore::{KeyStore, SeedSelectionError},
-    sync::WalletDecryptorHandle,
+    sync::WalletSyncReconfiguration,
 };
 
 /// Response to a `z_getnewaccount` RPC request.
@@ -41,7 +41,7 @@ pub(crate) async fn call<C: Chain>(
     wallet: &Database,
     keystore: &KeyStore,
     chain: C,
-    decryptor: &WalletDecryptorHandle,
+    reconfiguration: &WalletSyncReconfiguration,
     account_name: &str,
     seedfp: Option<&str>,
 ) -> Response {
@@ -97,7 +97,9 @@ pub(crate) async fn call<C: Chain>(
         .await
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
-    // All key material is in hand; reacquire a connection for the mutation.
+    // All key material is in hand. Exclude block scans before reacquiring a connection for
+    // the mutation, so sync cannot commit a block that misses the new account's keys.
+    let admitted = reconfiguration.admit_reconfiguration().await;
     let (account_id, _usk) = wallet_handle(wallet)
         .await?
         .as_mut()
@@ -105,7 +107,7 @@ pub(crate) async fn call<C: Chain>(
         .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
 
     // Reload viewing keys so the new account is scanned without a restart (see z_importkey).
-    if decryptor.reload_keys().await.is_none() {
+    if !admitted.reload_keys_and_wake_wallet_recovery().await {
         tracing::warn!("sync engine has shut down; new account won't be scanned until restart");
     }
 
