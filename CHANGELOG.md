@@ -44,6 +44,14 @@ be considered breaking changes.
 
 ### Fixed
 
+- `z_listtransactions` no longer fails with `Data DB is corrupted: Invalid memo
+  data` for an account whose history contains an output with a memo that is
+  not valid UTF-8 text (#794). Any sender can attach such a memo, and it made
+  the whole history of both the receiving and the sending account unreadable,
+  including after a restart. Such an output is now listed with its `memo` as
+  the hex of the full 512-byte memo, as `z_viewtransaction` reports it.
+  Arbitrary (`0xff`-type) memos are now rendered the same way; they were
+  previously rendered as 511 bytes of hex without the leading type byte.
 - `z_sendmany`, `z_sendfromaccount` and `pczt_create` now reject a payment of
   less than 54 zatoshis to a transparent address (P2PKH, P2SH or TEX) as an
   invalid parameter, instead of building, signing and recording a transaction
