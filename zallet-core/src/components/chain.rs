@@ -1464,10 +1464,6 @@ mod tests {
         }
 
         /// Runs `hook` inside every snapshot's `tree_state_as_of`, before it answers.
-        ///
-        /// That is the point in `z_getnewaccount` between reading the heights the birthday
-        /// is chosen from and creating the account, so a hook that scans a block into the
-        /// wallet there reproduces the sync engine racing the call.
         pub(crate) fn before_tree_state(mut self, hook: TreeStateHook) -> Self {
             self.before_tree_state = Some(hook);
             self
