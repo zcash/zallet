@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::Path;
@@ -19,17 +20,22 @@ use zcash_client_backend::{
         TransparentKeyOrigin, WalletCommitmentTrees, WalletRead, WalletWrite, Zip32Derivation,
         chain::ChainState,
         error::{FindAccountForAddressError, LockError, RewindError},
+        ll::{LowLevelWalletRead, LowLevelWalletWrite, wallet::generate_transparent_gap_addresses},
         scanning::ScanPriority,
         wallet::{ConfirmationsPolicy, TargetHeight, input_selection::LockFilter},
     },
     fees::StandardFeeRule,
-    keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
+    keys::{
+        AddressGenerationError, ReceiverRequirement, UnifiedAddressRequest, UnifiedFullViewingKey,
+        UnifiedSpendingKey,
+    },
     wallet::{
         LockOwner, Note, OutputRef, ReceivedNote, TransparentAddressMetadata,
         WalletTransparentOutput,
     },
 };
 use zcash_client_sqlite::{WalletDb, error::SqliteClientError, util::SystemClock};
+use zcash_keys::keys::transparent::gap_limits::{AddressStore, GapLimits};
 use zcash_primitives::{block::BlockHash, transaction::Transaction};
 use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
 use zip32::DiversifierIndex;
@@ -168,6 +174,64 @@ impl deadpool::managed::Manager for WalletManager {
 /// The operating system's CSPRNG, matching what `zcash_client_sqlite` uses for its own
 /// wallet databases. A failure to read OS randomness is unrecoverable, so it panics.
 pub(crate) type WalletRng = UnwrapErr<SysRng>;
+
+/// The gap limits of every [`WalletDb`] that Zallet opens: the defaults, because Zallet
+/// never calls [`WalletDb::with_gap_limits`].
+fn wallet_gap_limits() -> GapLimits {
+    GapLimits::default()
+}
+
+/// Derives gap windows of `key_scope` for `account_id` until the gap start is stable.
+///
+/// `zcash_client_sqlite` 0.23 derives one window per pass. When a pass derives an address
+/// held as a `Foreign` import that has outputs, the gap start moves past the window, where
+/// no rows are derived. Reservation then fails with `ReachedGapLimit` until an output
+/// arrives at a derived address of the same scope.
+///
+/// Does not help when `Foreign` imports that are exposed but have no outputs fill the
+/// window: those rows stay unreservable.
+///
+/// Terminates: every pass but the last consumes at least one `Foreign` row. Must run in
+/// the same transaction as the reservation.
+fn refill_transparent_gap<DbT>(
+    wdb: &mut DbT,
+    gap_limits: GapLimits,
+    account_id: <DbT as LowLevelWalletRead>::AccountId,
+    key_scope: TransparentKeyScope,
+) -> Result<(), SqliteClientError>
+where
+    DbT: LowLevelWalletWrite<Error = SqliteClientError>
+        + AddressStore<
+            Error = SqliteClientError,
+            AccountRef = <DbT as LowLevelWalletRead>::AccountRef,
+        >,
+    <DbT as LowLevelWalletRead>::AccountId: Copy,
+    <DbT as LowLevelWalletRead>::AccountRef: Copy,
+    <DbT as LowLevelWalletRead>::TxRef: Eq + Hash,
+{
+    let gap_limit = gap_limits
+        .limit_for(key_scope)
+        .ok_or(SqliteClientError::AddressGeneration(
+            AddressGenerationError::UnsupportedTransparentKeyScope(key_scope),
+        ))?;
+    // The request `zcash_client_sqlite` uses for its own gap maintenance.
+    let request = UnifiedAddressRequest::unsafe_custom(
+        ReceiverRequirement::Allow,
+        ReceiverRequirement::Allow,
+        ReceiverRequirement::Require,
+    );
+
+    let account_ref = wdb.get_account_ref(account_id)?;
+    let mut gap_start = wdb.find_gap_start(account_ref, key_scope, gap_limit)?;
+    loop {
+        generate_transparent_gap_addresses(wdb, gap_limits, account_id, key_scope, request)?;
+        let next_gap_start = wdb.find_gap_start(account_ref, key_scope, gap_limit)?;
+        if next_gap_start == gap_start {
+            return Ok(());
+        }
+        gap_start = next_gap_start;
+    }
+}
 
 pub(crate) struct DbConnection {
     inner: deadpool_sync::SyncWrapper<rusqlite::Connection>,
@@ -903,7 +967,18 @@ impl WalletWrite for DbConnection {
         n: usize,
     ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, <Self as WalletRead>::Error>
     {
-        self.with_mut(|mut db_data| db_data.reserve_next_n_ephemeral_addresses(account_id, n))
+        // See `refill_transparent_gap`.
+        self.with_mut(|mut db_data| {
+            db_data.transactionally(|wdb| {
+                refill_transparent_gap(
+                    wdb,
+                    wallet_gap_limits(),
+                    account_id,
+                    TransparentKeyScope::EPHEMERAL,
+                )?;
+                wdb.reserve_next_n_ephemeral_addresses(account_id, n)
+            })
+        })
     }
 
     fn reserve_next_n_internal_addresses(
@@ -912,7 +987,18 @@ impl WalletWrite for DbConnection {
         n: usize,
     ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, <Self as WalletRead>::Error>
     {
-        self.with_mut(|mut db_data| db_data.reserve_next_n_internal_addresses(account_id, n))
+        // See `refill_transparent_gap`.
+        self.with_mut(|mut db_data| {
+            db_data.transactionally(|wdb| {
+                refill_transparent_gap(
+                    wdb,
+                    wallet_gap_limits(),
+                    account_id,
+                    TransparentKeyScope::INTERNAL,
+                )?;
+                wdb.reserve_next_n_internal_addresses(account_id, n)
+            })
+        })
     }
 
     fn set_transaction_status(
@@ -1113,6 +1199,345 @@ mod tests {
         // default pools.
         for candidate in (floor + 1)..(floor + 64) {
             assert_eq!(with_foreground_headroom(candidate), candidate);
+        }
+    }
+}
+
+/// Unit tests for [`refill_transparent_gap`] on a wallet shaped like a `zcashd`
+/// migration.
+#[cfg(all(test, feature = "transparent-key-import"))]
+mod gap_refill_tests {
+    use std::num::NonZeroUsize;
+    use std::panic::AssertUnwindSafe;
+
+    use futures::FutureExt;
+    use proptest::prelude::*;
+    use rand::{rand_core::UnwrapErr, rngs::SysRng};
+    use secrecy::SecretVec;
+    use tempfile::TempDir;
+    use transparent::{
+        address::TransparentAddress,
+        bundle::{OutPoint, TxOut},
+        keys::{AccountPubKey, NonHardenedChildIndex, TransparentKeyScope},
+    };
+    use zcash_client_backend::{
+        data_api::{
+            AccountBirthday, WalletRead, WalletWrite, chain::ChainState, ll::LowLevelWalletRead,
+        },
+        wallet::{TransparentAddressMetadata, WalletTransparentOutput},
+    };
+    use zcash_client_sqlite::{
+        AccountUuid, WalletDb, error::SqliteClientError, util::SystemClock,
+        wallet::init::WalletMigrator,
+    };
+    use zcash_keys::keys::transparent::gap_limits::AddressStore;
+    use zcash_primitives::block::BlockHash;
+    use zcash_protocol::{
+        consensus::{self, BlockHeight, NetworkUpgrade, Parameters},
+        value::{COIN, Zatoshis},
+    };
+
+    use super::{
+        DbConnection, WalletPool, pool_with_size, refill_transparent_gap, wallet_gap_limits,
+    };
+    use crate::{components::database::DbHandle, network::Network};
+
+    /// The network the test wallets are created on.
+    const NETWORK: Network = Network::Consensus(consensus::Network::TestNetwork);
+
+    /// The number of imported change indices after the last registered one, as in the
+    /// wallet that reported this failure.
+    const IMPORTED_RUN_LEN: u32 = 213;
+
+    /// The value of every output the tests record. Any value marks its receiver as used.
+    const RECEIVED_VALUE: Zatoshis = Zatoshis::const_from_u64(COIN);
+
+    /// The number of cases per property. Kept small: each builds [`IMPORTED_RUN_LEN`]
+    /// imports.
+    const CASES: u32 = 4;
+
+    /// A wallet with one account, holding the migrated shape built by [`migrated_wallet`].
+    struct MigratedWallet {
+        /// Owns the wallet database file for the life of the test.
+        _datadir: TempDir,
+        pool: WalletPool,
+        account: AccountUuid,
+        account_pubkey: AccountPubKey,
+        /// The last change index that the wallet derived and registered itself.
+        last_registered: u32,
+    }
+
+    fn internal_pubkey(account_pubkey: &AccountPubKey, index: u32) -> secp256k1::PublicKey {
+        account_pubkey
+            .derive_address_pubkey(
+                TransparentKeyScope::INTERNAL,
+                NonHardenedChildIndex::from_index(index).expect("test indices are small"),
+            )
+            .expect("derivation at a non-hardened index succeeds")
+    }
+
+    fn internal_address(account_pubkey: &AccountPubKey, index: u32) -> TransparentAddress {
+        TransparentAddress::from_pubkey(&internal_pubkey(account_pubkey, index))
+    }
+
+    /// A mined output paying `address`, in a transaction unique to `tag`.
+    fn mined_output_to(
+        address: &TransparentAddress,
+        tag: u32,
+        mined_height: BlockHeight,
+    ) -> WalletTransparentOutput<AccountUuid> {
+        let mut txid = [0; 32];
+        txid[..4].copy_from_slice(&tag.to_le_bytes());
+        WalletTransparentOutput::from_parts(
+            OutPoint::new(txid, 0),
+            TxOut::new(RECEIVED_VALUE, address.script().into()),
+            Some(mined_height),
+            None,
+            None,
+            None,
+        )
+        .expect("a P2PKH output has a recipient address")
+    }
+
+    /// Runs a test body on a multi-threaded runtime, which [`DbConnection`] requires.
+    ///
+    /// A panic is caught and resumed outside the runtime, so that the pool is dropped
+    /// inside it. Otherwise a failed assertion aborts the test process.
+    fn run_in_runtime<F: Future>(body: F) -> F::Output {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("builds a runtime")
+            .block_on(AssertUnwindSafe(body).catch_unwind())
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    /// Acquires the only connection of the test wallet's pool.
+    async fn connection(pool: &WalletPool) -> DbHandle {
+        pool.get().await.expect("acquires a connection")
+    }
+
+    /// The start of the internal gap.
+    fn internal_gap_start(conn: &mut DbConnection, account: AccountUuid) -> Option<u32> {
+        conn.with_mut(|mut db| {
+            db.transactionally(|wdb| {
+                let account_ref = wdb.get_account_ref(account)?;
+                wdb.find_gap_start(
+                    account_ref,
+                    TransparentKeyScope::INTERNAL,
+                    wallet_gap_limits().internal(),
+                )
+                .map(|start| start.map(|i| i.index()))
+            })
+        })
+        .map_err(|e: SqliteClientError| e)
+        .expect("reads the gap start")
+    }
+
+    /// Reserves change addresses through `zcash_client_sqlite`, without Zallet's repair.
+    fn reserve_internal_unrepaired(
+        conn: &mut DbConnection,
+        account: AccountUuid,
+        n: usize,
+    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, SqliteClientError> {
+        conn.with_mut(|mut db| db.reserve_next_n_internal_addresses(account, n))
+    }
+
+    /// Builds a wallet that `zcash_client_sqlite` 0.23 cannot reserve change from.
+    ///
+    /// The last index `K` of the initial change window has an output. The
+    /// [`IMPORTED_RUN_LEN`] indices after `K` are standalone imports with outputs, except
+    /// `K + 1 + unused_offset`, which has none and is marked exposed.
+    ///
+    /// The output at `K` is recorded last, so its gap maintenance upgrades the imports.
+    async fn migrated_wallet(seed: [u8; 32], unused_offset: u32) -> MigratedWallet {
+        let datadir = tempfile::tempdir().expect("creates a temporary directory");
+        let path = datadir.path().join("wallet.sqlite");
+        {
+            let mut conn = rusqlite::Connection::open(&path).expect("opens the wallet file");
+            let mut db =
+                WalletDb::from_connection(&mut conn, NETWORK, SystemClock, UnwrapErr(SysRng));
+            WalletMigrator::new()
+                .init_or_migrate(&mut db)
+                .expect("initializes the wallet schema");
+        }
+        let pool =
+            pool_with_size(&path, NETWORK, NonZeroUsize::MIN).expect("builds a connection pool");
+
+        let tip = NETWORK
+            .activation_height(NetworkUpgrade::Sapling)
+            .expect("Sapling activates on the test network");
+        let last_registered = wallet_gap_limits().internal() - 1;
+        let imported = (last_registered + 1)..=(last_registered + IMPORTED_RUN_LEN);
+        let unused = last_registered + 1 + unused_offset;
+
+        let (account, account_pubkey) = {
+            let mut conn = connection(&pool).await;
+            let (account, usk) = conn
+                .create_account(
+                    "migrated",
+                    &SecretVec::new(seed.to_vec()),
+                    &AccountBirthday::from_parts(
+                        ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
+                        None,
+                    ),
+                    None,
+                )
+                .expect("creates the account");
+            conn.update_chain_tip(tip).expect("records the chain tip");
+            let account_pubkey = usk.transparent().to_account_pubkey();
+
+            let pubkeys: Vec<_> = imported
+                .clone()
+                .map(|i| internal_pubkey(&account_pubkey, i))
+                .collect();
+            conn.with_mut(|mut db| db.import_standalone_transparent_pubkeys(account, &pubkeys))
+                .expect("imports the change keys as standalone keys");
+            for i in imported.clone().filter(|i| *i != unused) {
+                conn.put_received_transparent_utxo(&mined_output_to(
+                    &internal_address(&account_pubkey, i),
+                    i,
+                    tip,
+                ))
+                .expect("records an output at an imported receiver");
+            }
+            conn.mark_transparent_addresses_exposed(&[(
+                internal_address(&account_pubkey, unused),
+                tip,
+            )])
+            .expect("marks the unused import as exposed");
+            conn.put_received_transparent_utxo(&mined_output_to(
+                &internal_address(&account_pubkey, last_registered),
+                last_registered,
+                tip,
+            ))
+            .expect("records an output at the last registered change address");
+
+            (account, account_pubkey)
+        };
+
+        MigratedWallet {
+            _datadir: datadir,
+            pool,
+            account,
+            account_pubkey,
+            last_registered,
+        }
+    }
+
+    /// Asserts that the `zcash_client_sqlite` reservation fails with `ReachedGapLimit`,
+    /// and returns the gap start.
+    fn assert_unrepaired_reservation_refused(
+        conn: &mut DbConnection,
+        wallet: &MigratedWallet,
+    ) -> u32 {
+        let internal_gap_limit = wallet_gap_limits().internal();
+        let gap_start =
+            internal_gap_start(conn, wallet.account).expect("the index space is not exhausted");
+        assert!(gap_start <= wallet.last_registered + IMPORTED_RUN_LEN);
+        let refused = reserve_internal_unrepaired(conn, wallet.account, 1);
+        assert!(
+            matches!(
+                refused,
+                Err(SqliteClientError::ReachedGapLimit(TransparentKeyScope::INTERNAL, end))
+                    if end == gap_start + internal_gap_limit
+            ),
+            "unexpected unrepaired reservation result: {refused:?}",
+        );
+        gap_start
+    }
+
+    /// An offset into the imported run that is neither its first nor its last index.
+    fn interior_offset() -> impl Strategy<Value = u32> {
+        1..(IMPORTED_RUN_LEN - 1)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(CASES))]
+
+        /// Reservation fails without the repair. With it, a full window is reserved right
+        /// after the last used import, and the unused exposed import is skipped.
+        #[test]
+        fn change_is_reservable_after_used_imports(
+            seed in any::<[u8; 32]>(),
+            unused_offset in interior_offset(),
+        ) {
+            run_in_runtime(async {
+                let wallet = migrated_wallet(seed, unused_offset).await;
+                let mut conn = connection(&wallet.pool).await;
+                let internal_gap_limit = wallet_gap_limits().internal();
+                let last_import = wallet.last_registered + IMPORTED_RUN_LEN;
+
+                assert_unrepaired_reservation_refused(&mut conn, &wallet);
+
+                let reserved = conn
+                    .reserve_next_n_internal_addresses(
+                        wallet.account,
+                        usize::try_from(internal_gap_limit).expect("small"),
+                    )
+                    .expect("reserves a full window of change after the repair");
+                let reserved: Vec<_> = reserved
+                    .into_iter()
+                    .map(|(address, meta)| (address, meta.address_index().map(|i| i.index())))
+                    .collect();
+                let expected: Vec<_> = ((last_import + 1)..=(last_import + internal_gap_limit))
+                    .map(|i| (internal_address(&wallet.account_pubkey, i), Some(i)))
+                    .collect();
+                assert_eq!(reserved, expected);
+            });
+        }
+
+        /// An error after the repair, in the same transaction, leaves the wallet unchanged.
+        #[test]
+        fn failed_transaction_persists_no_repair(
+            seed in any::<[u8; 32]>(),
+            unused_offset in interior_offset(),
+        ) {
+            run_in_runtime(async {
+                let wallet = migrated_wallet(seed, unused_offset).await;
+                let mut conn = connection(&wallet.pool).await;
+
+                let receivers_before = conn
+                    .get_transparent_receivers(wallet.account, true, true)
+                    .expect("lists the receivers");
+                let gap_start_before = assert_unrepaired_reservation_refused(&mut conn, &wallet);
+
+                let result: Result<(), SqliteClientError> = conn.with_mut(|mut db| {
+                    db.transactionally(|wdb| {
+                        refill_transparent_gap(
+                            wdb,
+                            wallet_gap_limits(),
+                            wallet.account,
+                            TransparentKeyScope::INTERNAL,
+                        )?;
+                        // The repair must have moved the gap start, or the rollback proves nothing.
+                        let account_ref = wdb.get_account_ref(wallet.account)?;
+                        assert_ne!(
+                            wdb.find_gap_start(
+                                account_ref,
+                                TransparentKeyScope::INTERNAL,
+                                wallet_gap_limits().internal(),
+                            )?
+                            .map(|i| i.index()),
+                            Some(gap_start_before),
+                        );
+                        Err(SqliteClientError::CorruptedData(
+                            "injected failure after the repair".into(),
+                        ))
+                    })
+                });
+                assert!(matches!(result, Err(SqliteClientError::CorruptedData(_))));
+
+                assert_eq!(
+                    conn.get_transparent_receivers(wallet.account, true, true)
+                        .expect("lists the receivers"),
+                    receivers_before,
+                );
+                assert_eq!(
+                    assert_unrepaired_reservation_refused(&mut conn, &wallet),
+                    gap_start_before,
+                );
+            });
         }
     }
 }

@@ -83,6 +83,9 @@ be considered breaking changes.
   CPU quotas, so a container limited to one or two CPUs was the most common
   way to hit this. The connection pool is now also always sized with headroom
   above the connections sync retains.
+- `z_sendmany` from transparent funds no longer fails with "The address at
+  index N could not be safely reserved" on a wallet migrated from `zcashd`
+  whose imported change keys have received funds.
 
 ## [0.1.0-beta.4] - 2026-11-01
 
