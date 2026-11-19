@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use documented::Documented;
 use jsonrpsee::{
     core::{JsonValue, RpcResult},
@@ -5,22 +7,29 @@ use jsonrpsee::{
 };
 use schemars::JsonSchema;
 use serde::Serialize;
+use transparent::keys::{NonHardenedChildIndex, TransparentKeyScope};
 use zcash_address::unified;
 #[cfg(zallet_build = "wallet")]
 use zcash_client_backend::data_api::{Account as _, WalletRead};
 use zcash_client_backend::{
+    address::UnifiedAddress,
     data_api::WalletWrite,
     keys::{AddressGenerationError, ReceiverRequirement, UnifiedAddressRequest},
+    wallet::Exposure,
 };
-use zcash_client_sqlite::error::SqliteClientError;
+use zcash_client_sqlite::{AccountUuid, error::SqliteClientError};
+use zip32::DiversifierIndex;
 
-use crate::components::{
-    database::Database,
-    json_rpc::{
-        server::LegacyCode,
-        unified_encoding::encode_unified_address,
-        utils::{parse_account_parameter, parse_diversifier_index, wallet_handle},
+use crate::{
+    components::{
+        database::{Database, DbHandle},
+        json_rpc::{
+            server::LegacyCode,
+            unified_encoding::encode_unified_address,
+            utils::{parse_account_parameter, parse_diversifier_index, wallet_handle},
+        },
     },
+    config::TransparentGapLimitPolicy,
 };
 
 #[cfg(zallet_build = "wallet")]
@@ -56,12 +65,21 @@ pub(super) const PARAM_RECEIVER_TYPES_DESC: &str =
     "Receiver types to include in the derived address.";
 pub(super) const PARAM_DIVERSIFIER_INDEX_DESC: &str = "A specific diversifier index to derive at.";
 
+/// The most indices past the gap window that are tried for one request before giving up.
+///
+/// An index is skipped only when it has no valid Sapling diversifier, which happens
+/// for about half of all indices independently. The chance that this many consecutive
+/// indices are all unusable is 2^-128, so the bound is never reached in practice; it
+/// exists so that the search cannot run away while holding the wallet's write lock.
+const MAX_INDICES_TRIED_PAST_GAP_WINDOW: usize = 128;
+
 pub(crate) async fn call(
     wallet: &Database,
     #[cfg(zallet_build = "wallet")] keystore: KeyStore,
     account: JsonValue,
     receiver_types: Option<Vec<String>>,
     diversifier_index: Option<u128>,
+    gap_limit_policy: TransparentGapLimitPolicy,
 ) -> Response {
     let account_id = parse_account_parameter(
         #[cfg(zallet_build = "wallet")]
@@ -178,12 +196,41 @@ pub(crate) async fn call(
             ))),
         }
     } else {
-        wallet
-            .as_mut()
-            .get_next_available_address(account_id, request)
-            .map_err(|e| map_sqlite_error(e, &account))?
-            // This would be a race condition between this and account deletion.
-            .ok_or(RpcErrorCode::InternalError.into())
+        match (
+            wallet
+                .as_mut()
+                .get_next_available_address(account_id, request),
+            gap_limit_policy,
+        ) {
+            (
+                Err(SqliteClientError::ReachedGapLimit(TransparentKeyScope::EXTERNAL, window_end)),
+                TransparentGapLimitPolicy::IssuePast,
+            ) => {
+                let issued = issue_past_gap_window(&wallet, account_id, request, window_end)
+                    .map_err(|e| map_sqlite_error(e, &account))?;
+                match issued {
+                    Some((address, diversifier_index)) => {
+                        tracing::warn!(
+                            "Issued an address for account {} at diversifier index {}, past the \
+                             transparent gap limit. Funds sent to its transparent receiver will \
+                             not be found by recovery from the mnemonic phrase alone.",
+                            account_id.expose_uuid(),
+                            u128::from(diversifier_index),
+                        );
+                        Ok((address, diversifier_index))
+                    }
+                    None => Err(LegacyCode::Wallet.with_message(format!(
+                        "Error: no address with the requested receivers could be generated in \
+                         the {MAX_INDICES_TRIED_PAST_GAP_WINDOW} unused indices from index \
+                         {window_end}.",
+                    ))),
+                }
+            }
+            (result, _) => result
+                .map_err(|e| map_sqlite_error(e, &account))?
+                // This would be a race condition between this and account deletion.
+                .ok_or(RpcErrorCode::InternalError.into()),
+        }
     }?;
 
     // Only include `account` in the response if it was provided in the request. We rely
@@ -200,6 +247,65 @@ pub(crate) async fn call(
         receiver_types,
         address: encode_unified_address(&address, wallet.params()),
     })
+}
+
+/// Issues the first unused address at or after `window_end`, the index one past the end
+/// of the account's transparent gap window.
+///
+/// `get_next_available_address` only reserves indices inside the gap window, but an
+/// explicit index outside it can be derived and is watched like any other. This picks
+/// that index for the caller, so issuance stays sequential.
+///
+/// The read of the issued indices and the write that marks the chosen one as issued
+/// share a transaction, so two concurrent requests cannot be given the same address.
+///
+/// Returns `Ok(None)` if none of the first [`MAX_INDICES_TRIED_PAST_GAP_WINDOW`] unused
+/// indices can produce an address satisfying `request`.
+fn issue_past_gap_window(
+    wallet: &DbHandle,
+    account_id: AccountUuid,
+    request: UnifiedAddressRequest,
+    window_end: u32,
+) -> Result<Option<(UnifiedAddress, DiversifierIndex)>, SqliteClientError> {
+    wallet.with_mut(|mut db_data| {
+        db_data.transactionally(|wdb| {
+            let issued = wdb
+                .get_transparent_receivers(account_id, false, false)?
+                .values()
+                .filter(|meta| meta.scope() == Some(TransparentKeyScope::EXTERNAL))
+                .filter(|meta| matches!(meta.exposure(), Exposure::Exposed { .. }))
+                .filter_map(|meta| meta.address_index())
+                .collect::<BTreeSet<_>>();
+
+            for index in
+                unissued_indices_from(window_end, &issued).take(MAX_INDICES_TRIED_PAST_GAP_WINDOW)
+            {
+                let diversifier_index = DiversifierIndex::from(index.index());
+                // `Ok(None)` means this index cannot satisfy the request, and is returned
+                // before anything is written.
+                if let Some(address) =
+                    wdb.get_address_for_index(account_id, diversifier_index, request)?
+                {
+                    return Ok(Some((address, diversifier_index)));
+                }
+            }
+
+            Ok(None)
+        })
+    })
+}
+
+/// The transparent child indices from `start` upward that are not in `issued`, in
+/// increasing order.
+///
+/// Empty if `start` is beyond the non-hardened child index range.
+fn unissued_indices_from(
+    start: u32,
+    issued: &BTreeSet<NonHardenedChildIndex>,
+) -> impl Iterator<Item = NonHardenedChildIndex> + '_ {
+    (start..=NonHardenedChildIndex::MAX.index())
+        .filter_map(NonHardenedChildIndex::from_index)
+        .filter(|index| !issued.contains(index))
 }
 
 fn map_address_generation_error(
@@ -266,7 +372,9 @@ fn map_sqlite_error(e: SqliteClientError, account: &JsonValue) -> ErrorObjectOwn
             "Error: chain height is unknown. Wait for syncing to progress and then try again."
         ),
         SqliteClientError::ReachedGapLimit(_, index) => LegacyCode::Wallet.with_message(format!(
-            "Error: reached the transparent gap limit while attempting to generate a new address at index {index}.",
+            "Error: reached the transparent gap limit while attempting to generate a new address at index {index}. \
+             Fund an address that was already issued, request a specific diversifier index, \
+             or set `rpc.issue_past_transparent_gap_limit` in the Zallet config.",
         )),
         SqliteClientError::DiversifierIndexReuse(diversifier_index, _) => {
             LegacyCode::Wallet.with_message(format!(
@@ -275,5 +383,118 @@ fn map_sqlite_error(e: SqliteClientError, account: &JsonValue) -> ErrorObjectOwn
             ))
         }
         _ => LegacyCode::Database.with_message(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use jsonrpsee::core::JsonValue;
+    use proptest::prelude::*;
+    use transparent::keys::{NonHardenedChildIndex, TransparentKeyScope};
+    use zcash_client_sqlite::error::SqliteClientError;
+
+    use super::{map_sqlite_error, unissued_indices_from};
+
+    /// One past the end of a fresh account's gap window.
+    const WINDOW_END: u32 = 10;
+
+    /// How many candidates the tests look at. Arbitrary, but more than the issued
+    /// indices any test places after [`WINDOW_END`].
+    const CANDIDATES: usize = 8;
+
+    fn indices(raw: impl IntoIterator<Item = u32>) -> BTreeSet<NonHardenedChildIndex> {
+        raw.into_iter()
+            .map(|i| NonHardenedChildIndex::from_index(i).expect("in range"))
+            .collect()
+    }
+
+    fn candidates(start: u32, issued: &BTreeSet<NonHardenedChildIndex>) -> Vec<u32> {
+        unissued_indices_from(start, issued)
+            .take(CANDIDATES)
+            .map(|index| index.index())
+            .collect()
+    }
+
+    #[test]
+    fn candidates_start_at_the_window_end_when_nothing_past_it_is_issued() {
+        assert_eq!(
+            candidates(WINDOW_END, &BTreeSet::new()),
+            (WINDOW_END..).take(CANDIDATES).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn indices_issued_inside_the_window_do_not_affect_the_candidates() {
+        assert_eq!(
+            candidates(WINDOW_END, &indices(0..WINDOW_END)),
+            candidates(WINDOW_END, &BTreeSet::new()),
+        );
+    }
+
+    #[test]
+    fn candidates_skip_issued_indices_and_fill_the_holes_between_them() {
+        // Sequential issuance has reached two past the window, and one further index was
+        // issued explicitly.
+        let explicit = WINDOW_END + 4;
+        let issued = indices([WINDOW_END, WINDOW_END + 1, explicit]);
+
+        let expected = (WINDOW_END + 2..)
+            .filter(|&i| i != explicit)
+            .take(CANDIDATES)
+            .collect::<Vec<_>>();
+        assert_eq!(candidates(WINDOW_END, &issued), expected);
+    }
+
+    #[test]
+    fn candidates_stop_at_the_last_non_hardened_index() {
+        let max = NonHardenedChildIndex::MAX.index();
+
+        assert_eq!(candidates(max, &BTreeSet::new()), vec![max]);
+        assert_eq!(candidates(max, &indices([max])), Vec::<u32>::new());
+        // A window end one past the range, as reported for a gap window that already
+        // reaches the end of it.
+        assert_eq!(candidates(max + 1, &BTreeSet::new()), Vec::<u32>::new());
+    }
+
+    proptest! {
+        #[test]
+        fn candidates_are_exactly_the_unissued_indices_in_order(
+            start in 0..=NonHardenedChildIndex::MAX.index(),
+            issued_offsets in prop::collection::btree_set(0u32..64, 0..32),
+        ) {
+            let issued = indices(
+                issued_offsets
+                    .iter()
+                    .filter_map(|offset| start.checked_add(*offset))
+                    .filter(|i| *i <= NonHardenedChildIndex::MAX.index()),
+            );
+            let found = candidates(start, &issued);
+
+            let expected = (start..=NonHardenedChildIndex::MAX.index())
+                .filter(|i| !issued.iter().any(|index| index.index() == *i))
+                .take(CANDIDATES)
+                .collect::<Vec<_>>();
+            prop_assert_eq!(found, expected);
+        }
+    }
+
+    #[test]
+    fn gap_limit_error_reports_the_index_and_the_ways_out() {
+        let error = map_sqlite_error(
+            SqliteClientError::ReachedGapLimit(TransparentKeyScope::EXTERNAL, WINDOW_END),
+            &JsonValue::from(0),
+        );
+
+        assert_eq!(
+            error.message(),
+            format!(
+                "Error: reached the transparent gap limit while attempting to generate a new \
+                 address at index {WINDOW_END}. Fund an address that was already issued, \
+                 request a specific diversifier index, or set \
+                 `rpc.issue_past_transparent_gap_limit` in the Zallet config.",
+            ),
+        );
     }
 }

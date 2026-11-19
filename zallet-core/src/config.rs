@@ -798,6 +798,26 @@ pub struct RpcSection {
     /// instead. Zallet logs a prominent warning at startup while this is enabled.
     pub allow_insecure_remote_bind: Option<bool>,
 
+    /// Whether `z_getaddressforaccount` keeps issuing addresses with a transparent
+    /// receiver once the transparent gap limit has been reached.
+    ///
+    /// When no diversifier index is given, `z_getaddressforaccount` hands out the next
+    /// unused index, and for an address with a transparent receiver it will not go
+    /// more than the gap limit (10 addresses) past the last one that received funds.
+    /// By default the request then fails until one of the issued addresses is funded.
+    /// With this enabled, it continues at the next index that has not been issued.
+    ///
+    /// # Recovery
+    ///
+    /// A wallet recovered from its mnemonic phrase only looks for transparent funds
+    /// up to the gap limit past the last funded address, so funds sent to an address
+    /// issued beyond that are NOT found by recovery from the mnemonic alone. They
+    /// remain visible to this wallet and to any backup of its database. Only enable
+    /// this if you back up the wallet database, or keep your own record of the
+    /// diversifier indices that were issued so they can be requested again after a
+    /// recovery. Zallet logs a warning for each address issued this way.
+    pub issue_past_transparent_gap_limit: Option<bool>,
+
     /// Timeout (in seconds) during HTTP requests.
     pub timeout: Option<u64>,
 
@@ -822,12 +842,33 @@ impl RpcSection {
         self.allow_insecure_remote_bind.unwrap_or(false)
     }
 
+    /// What `z_getaddressforaccount` does once the transparent gap limit is reached.
+    ///
+    /// Default is [`TransparentGapLimitPolicy::Enforce`].
+    pub fn transparent_gap_limit_policy(&self) -> TransparentGapLimitPolicy {
+        match self.issue_past_transparent_gap_limit {
+            Some(true) => TransparentGapLimitPolicy::IssuePast,
+            Some(false) | None => TransparentGapLimitPolicy::Enforce,
+        }
+    }
+
     /// Timeout during HTTP requests.
     ///
     /// Default is 30 seconds.
     pub fn timeout(&self) -> Duration {
         Duration::from_secs(self.timeout.unwrap_or(30))
     }
+}
+
+/// How sequential address issuance behaves at the transparent gap limit.
+///
+/// Set by `rpc.issue_past_transparent_gap_limit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransparentGapLimitPolicy {
+    /// Fail the request until an already-issued address receives funds.
+    Enforce,
+    /// Continue at the next index that has not been issued.
+    IssuePast,
 }
 
 /// A user that is authorized to access the JSON-RPC interface.
@@ -968,6 +1009,10 @@ impl ZalletConfig {
                 conf.rpc.allow_insecure_remote_bind(),
             ),
             rpc("bind", &conf.rpc.bind),
+            rpc(
+                "issue_past_transparent_gap_limit",
+                conf.rpc.transparent_gap_limit_policy() == TransparentGapLimitPolicy::IssuePast,
+            ),
             rpc("timeout", conf.rpc.timeout().as_secs()),
             sync("recover_batch_size", conf.sync.recover_batch_size()),
             sync("lock_threshold", conf.sync.lock_threshold()),
@@ -1306,7 +1351,7 @@ impl ZalletConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendName, ZalletConfig};
+    use super::{BackendName, RpcSection, TransparentGapLimitPolicy, ZalletConfig};
     use zcash_protocol::consensus::NetworkType;
 
     #[cfg(zallet_build = "wallet")]
@@ -1453,5 +1498,31 @@ zebra_state_path = "/home/user/.cache/zebra"
         // fully scanned exactly to the tip), so it must be accepted.
         let section: super::SyncSection = toml::from_str("lock_threshold = 0").unwrap();
         assert_eq!(section.lock_threshold(), 0);
+    }
+
+    #[test]
+    fn the_transparent_gap_limit_is_enforced_unless_opted_out() {
+        let policy = |issue_past_transparent_gap_limit| {
+            RpcSection {
+                issue_past_transparent_gap_limit,
+                ..Default::default()
+            }
+            .transparent_gap_limit_policy()
+        };
+
+        assert_eq!(policy(None), TransparentGapLimitPolicy::Enforce);
+        assert_eq!(policy(Some(false)), TransparentGapLimitPolicy::Enforce);
+        assert_eq!(policy(Some(true)), TransparentGapLimitPolicy::IssuePast);
+    }
+
+    #[test]
+    fn issue_past_transparent_gap_limit_is_read_from_the_rpc_section() {
+        let rpc: RpcSection =
+            toml::from_str("issue_past_transparent_gap_limit = true").expect("valid section");
+
+        assert_eq!(
+            rpc.transparent_gap_limit_policy(),
+            TransparentGapLimitPolicy::IssuePast,
+        );
     }
 }

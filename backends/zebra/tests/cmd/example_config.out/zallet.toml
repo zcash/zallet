@@ -399,6 +399,26 @@ as_of_version = "0.1.0-beta.4"
 # instead. Zallet logs a prominent warning at startup while this is enabled.
 #allow_insecure_remote_bind = false
 
+# Whether `z_getaddressforaccount` keeps issuing addresses with a transparent
+# receiver once the transparent gap limit has been reached.
+#
+# When no diversifier index is given, `z_getaddressforaccount` hands out the next
+# unused index, and for an address with a transparent receiver it will not go
+# more than the gap limit (10 addresses) past the last one that received funds.
+# By default the request then fails until one of the issued addresses is funded.
+# With this enabled, it continues at the next index that has not been issued.
+#
+# # Recovery
+#
+# A wallet recovered from its mnemonic phrase only looks for transparent funds
+# up to the gap limit past the last funded address, so funds sent to an address
+# issued beyond that are NOT found by recovery from the mnemonic alone. They
+# remain visible to this wallet and to any backup of its database. Only enable
+# this if you back up the wallet database, or keep your own record of the
+# diversifier indices that were issued so they can be requested again after a
+# recovery. Zallet logs a warning for each address issued this way.
+#issue_past_transparent_gap_limit = false
+
 # Timeout (in seconds) during HTTP requests.
 #timeout = 30
 
