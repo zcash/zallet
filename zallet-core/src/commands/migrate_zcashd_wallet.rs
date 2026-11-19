@@ -396,17 +396,11 @@ impl MigrateZcashdWalletCmd {
                 Ok::<_, SqliteClientError>(found)
             },
         )?;
-        if !existing_zcashd_sourced_accounts.is_empty() {
-            if allow_multiple_wallet_imports {
-                if let Some(fp) = mnemonic_fp.as_ref().and_then(decode_seed_fingerprint)
-                    && existing_zcashd_sourced_accounts.contains(&fp)
-                {
-                    return Err(MigrateError::DuplicateImport(fp));
-                }
-            } else {
-                return Err(MigrateError::MultiImportDisabled);
-            }
-        }
+        check_reimport(
+            &existing_zcashd_sourced_accounts,
+            mnemonic_fp.as_ref().and_then(decode_seed_fingerprint),
+            allow_multiple_wallet_imports,
+        )?;
 
         // Determine the wallet's birthday from the earliest evidence of wallet
         // activity among the document's transactions, un-mined ones included. With
@@ -1496,6 +1490,41 @@ fn log_import_report(report: &ZewifImportReport) {
     }
 }
 
+/// Decides whether a migration may write into a wallet database that already holds
+/// imported `zcashd` wallets.
+///
+/// `existing` holds the seed fingerprints of the `zcashd`-sourced accounts already in
+/// the wallet database, and `incoming` the fingerprint of the mnemonic of the wallet
+/// being migrated, if it has one that decodes.
+///
+/// A database with no imported `zcashd` wallet accepts any migration. Otherwise the
+/// migration is refused with [`MigrateError::MultiImportDisabled`] unless multiple
+/// imports are allowed, and even then with [`MigrateError::DuplicateImport`] if the
+/// incoming fingerprint is already present.
+///
+/// This guard is what stops a re-run after a failed partial import from importing the
+/// committed accounts a second time, which the migration guide relies on. Its
+/// duplicate check compares mnemonic fingerprints only, so a wallet with no HD seed,
+/// whose mnemonic is minted afresh on every run, is never recognised as a duplicate;
+/// the guide warns operators not to re-run such a wallet with
+/// `--allow-multiple-wallet-imports`.
+fn check_reimport(
+    existing: &HashSet<SeedFingerprint>,
+    incoming: Option<SeedFingerprint>,
+    allow_multiple_wallet_imports: bool,
+) -> Result<(), MigrateError> {
+    if existing.is_empty() {
+        return Ok(());
+    }
+    if !allow_multiple_wallet_imports {
+        return Err(MigrateError::MultiImportDisabled);
+    }
+    match incoming {
+        Some(fp) if existing.contains(&fp) => Err(MigrateError::DuplicateImport(fp)),
+        _ => Ok(()),
+    }
+}
+
 /// Evaluates a ZeWIF import report against the number of accounts in the source
 /// document, failing the migration when accounts or spending material were left
 /// behind.
@@ -1716,6 +1745,7 @@ impl From<ChainError> for MigrateError {
 mod tests {
     use incrementalmerkletree::{Position, frontier::Frontier};
     use orchard::tree::MerkleHashOrchard;
+    use proptest::prelude::*;
     use zcash_client_sqlite::{
         AccountUuid,
         zewif::{
@@ -1727,11 +1757,86 @@ mod tests {
 
     use super::{
         BlockHash, EXPIRY_HEIGHT_MARGIN, HashMap, HashSet, MigrateError, MigrateZcashdWalletCmd,
-        TrackedReceiver, ZCASHD_LEGACY_ACCOUNT_INDEX, ZCASHD_LEGACY_SOURCE, backfill_mined_heights,
-        check_import_report, derive_regtest_activations, describe_skipped_items,
-        earliest_activity_estimate, enriched_document, has_seedless_legacy_account,
-        mint_legacy_mnemonic, to_zewif_frontier,
+        SeedFingerprint, TrackedReceiver, ZCASHD_LEGACY_ACCOUNT_INDEX, ZCASHD_LEGACY_SOURCE,
+        backfill_mined_heights, check_import_report, check_reimport, derive_regtest_activations,
+        describe_skipped_items, earliest_activity_estimate, enriched_document,
+        has_seedless_legacy_account, mint_legacy_mnemonic, to_zewif_frontier,
     };
+
+    /// Upper bound (exclusive) on how many `zcashd` wallets the generated wallet
+    /// databases already hold. The guard's decision depends only on whether the set
+    /// is empty and whether it contains the incoming fingerprint, so a handful is
+    /// enough to exercise both.
+    const MAX_IMPORTED_WALLETS: usize = 8;
+
+    /// A non-empty set of distinct seed fingerprints, standing in for the `zcashd`
+    /// wallets already imported into a wallet database.
+    fn imported_fingerprints() -> impl Strategy<Value = HashSet<SeedFingerprint>> {
+        proptest::collection::hash_set(any::<[u8; 32]>(), 1..MAX_IMPORTED_WALLETS)
+            .prop_map(|set| set.into_iter().map(SeedFingerprint::from_bytes).collect())
+    }
+
+    proptest! {
+        #[test]
+        fn reimport_into_an_empty_wallet_is_allowed(
+            incoming in proptest::option::of(any::<[u8; 32]>()),
+            allow_multiple in any::<bool>(),
+        ) {
+            prop_assert!(check_reimport(
+                &HashSet::new(),
+                incoming.map(SeedFingerprint::from_bytes),
+                allow_multiple,
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn reimport_without_the_flag_is_refused_whatever_the_wallet(
+            existing in imported_fingerprints(),
+            incoming in proptest::option::of(any::<[u8; 32]>()),
+        ) {
+            prop_assert!(matches!(
+                check_reimport(&existing, incoming.map(SeedFingerprint::from_bytes), false),
+                Err(MigrateError::MultiImportDisabled)
+            ));
+        }
+
+        #[test]
+        fn reimport_of_an_already_imported_wallet_is_refused_as_a_duplicate(
+            existing in imported_fingerprints(),
+            pick in any::<proptest::sample::Index>(),
+        ) {
+            let fp = *pick.get(&existing.iter().copied().collect::<Vec<_>>());
+            for allow_multiple in [false, true] {
+                let result = check_reimport(&existing, Some(fp), allow_multiple);
+                if allow_multiple {
+                    prop_assert!(matches!(result, Err(MigrateError::DuplicateImport(d)) if d == fp));
+                } else {
+                    prop_assert!(matches!(result, Err(MigrateError::MultiImportDisabled)));
+                }
+            }
+        }
+
+        #[test]
+        fn reimport_of_a_new_wallet_is_allowed_with_the_flag(
+            existing in imported_fingerprints(),
+            incoming in any::<[u8; 32]>(),
+        ) {
+            let incoming = SeedFingerprint::from_bytes(incoming);
+            prop_assume!(!existing.contains(&incoming));
+            prop_assert!(check_reimport(&existing, Some(incoming), true).is_ok());
+        }
+
+        /// The known limitation: with no decodable mnemonic fingerprint there is
+        /// nothing to compare, so the duplicate check cannot fire. The migration
+        /// guide warns operators about this case.
+        #[test]
+        fn reimport_without_a_fingerprint_is_not_detected_as_a_duplicate(
+            existing in imported_fingerprints(),
+        ) {
+            prop_assert!(check_reimport(&existing, None, true).is_ok());
+        }
+    }
 
     fn node(byte: u8) -> MerkleHashOrchard {
         let mut bytes = [0u8; 32];
@@ -2438,7 +2543,7 @@ mod tests {
         let mnemonic = bip0039::Mnemonic::<bip0039::English>::from_phrase(&phrase)
             .expect("stored phrase is a valid English mnemonic");
         assert_eq!(phrase.split_whitespace().count(), 24);
-        let expected = zip32::fingerprint::SeedFingerprint::from_seed(&mnemonic.to_seed(""))
+        let expected = SeedFingerprint::from_seed(&mnemonic.to_seed(""))
             .expect("BIP 39 seeds have a valid length");
         assert_eq!(
             fp,
