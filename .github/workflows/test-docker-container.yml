@@ -1,7 +1,14 @@
 name: Build and Run Docker Container
 
+# This check is not required by the merge ruleset, so it can simply not run
+# on documentation-only pull requests. The exclusions mirror the documentation
+# set in changes.yml.
 on:
   pull_request:
+    paths-ignore:
+      - 'book/**'
+      - '**.md'
+      - 'LICENSE-*'
   push:
     branches: main
 
