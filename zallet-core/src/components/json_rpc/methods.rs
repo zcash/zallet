@@ -1520,7 +1520,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         strict: Option<bool>,
     ) -> pczt_sign::Response {
         pczt_sign::call(
-            self.general.wallet.params(),
+            &self.general.wallet,
             self.keystore.clone(),
             pczt,
             privacy_policy,
