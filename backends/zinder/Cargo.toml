@@ -35,7 +35,6 @@ zinder-client = "=0.21.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["time"] }
-toml = "0.8"
 zinder-core = { version = "=0.21.0", default-features = false }
 
 [features]

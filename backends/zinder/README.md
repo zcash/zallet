@@ -140,7 +140,8 @@ Running the retained seam now requires:
    view rather than mixing results across epochs.
 
 The consumer-test seam and typed whole-range retry remain in Zallet core; this
-backend supplies the admitted chain and invokes that seam from ignored tests.
+backend supplies the admitted chain, and the external integration driver invokes
+that seam from named scenarios.
 This evidence must not substitute for current-Zallet certification or a full
 `zallet start` attempt. Broadcast and transparent behavior remain outside this
 retained Gate A slice.
@@ -148,23 +149,11 @@ retained Gate A slice.
 ### Bounded-scan certification feature
 
 The non-default `bounded-scan-certification` feature forwards to Zallet core's
-bounded-scan seam and adds 3 ignored library tests. It is a certification
-feature, not an additional runtime contract. Build the single libtest
-executable without running it:
-
-```console
-cargo +1.100.0 test --manifest-path backends/zinder/Cargo.toml \
-  --features bounded-scan-certification --locked --no-run \
-  --message-format=json
-```
-
-The external harness invokes exactly 1 ignored test per fresh OS process:
-
-```text
-chain::tests::endpoint_without_full_blocks_fails_before_wallet_open
-chain::tests::endpoint_certifies_birthday_through_tip
-chain::tests::expired_epoch_reacquires_complete_bounded_scan
-```
+bounded-scan seam and enables the controlled range barrier. Ordinary deployments
+leave it disabled. Network scenarios live in `zcash/integration-tests`, not in
+this repository's unit tests. Its `build_zinder_driver.py` compiles the external
+Rust driver against this checkout; `zinder_bounded_scan.py` orchestrates the
+processes and invokes one named scenario per fresh process.
 
 Each process receives an absolute real Zallet TOML path in
 `ZIT_ZALLET_CONFIG`, an absolute certification data directory in
