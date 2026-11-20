@@ -40,7 +40,7 @@ be considered breaking changes.
   query, or a fragment is rejected when the configuration loads.
 - Source builds can select `backend = "zinder"` to run the native
   `zallet-zinder` backend, which syncs from and submits wallet transactions
-  through a Zinder 0.10.0 wallet-query endpoint (native contract revision 8).
+  through a Zinder 0.21.0 wallet-query endpoint (native contract revision 14).
   Upgrade the backend and its Zinder deployment together. Release packaging
   remains unchanged.
 

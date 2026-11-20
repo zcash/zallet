@@ -2,7 +2,7 @@
 name = "zallet-zinder"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.100"
 description = "Zallet backend for the Zinder wallet runtime"
 repository = "https://github.com/zcash/zallet"
 license = "MIT OR Apache-2.0"
@@ -31,12 +31,12 @@ zcash_client_backend = "0.25"
 zcash_primitives = "0.31"
 zcash_protocol = "0.11"
 zcash_script = "0.6"
-zinder-client = "=0.10.0"
+zinder-client = "=0.21.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["time"] }
 toml = "0.8"
-zinder-core = { version = "=0.10.0", default-features = false }
+zinder-core = { version = "=0.21.0", default-features = false }
 
 [features]
 default = []

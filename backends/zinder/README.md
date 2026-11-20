@@ -5,16 +5,16 @@ This directory contains Zallet's `zallet-zinder` native backend process. When
 sibling executable. It reads `[zinder].wallet_query_endpoint` from Zallet
 configuration, fails before network access when the field is absent, and
 connects only through the typed native wallet-query client from the released
-Zinder 0.10.0 client package.
+Zinder 0.21.0 client package.
 
-The endpoint must run Zinder 0.10.0, which serves native contract revision 8.
+The endpoint must run Zinder 0.21.0, which serves native contract revision 14.
 Construction's `ServerInfo` request fails against an endpoint below revision 8,
-and builds of this backend on earlier Zinder clients fail against a revision 8
-endpoint, so upgrade this backend and its Zinder deployment together.
+so upgrade this backend and its Zinder deployment together. The client checks
+a minimum revision of 8; this backend targets the release named above.
 
 ## Dependency graph
 
-The backend uses Rust 1.95 because the released Zinder 0.10.0 crates declare that MSRV.
+The backend uses Rust 1.100 because the released Zinder 0.21.0 crates declare that MSRV.
 This does not require a root Zallet toolchain change: backend crates are
 independent workspaces, and the current Zallet core still compiles under the
 newer toolchain.
@@ -23,11 +23,11 @@ The backend workspace resolves the wallet-critical librustzcash crates to the
 same released versions as the root and Zebra lockfiles, and
 `utils/check-lockstep.sh` enforces this: every backend opens the same wallet
 database, so a drifted crate could apply different schema migrations. The
-Zinder boundary itself is exact: `zinder-client = 0.10.0` and the test-only
-`zinder-core = 0.10.0`; those are the released Zinder 0.10.0 packages, not a
+Zinder boundary itself is exact: `zinder-client = 0.21.0` and the test-only
+`zinder-core = 0.21.0`; those are the released Zinder 0.21.0 packages, not a
 compatibility alias for an earlier release.
 
-`zinder-core` 0.10.0 depends on `zcash_address` 0.14 and `zcash_protocol` 0.11,
+`zinder-core` 0.21.0 depends on `zcash_address` 0.14 and `zcash_protocol` 0.11,
 the same releases the wallet uses. No Zinder type crosses the backend
 boundary: the backend exchanges hashes, heights, and raw block and transaction
 bytes with Zinder and decodes them with the wallet's librustzcash crates.
@@ -153,7 +153,7 @@ feature, not an additional runtime contract. Build the single libtest
 executable without running it:
 
 ```console
-cargo +1.95.0 test --manifest-path backends/zinder/Cargo.toml \
+cargo +1.100.0 test --manifest-path backends/zinder/Cargo.toml \
   --features bounded-scan-certification --locked --no-run \
   --message-format=json
 ```
@@ -196,10 +196,10 @@ run.
 The focused backend checks are:
 
 ```console
-cargo +1.95.0 fmt --manifest-path backends/zinder/Cargo.toml -- --check
-cargo +1.95.0 test --manifest-path backends/zinder/Cargo.toml --all-targets
-cargo +1.95.0 check --manifest-path backends/zinder/Cargo.toml --all-targets
-cargo +1.95.0 clippy --manifest-path backends/zinder/Cargo.toml --all-targets -- -D warnings
+cargo +1.100.0 fmt --manifest-path backends/zinder/Cargo.toml -- --check
+cargo +1.100.0 test --manifest-path backends/zinder/Cargo.toml --all-targets
+cargo +1.100.0 check --manifest-path backends/zinder/Cargo.toml --all-targets
+cargo +1.100.0 clippy --manifest-path backends/zinder/Cargo.toml --all-targets -- -D warnings
 utils/check-lockstep.sh
 ```
 
