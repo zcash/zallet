@@ -152,11 +152,20 @@ jobs:
     runs-on: ubuntu-latest
     needs: platform_matrix
 
-    # Required permissions for Release upload + OIDC/Sigstore attestation
+    # This job runs repository-controlled packaging inputs (`cargo deb` reads
+    # zallet/Cargo.toml's Debian metadata, and the toolchain and cargo-deb are
+    # installed here), so it gets no signing key, no AWS credentials, and no
+    # OIDC token (which could be exchanged for the AWS role that reads the key).
+    # It only produces the unsigned artifacts and their digests; attestation
+    # and signing happen in `sign_artifacts`.
     permissions:
-      contents: write        # needed to create/update the Release and upload assets
-      id-token: write        # required for OIDC/Sigstore
-      attestations: write    # required to persist the attestation
+      contents: read
+
+    # Each leg sets only its own architecture's output; the other stays empty,
+    # so the merged matrix outputs carry one digest list per architecture.
+    outputs:
+      digests-amd64: ${{ steps.digests.outputs.digests-amd64 }}
+      digests-arm64: ${{ steps.digests.outputs.digests-arm64 }}
 
     strategy:
       matrix:
@@ -194,23 +203,6 @@ jobs:
             gnupg \
             curl \
             wget
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-
-      - name: Import GPG keys
-        run: |
-          set -euo pipefail
-          # Pipe directly from Secrets Manager to avoid writing the private key
-          # to a plaintext file in the runner working directory.
-          aws secretsmanager get-secret-value \
-            --secret-id /release/gpg-signing-key \
-            --query SecretString \
-            --output text | gpg --import
-          wget -qO - https://apt.z.cash/zcash.asc | gpg --no-default-keyring --keyring trustedkeys.gpg --import
 
       - name: Install cargo-deb
         # Pin cargo-deb: the floating latest (3.7.0) bumped its MSRV past the
@@ -364,14 +356,6 @@ jobs:
           }
           EOF
 
-      - name: GPG sign standalone tarball
-        env:
-          BINARY_SUFFIX: ${{ matrix.binary_suffix }}
-        run: |
-          set -euo pipefail
-          gpg -u sysadmin@zodl.com --armor --digest-algo SHA256 --detach-sign \
-            "standalone/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.tar.gz"
-
       - name: Generate SPDX SBOM for standalone tarball
         env:
           BINARY_SUFFIX: ${{ matrix.binary_suffix }}
@@ -402,18 +386,6 @@ jobs:
           """
           output.write_text(doc, encoding="utf-8")
           PY
-
-      - name: Generate build provenance attestation for tarball
-        id: binary-attest
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
-        with:
-          subject-path: standalone/zallet-${{ env.RELEASE_VERSION }}-${{ matrix.binary_suffix }}.tar.gz
-
-      - name: Save tarball attestation bundle
-        env:
-          BUNDLE_PATH: ${{ steps.binary-attest.outputs['bundle-path'] }}
-        run: |
-          cp -- "$BUNDLE_PATH" "standalone/zallet-${RELEASE_VERSION}-${{ matrix.binary_suffix }}.tar.gz.intoto.jsonl"
 
       - name: Seed cargo target tree with the imported artifacts
         run: |
@@ -523,11 +495,8 @@ jobs:
       # race to S3 sync it — leaving the published index listing just one
       # architecture. A single downstream job that ingests BOTH .debs and
       # publishes with `-architectures=amd64,arm64` produces a consistent index.
-      # Here the matrix only builds, smoke-tests, signs, and uploads its .deb.
-
-      - name: GPG sign Debian package
-        run: |
-          gpg -u sysadmin@zodl.com --armor --digest-algo SHA256 --detach-sign "zallet_${RELEASE_VERSION}_${{ matrix.arch }}.deb"
+      # Here the matrix only builds, smoke-tests, and uploads its unsigned .deb;
+      # `sign_artifacts` attests and signs it.
 
       - name: Generate provenance chain metadata for .deb
         env:
@@ -598,45 +567,258 @@ jobs:
           output.write_text(doc, encoding="utf-8")
           PY
 
+      - name: Collect unsigned deliverables
+        env:
+          PLATFORM_KEY: ${{ matrix.platform_key }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          DEST="unsigned/${PLATFORM_KEY}"
+          DEB="zallet_${RELEASE_VERSION}_${PACKAGE_ARCH}.deb"
+          mkdir -p "$DEST"
+          cp standalone/* "$DEST"/
+          cp -- "${DEB}" "${DEB}.sbom.spdx" "${DEB}.provenance.json" "$DEST/"
+
+      # `sign_artifacts` refuses to attest or sign anything that does not match
+      # this list exactly (same file set, same SHA-256), so a file changed or
+      # added between this job and that one is never signed.
+      - name: Record artifact digests
+        id: digests
+        env:
+          PLATFORM_KEY: ${{ matrix.platform_key }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          {
+            echo "digests-${PACKAGE_ARCH}<<ZALLET_DIGESTS_EOF"
+            (cd "unsigned/${PLATFORM_KEY}" && find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum --)
+            echo "ZALLET_DIGESTS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload unsigned artifacts for the signing job
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: unsigned-${{ matrix.platform_key }}
+          path: unsigned/${{ matrix.platform_key }}/*
+          if-no-files-found: error
+
+  # Attests and GPG-signs the artifacts built above. This is the only job,
+  # besides `apt_publish`, that can read the release signing key, so it runs
+  # no repository code: no checkout, no toolchain, no build tools, only
+  # GitHub-hosted runner tools (sha256sum, gpg, aws) and SHA-pinned actions.
+  # It signs exactly the files whose digests `binaries_deb_release` recorded,
+  # and fails closed on any mismatch or unexpected file.
+  sign_artifacts:
+    name: Attest and sign Zallet ${{ matrix.platform_key }} artifacts
+    runs-on: ubuntu-latest
+    needs: [platform_matrix, binaries_deb_release]
+    # The AWS role that reads the signing key trusts only OIDC tokens issued for
+    # this environment, whose deployment policy admits release refs only.
+    environment: release
+
+    permissions:
+      contents: read
+      id-token: write        # OIDC for Sigstore attestation and the AWS role
+      attestations: write    # required to persist the attestation
+
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.platform_matrix.outputs.matrix) }}
+
+    # As in `binaries_deb_release`, each leg sets only its own architecture's
+    # output.
+    outputs:
+      artifact-id-amd64: ${{ steps.release-id.outputs.artifact-id-amd64 }}
+      artifact-id-arm64: ${{ steps.release-id.outputs.artifact-id-arm64 }}
+
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      PLATFORM_KEY: ${{ matrix.platform_key }}
+      BINARY_SUFFIX: ${{ matrix.binary_suffix }}
+      PACKAGE_ARCH: ${{ matrix.arch }}
+
+    steps:
+      - name: Download unsigned artifacts
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: unsigned-${{ matrix.platform_key }}
+          path: unsigned
+
+      - name: Verify artifacts against the recorded digests
+        env:
+          DIGESTS_AMD64: ${{ needs.binaries_deb_release.outputs.digests-amd64 }}
+          DIGESTS_ARM64: ${{ needs.binaries_deb_release.outputs.digests-arm64 }}
+        run: |
+          set -euo pipefail
+          case "${PACKAGE_ARCH}" in
+            amd64) EXPECTED_DIGESTS="${DIGESTS_AMD64}" ;;
+            arm64) EXPECTED_DIGESTS="${DIGESTS_ARM64}" ;;
+            *) echo "::error::no digest list for architecture ${PACKAGE_ARCH}"; exit 1 ;;
+          esac
+          cd unsigned
+
+          TARBALL="zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.tar.gz"
+          DEB="zallet_${RELEASE_VERSION}_${PACKAGE_ARCH}.deb"
+          printf '%s\n' \
+            "${TARBALL}" "${TARBALL}.provenance.json" "${TARBALL}.sbom.spdx" \
+            "${DEB}" "${DEB}.provenance.json" "${DEB}.sbom.spdx" \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/expected-files"
+
+          # Only regular files, and exactly the expected set.
+          if [ -n "$(find . -mindepth 1 ! -type f -print -quit)" ]; then
+            echo "::error::unsigned artifact contains a non-regular file"
+            find . -mindepth 1 ! -type f
+            exit 1
+          fi
+          find . -mindepth 1 -type f -printf '%P\n' | LC_ALL=C sort > "${RUNNER_TEMP}/actual-files"
+          if ! diff -u "${RUNNER_TEMP}/expected-files" "${RUNNER_TEMP}/actual-files"; then
+            echo "::error::unsigned artifact file set differs from the expected set"
+            exit 1
+          fi
+
+          # The digest list from the build job must name exactly the same files,
+          # one well-formed `sha256sum` line each, and every digest must match.
+          printf '%s\n' "${EXPECTED_DIGESTS}" > "${RUNNER_TEMP}/expected.sha256"
+          if grep -Evq '^[0-9a-f]{64}  [A-Za-z0-9._+-]+$' "${RUNNER_TEMP}/expected.sha256"; then
+            echo "::error::malformed digest list from binaries_deb_release"
+            exit 1
+          fi
+          if ! cut -d' ' -f3 "${RUNNER_TEMP}/expected.sha256" | LC_ALL=C sort \
+              | diff -u "${RUNNER_TEMP}/expected-files" -; then
+            echo "::error::digest list does not cover exactly the expected files"
+            exit 1
+          fi
+          sha256sum --check --strict "${RUNNER_TEMP}/expected.sha256"
+
+      - name: Generate build provenance attestation for tarball
+        id: binary-attest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: unsigned/zallet-${{ env.RELEASE_VERSION }}-${{ matrix.binary_suffix }}.tar.gz
+
       - name: Generate build provenance attestation for .deb
         id: attest
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
-          subject-path: zallet_${{ env.RELEASE_VERSION }}_${{ matrix.arch }}.deb
+          subject-path: unsigned/zallet_${{ env.RELEASE_VERSION }}_${{ matrix.arch }}.deb
 
-      - name: Save .deb attestation bundle
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # The key is fetched only here, into a fresh GnuPG home under the runner's
+      # temp directory, and removed by the next step whatever the outcome.
+      - name: GPG sign tarball and Debian package
         env:
-          BUNDLE_PATH: ${{ steps.attest.outputs['bundle-path'] }}
-        run: |
-          cp -- "$BUNDLE_PATH" "zallet_${RELEASE_VERSION}_${{ matrix.arch }}.deb.intoto.jsonl"
-
-      - name: Collect release deliverables
+          GNUPGHOME: ${{ runner.temp }}/release-gnupg
         run: |
           set -euo pipefail
-          DEST="release/${{ matrix.platform_key }}"
+          mkdir -m 700 -- "${GNUPGHOME}"
+          # Pipe directly from Secrets Manager so the key is never written
+          # outside the ephemeral GnuPG home.
+          aws secretsmanager get-secret-value \
+            --secret-id /release/gpg-signing-key \
+            --query SecretString \
+            --output text | gpg --batch --import
+          for f in \
+            "unsigned/zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.tar.gz" \
+            "unsigned/zallet_${RELEASE_VERSION}_${PACKAGE_ARCH}.deb"; do
+            gpg --batch -u sysadmin@zodl.com --armor --digest-algo SHA256 --detach-sign "$f"
+            gpg --batch --verify "$f.asc" "$f"
+          done
+
+      - name: Remove signing key material
+        if: always()
+        env:
+          GNUPGHOME: ${{ runner.temp }}/release-gnupg
+        run: |
+          set -uo pipefail
+          if [ -e "${GNUPGHOME}" ]; then
+            gpgconf --kill all || true
+            gpgconf --remove-socketdir || true
+            find "${GNUPGHOME}" -type f -exec shred -u -- {} + || true
+            rm -rf -- "${GNUPGHOME}"
+          fi
+          test ! -e "${GNUPGHOME}"
+
+      - name: Collect release deliverables
+        env:
+          TARBALL_BUNDLE: ${{ steps.binary-attest.outputs['bundle-path'] }}
+          DEB_BUNDLE: ${{ steps.attest.outputs['bundle-path'] }}
+        run: |
+          set -euo pipefail
+          TARBALL="zallet-${RELEASE_VERSION}-${BINARY_SUFFIX}.tar.gz"
+          DEB="zallet_${RELEASE_VERSION}_${PACKAGE_ARCH}.deb"
+          DEST="release/${PLATFORM_KEY}"
           mkdir -p "$DEST"
-          cp standalone/* "$DEST"/
-          cp zallet_${RELEASE_VERSION}_${{ matrix.arch }}.deb "$DEST/"
-          cp zallet_${RELEASE_VERSION}_${{ matrix.arch }}.deb.asc "$DEST/"
-          cp zallet_${RELEASE_VERSION}_${{ matrix.arch }}.deb.sbom.spdx "$DEST/"
-          cp zallet_${RELEASE_VERSION}_${{ matrix.arch }}.deb.intoto.jsonl "$DEST/"
-          cp zallet_${RELEASE_VERSION}_${{ matrix.arch }}.deb.provenance.json "$DEST/"
+          for f in \
+            "${TARBALL}" "${TARBALL}.asc" "${TARBALL}.provenance.json" "${TARBALL}.sbom.spdx" \
+            "${DEB}" "${DEB}.asc" "${DEB}.provenance.json" "${DEB}.sbom.spdx"; do
+            cp -- "unsigned/$f" "$DEST/"
+          done
+          cp -- "$TARBALL_BUNDLE" "$DEST/${TARBALL}.intoto.jsonl"
+          cp -- "$DEB_BUNDLE" "$DEST/${DEB}.intoto.jsonl"
 
       - name: Upload artifacts for publish job
+        id: upload
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: release-${{ matrix.platform_key }}
           path: release/${{ matrix.platform_key }}/*
+          if-no-files-found: error
 
-  # Single APT-index publish for ALL architectures. The per-arch matrix only
-  # builds + signs + uploads its .deb (as release-<platform_key> artifacts); this
+      - name: Record release artifact ID
+        id: release-id
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: echo "artifact-id-${PACKAGE_ARCH}=${ARTIFACT_ID}" >> "$GITHUB_OUTPUT"
+
+  # The downstream jobs fetch the signed artifacts by the IDs `sign_artifacts`
+  # returned, not by a name pattern, so an artifact uploaded by any other job
+  # of this run (including one running repository code) is never published.
+  release_artifacts:
+    name: Select signed release artifacts
+    runs-on: ubuntu-latest
+    needs: [platform_matrix, sign_artifacts]
+    outputs:
+      ids: ${{ steps.select.outputs.ids }}
+    steps:
+      - id: select
+        env:
+          MATRIX: ${{ needs.platform_matrix.outputs.matrix }}
+          ID_AMD64: ${{ needs.sign_artifacts.outputs.artifact-id-amd64 }}
+          ID_ARM64: ${{ needs.sign_artifacts.outputs.artifact-id-arm64 }}
+        run: |
+          set -euo pipefail
+          ids=()
+          while IFS= read -r arch; do
+            case "${arch}" in
+              amd64) id="${ID_AMD64}" ;;
+              arm64) id="${ID_ARM64}" ;;
+              *) echo "::error::unexpected architecture ${arch}"; exit 1 ;;
+            esac
+            if [[ ! "${id}" =~ ^[0-9]+$ ]]; then
+              echo "::error::no signed release artifact for ${arch}"
+              exit 1
+            fi
+            ids+=("${id}")
+          done < <(jq -r '.[].arch' <<< "${MATRIX}")
+          (IFS=,; echo "ids=${ids[*]}") >> "$GITHUB_OUTPUT"
+
+  # Single APT-index publish for ALL architectures. The per-arch matrices only
+  # build, sign and upload their .deb (as release-<platform_key> artifacts); this
   # job ingests every arch's .deb, builds ONE merged snapshot per distribution,
   # and publishes it with `-architectures=amd64,arm64` + a single S3 sync — so
   # the signed dists/ index lists BOTH arches consistently (no parallel race).
   apt_publish:
     name: Publish multi-arch APT index
-    needs: binaries_deb_release
+    needs: release_artifacts
     runs-on: ubuntu-latest
+    # The AWS role that reads the signing key trusts only OIDC tokens issued for
+    # this environment, whose deployment policy admits release refs only.
+    environment: release
     permissions:
       contents: read
       id-token: write
@@ -649,7 +831,7 @@ jobs:
         with:
           path: debs
           merge-multiple: true
-          pattern: release-*
+          artifact-ids: ${{ needs.release_artifacts.outputs.ids }}
       - name: Install aptly + tooling
         run: |
           set -euo pipefail
@@ -665,23 +847,20 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
-      - name: Import GPG signing key from Secrets Manager
-        run: |
-          set -euo pipefail
-          aws secretsmanager get-secret-value --secret-id /release/gpg-signing-key \
-            --query SecretString --output text | gpg --batch --import
       - name: Build distribution list
         run: |
           set -euo pipefail
           echo "${APT_DISTRIBUTIONS}" | tr ',' '\n' | sed '/^$/d' > /tmp/dists.txt
           echo "dists:"; cat /tmp/dists.txt
+      # Like `sign_artifacts`, this job runs no repository code. The key lives in
+      # an ephemeral GnuPG home only while aptly signs the index, and is removed
+      # before the S3 upload.
       - name: Publish merged multi-arch APT index
         env:
           APT_BUCKET: ${{ secrets.AWS_APT_BUCKET }}
+          GNUPGHOME: ${{ runner.temp }}/release-gnupg
         run: |
           set -euo pipefail
-          key=$(gpg --list-secret-keys --keyid-format=long sysadmin@zodl.com | head -n 2 | grep -v sec | tr -d ' ')
-
           # We REGENERATE the index from the .deb pool instead of `aptly mirror`-ing
           # the live repo. Two reasons:
           #   1. aptly's strict parser rejects the existing apt.z.cash Packages with
@@ -697,6 +876,11 @@ jobs:
           mkdir -p poolcache
           aws s3 sync "s3://${APT_BUCKET}/pool/" poolcache/ --no-progress --exclude '*' --include '*.deb'
           echo "pool debs pulled: $(find poolcache -name '*.deb' | wc -l)"
+
+          mkdir -m 700 -- "${GNUPGHOME}"
+          aws secretsmanager get-secret-value --secret-id /release/gpg-signing-key \
+            --query SecretString --output text | gpg --batch --import
+          key=$(gpg --list-secret-keys --keyid-format=long sysadmin@zodl.com | head -n 2 | grep -v sec | tr -d ' ')
 
           mapfile -t dists < /tmp/dists.txt
           for dist in "${dists[@]}"; do
@@ -720,6 +904,19 @@ jobs:
             # ONE publish per suite with BOTH architectures → consistent dists/ index.
             aptly publish snapshot -architectures=amd64,arm64 -gpg-key="$key" -distribution="$dist" "$snap"
           done
+      - name: Remove signing key material
+        if: always()
+        env:
+          GNUPGHOME: ${{ runner.temp }}/release-gnupg
+        run: |
+          set -uo pipefail
+          if [ -e "${GNUPGHOME}" ]; then
+            gpgconf --kill all || true
+            gpgconf --remove-socketdir || true
+            find "${GNUPGHOME}" -type f -exec shred -u -- {} + || true
+            rm -rf -- "${GNUPGHOME}"
+          fi
+          test ! -e "${GNUPGHOME}"
       - name: Sync merged index + pool to apt.z.cash (single writer)
         run: |
           set -euo pipefail
@@ -733,7 +930,7 @@ jobs:
 
   publish:
     name: Create/Update GitHub Release (aggregate)
-    needs: binaries_deb_release
+    needs: release_artifacts
     if: ${{ startsWith(inputs.version, 'v') }}
     runs-on: ubuntu-latest
     permissions:
@@ -747,7 +944,7 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-          pattern: release-*
+          artifact-ids: ${{ needs.release_artifacts.outputs.ids }}
 
       - name: Publish/Update GitHub Release (incremental)
         uses: softprops/action-gh-release@6cbd405e2c4e67a21c47fa9e383d020e4e28b836 # v2.3.3

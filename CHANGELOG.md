@@ -37,6 +37,11 @@ be considered breaking changes.
 
 ### Changed
 
+- The release signing key is no longer available to the release job that
+  builds the standalone archives and `.deb` packages from repository-controlled
+  packaging inputs. The artifacts are now signed in a separate job that runs no
+  repository code and signs only files matching the digests recorded at build
+  time. The published artifacts, their names and the signing key are unchanged.
 - The wallet database file is now created with a protected owner-only ACL on
   Windows, matching the owner-only mode `0600` it already used on Unix
   (previously it inherited the data directory's access control there). An
