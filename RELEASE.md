@@ -168,20 +168,31 @@ Triggered by the `v*.*.*` tag push, `release.yml` runs:
 5. **binaries_deb_release** (matrix: amd64 + arm64) — extracts the two binaries
    (`zallet`, `zallet-zebra`) from the image, smoke-tests each
    (`zallet -h` in a Debian container), builds a standalone tarball per arch,
-   builds a `.deb` per arch (via `cargo deb --no-build`), GPG-signs each
-   artifact (`sysadmin@zodl.com`), generates SPDX SBOMs and build-provenance
-   attestations, and uploads everything as release artifacts.
-6. **apt_publish** — regenerates the APT index from the `.deb` pool with
+   builds a `.deb` per arch (via `cargo deb --no-build`), generates SPDX SBOMs,
+   uploads the unsigned artifacts, and records their SHA-256 digests as job
+   outputs. This job runs repository-controlled packaging inputs, so this
+   workflow gives it no signing key, AWS credentials, or OIDC token.
+6. **sign_artifacts** (matrix: amd64 + arm64) — runs no repository code (no
+   checkout, no build tools). It checks the downloaded artifacts against the
+   recorded digests (failing on any mismatch or unexpected file), generates
+   the build-provenance attestations, and GPG-signs the tarball and `.deb`
+   (`sysadmin@zodl.com`) with the key fetched into an ephemeral GnuPG home
+   that a final `always()` step deletes.
+7. **apt_publish** — takes the signed `.deb`s by artifact ID from
+   `sign_artifacts`, regenerates the APT index from the `.deb` pool with
    `aptly`, publishes to the `apt.z.cash` S3 bucket (bullseye + bookworm,
-   both architectures in one consistent index).
-7. **publish** — creates or updates the GitHub Release with auto-generated
+   both architectures in one consistent index). The signing key is held in an
+   ephemeral GnuPG home only while the index is signed.
+8. **publish** — creates or updates the GitHub Release with auto-generated
    notes and all artifacts (tarballs, `.deb`s, signatures, SBOMs, attestation
    bundles).
 
 The pipeline requires these secrets (configured in the repo or via OIDC):
 
 - `ZODLINC_DOCKERHUB_USERNAME` / `ZODLINC_DOCKERHUB_PASSWORD` — Docker Hub push.
-- `AWS_ROLE_ARN` / `AWS_APT_BUCKET` — APT index publishing to S3.
+- `AWS_ROLE_ARN` / `AWS_APT_BUCKET` — APT index publishing to S3. The role is
+  assumed only by `sign_artifacts` and `apt_publish`, which run in the `release`
+  environment (deployments allowed from `v*.*.*` tags, `main` and `release/*`).
 - `/release/gpg-signing-key` (AWS Secrets Manager) — GPG signing key for
   tarballs and `.deb`s.
 
