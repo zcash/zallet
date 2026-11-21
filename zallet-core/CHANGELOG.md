@@ -21,6 +21,13 @@ should be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- A `bounded-scan-certification` feature exposes
+  `components::bounded_scan_certification`, the bounded-scan entry point that
+  backend integration tests use to certify a chain backend against a real
+  wallet database. Production binaries must not enable it.
+
 ## [0.1.0-beta.4] - 2026-11-01
 
 ### Changed
