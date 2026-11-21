@@ -18,7 +18,7 @@ use crate::components::{
         },
     },
     keystore::{KeyStore, SeedSelectionError},
-    sync::WalletDecryptorHandle,
+    sync::WalletSyncReconfiguration,
 };
 
 /// Response to a `z_getnewaccount` RPC request.
@@ -107,7 +107,7 @@ pub(crate) async fn call<C: Chain>(
     wallet: &Database,
     keystore: &KeyStore,
     chain: C,
-    decryptor: &WalletDecryptorHandle,
+    reconfiguration: &WalletSyncReconfiguration,
     account_name: &str,
     seedfp: Option<&str>,
 ) -> Response {
@@ -136,7 +136,7 @@ pub(crate) async fn call<C: Chain>(
     // All key material is in hand before the birthday is chosen, so the window in which
     // the sync engine can scan past it spans only the treestate fetch.
     let mut attempt = 1;
-    let account_id = loop {
+    let (account_id, admitted) = loop {
         let chain_view = chain
             .snapshot()
             .await
@@ -166,8 +166,9 @@ pub(crate) async fn call<C: Chain>(
         )
         .await?;
 
+        let admitted = reconfiguration.admit_reconfiguration().await;
         match create_account_below_scanned_tip(wallet, account_name, &seed, &birthday).await? {
-            Creation::Created(account_id) => break account_id,
+            Creation::Created(account_id) => break (account_id, admitted),
             Creation::ScannedPastBirthday(scanned) if attempt < MAX_BIRTHDAY_ATTEMPTS => {
                 tracing::info!(
                     "Wallet scanned block {scanned} while choosing birthday {} for the new \
@@ -187,7 +188,7 @@ pub(crate) async fn call<C: Chain>(
     };
 
     // Reload viewing keys so the new account is scanned without a restart (see z_importkey).
-    if decryptor.reload_keys().await.is_none() {
+    if !admitted.reload_keys_and_wake_wallet_recovery().await {
         tracing::warn!("sync engine has shut down; new account won't be scanned until restart");
     }
 

@@ -15,7 +15,7 @@ use crate::components::{
         utils::{fetch_account_birthday, wallet_handle},
     },
     keystore::KeyStore,
-    sync::WalletDecryptorHandle,
+    sync::WalletSyncReconfiguration,
 };
 
 /// Response to a `z_importkey` RPC request.
@@ -89,7 +89,7 @@ pub(crate) async fn call<C: Chain>(
     wallet: &Database,
     keystore: &KeyStore,
     chain: C,
-    decryptor: &WalletDecryptorHandle,
+    reconfiguration: &WalletSyncReconfiguration,
     key: &str,
     rescan: Option<&str>,
     start_height: Option<u64>,
@@ -187,6 +187,10 @@ pub(crate) async fn call<C: Chain>(
     // wallet-database transaction: the account and its key commit together or not at all, so
     // the wallet can never track an account whose key is missing, nor hold a key for an
     // account it doesn't scan.
+    //
+    // Exclude block scans before acquiring the connection for the transaction, so sync cannot
+    // commit a block that misses the imported key.
+    let admitted = reconfiguration.admit_reconfiguration().await;
     wallet_handle(wallet)
         .await?
         .with_mut(|mut db_data| {
@@ -221,10 +225,10 @@ pub(crate) async fn call<C: Chain>(
         })?;
 
     // Reload viewing keys so the key is scanned without a restart. Run this unconditionally:
-    // a re-import must be able to repair an account the sync engine never loaded. Don't wait
-    // for the reload to be processed; the marker is queued behind any blocks already in the
-    // decryptor, so awaiting it could block this call for a long time during sync.
-    if decryptor.reload_keys().await.is_none() {
+    // a re-import must be able to repair an account the sync engine never loaded. The admitted
+    // reconfiguration orders the reload after earlier block scans and keeps later scans out until
+    // the decryptor acknowledges it.
+    if !admitted.reload_keys_and_wake_wallet_recovery().await {
         tracing::warn!("sync engine has shut down; imported key won't be scanned until restart");
     }
 
