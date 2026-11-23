@@ -29,12 +29,18 @@ use std::time::Duration;
 use jsonrpsee::core::JsonValue;
 use tempfile::TempDir;
 use zcash_client_backend::{
-    data_api::{AccountBirthday, BlockMetadata, WalletRead, WalletWrite, chain::ChainState},
+    data_api::{
+        Account as _, AccountBirthday, BlockMetadata, WalletRead, WalletWrite, chain::ChainState,
+    },
+    keys::UnifiedAddressRequest,
     proto::compact_formats::CompactBlock,
     scanning::{ScanningKeys, SpendIdentifiers, scan_block},
 };
 use zcash_client_sqlite::AccountUuid;
-use zcash_keys::encoding::{AddressCodec, encode_extended_spending_key, encode_payment_address};
+use zcash_keys::{
+    encoding::{AddressCodec, encode_extended_spending_key, encode_payment_address},
+    keys::transparent::gap_limits::GapLimits,
+};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
@@ -52,6 +58,7 @@ use crate::components::{
     },
     sync::WalletSync,
 };
+use crate::config::TransparentGapLimitPolicy;
 
 /// A connection pool of exactly one connection: the smallest pool on which a correctly
 /// staged method can make progress at all, and the one on which holding a connection
@@ -359,9 +366,294 @@ fn z_getaddressforaccount_completes_on_a_saturated_pool() {
             JsonValue::Number(0u32.into()),
             None,
             None,
+            TransparentGapLimitPolicy::Enforce,
         ))
         .await
         .expect("derives an address for the account");
+    });
+}
+
+/// Receivers for which every transparent child index yields an address, so sequential
+/// issuance never has to skip one.
+const TRANSPARENT_AND_ORCHARD: [&str; 2] = ["p2pkh", "orchard"];
+
+/// More addresses than a gap window holds, so that issuing this many crosses it.
+fn addresses_across_the_gap_window() -> u32 {
+    3 * GapLimits::default().external()
+}
+
+/// The indices sequential issuance is expected to hand out, in order: every index
+/// except `taken`, which were issued some other way.
+fn sequential_indices(taken: &[u128]) -> impl Iterator<Item = u128> + '_ {
+    (0..).filter(|index| !taken.contains(index))
+}
+
+/// The diversifier index of the address the account exposed when it was created, which
+/// sequential issuance therefore never hands out.
+async fn default_address_index(db: &Database, account_id: AccountUuid) -> u128 {
+    let handle = db.handle().await.expect("acquires a connection");
+    let (_, index) = handle
+        .as_ref()
+        .get_account(account_id)
+        .expect("reads the account")
+        .expect("the account exists")
+        .uivk()
+        .default_address(UnifiedAddressRequest::AllAvailableKeys)
+        .expect("the account has a default address");
+    index.into()
+}
+
+/// Requests the next address with a transparent receiver, or the one at `index`,
+/// returning its diversifier index and encoding.
+async fn transparent_address(
+    db: &Database,
+    keystore: &KeyStore,
+    receiver_types: &[&str],
+    index: Option<u128>,
+    policy: TransparentGapLimitPolicy,
+) -> Result<(u128, String), jsonrpsee::types::ErrorObjectOwned> {
+    get_address_for_account::call(
+        db,
+        keystore.clone(),
+        JsonValue::Number(0u32.into()),
+        Some(receiver_types.iter().map(|r| r.to_string()).collect()),
+        index,
+        policy,
+    )
+    .await
+    .map(|address| {
+        let json = serde_json::to_value(address).expect("serializes");
+        (
+            json["diversifier_index"].as_u64().expect("an index").into(),
+            json["address"].as_str().expect("an address").to_owned(),
+        )
+    })
+}
+
+/// By default, sequential issuance stops once every address in the gap window has been
+/// handed out, and keeps failing at the same index.
+#[test]
+fn z_getaddressforaccount_stops_at_the_transparent_gap_limit_by_default() {
+    let datadir = tempfile::tempdir().unwrap();
+
+    run_async(|| async {
+        let (keystore, db, account_id) = wallet_with_account(&datadir).await;
+        let window_end = u128::from(GapLimits::default().external());
+        let default_index = default_address_index(&db, account_id).await;
+
+        let mut issued = Vec::new();
+        let err = loop {
+            match transparent_address(
+                &db,
+                &keystore,
+                &TRANSPARENT_AND_ORCHARD,
+                None,
+                TransparentGapLimitPolicy::Enforce,
+            )
+            .await
+            {
+                Ok((index, _)) => issued.push(index),
+                Err(e) => break e,
+            }
+        };
+
+        assert_eq!(
+            issued,
+            sequential_indices(&[default_index])
+                .take_while(|index| *index < window_end)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(err.code(), LegacyCode::Wallet as i32);
+        assert!(
+            err.message().contains(&format!("at index {window_end}.")),
+            "{err:?}"
+        );
+    });
+}
+
+/// With `IssuePast`, sequential issuance carries on across the end of the gap window,
+/// handing out each index once and in order.
+#[test]
+fn z_getaddressforaccount_issues_past_the_transparent_gap_limit_when_allowed() {
+    let datadir = tempfile::tempdir().unwrap();
+
+    run_async(|| async {
+        let (keystore, db, account_id) = wallet_with_account(&datadir).await;
+        let default_index = default_address_index(&db, account_id).await;
+
+        let mut indices = Vec::new();
+        let mut addresses = std::collections::BTreeSet::new();
+        for _ in 0..addresses_across_the_gap_window() {
+            let (index, address) = transparent_address(
+                &db,
+                &keystore,
+                &TRANSPARENT_AND_ORCHARD,
+                None,
+                TransparentGapLimitPolicy::IssuePast,
+            )
+            .await
+            .expect("issues an address");
+            indices.push(index);
+            addresses.insert(address);
+        }
+
+        assert_eq!(
+            indices,
+            sequential_indices(&[default_index])
+                .take(indices.len())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(addresses.len(), indices.len());
+    });
+}
+
+/// An index past the gap window that was already issued on request is not handed out a
+/// second time by sequential issuance.
+#[test]
+fn z_getaddressforaccount_past_the_gap_limit_skips_explicitly_issued_indices() {
+    let datadir = tempfile::tempdir().unwrap();
+
+    run_async(|| async {
+        let (keystore, db, account_id) = wallet_with_account(&datadir).await;
+        let default_index = default_address_index(&db, account_id).await;
+        let explicit = u128::from(GapLimits::default().external()) + 2;
+
+        transparent_address(
+            &db,
+            &keystore,
+            &TRANSPARENT_AND_ORCHARD,
+            Some(explicit),
+            TransparentGapLimitPolicy::IssuePast,
+        )
+        .await
+        .expect("issues the requested index");
+
+        let mut indices = Vec::new();
+        for _ in 0..addresses_across_the_gap_window() {
+            let (index, _) = transparent_address(
+                &db,
+                &keystore,
+                &TRANSPARENT_AND_ORCHARD,
+                None,
+                TransparentGapLimitPolicy::IssuePast,
+            )
+            .await
+            .expect("issues an address");
+            indices.push(index);
+        }
+
+        let expected = sequential_indices(&[default_index, explicit])
+            .take(indices.len())
+            .collect::<Vec<_>>();
+        assert_eq!(indices, expected);
+    });
+}
+
+/// An index past the gap window that was issued on request without a transparent receiver
+/// is taken as well: sequential issuance moves on to the next index, where asking the
+/// wallet for a second address at the same index would fail the request.
+#[test]
+fn z_getaddressforaccount_past_the_gap_limit_skips_shielded_only_indices() {
+    let datadir = tempfile::tempdir().unwrap();
+
+    run_async(|| async {
+        let (keystore, db, account_id) = wallet_with_account(&datadir).await;
+        let default_index = default_address_index(&db, account_id).await;
+        let shielded_only = u128::from(GapLimits::default().external()) + 1;
+
+        transparent_address(
+            &db,
+            &keystore,
+            &["orchard"],
+            Some(shielded_only),
+            TransparentGapLimitPolicy::IssuePast,
+        )
+        .await
+        .expect("issues the requested index");
+
+        let mut indices = Vec::new();
+        for _ in 0..addresses_across_the_gap_window() {
+            let (index, _) = transparent_address(
+                &db,
+                &keystore,
+                &TRANSPARENT_AND_ORCHARD,
+                None,
+                TransparentGapLimitPolicy::IssuePast,
+            )
+            .await
+            .expect("issues an address");
+            indices.push(index);
+        }
+
+        let expected = sequential_indices(&[default_index, shielded_only])
+            .take(indices.len())
+            .collect::<Vec<_>>();
+        assert_eq!(indices, expected);
+    });
+}
+
+/// With a Sapling receiver required, indices that have no valid Sapling diversifier are
+/// passed over on both sides of the gap window, and no index is issued twice.
+#[test]
+fn z_getaddressforaccount_past_the_gap_limit_passes_over_unusable_indices() {
+    let datadir = tempfile::tempdir().unwrap();
+
+    run_async(|| async {
+        let (keystore, db, _account_id) = wallet_with_account(&datadir).await;
+
+        let mut indices = Vec::new();
+        for _ in 0..addresses_across_the_gap_window() {
+            // No receiver types: the default of every receiver, Sapling included.
+            let (index, _) = get_address_for_account::call(
+                &db,
+                keystore.clone(),
+                JsonValue::Number(0u32.into()),
+                None,
+                None,
+                TransparentGapLimitPolicy::IssuePast,
+            )
+            .await
+            .map(|address| {
+                let json = serde_json::to_value(address).expect("serializes");
+                (json["diversifier_index"].as_u64().expect("an index"), ())
+            })
+            .expect("issues an address");
+            indices.push(index);
+        }
+
+        assert!(
+            indices.windows(2).all(|pair| pair[0] < pair[1]),
+            "{indices:?}"
+        );
+        assert!(
+            indices.last().copied() >= Some(addresses_across_the_gap_window().into()),
+            "{indices:?}"
+        );
+    });
+}
+
+/// A request without a transparent receiver is not subject to the gap limit, under
+/// either policy.
+#[test]
+fn z_getaddressforaccount_without_a_transparent_receiver_ignores_the_gap_limit() {
+    let datadir = tempfile::tempdir().unwrap();
+
+    run_async(|| async {
+        let (keystore, db, _account_id) = wallet_with_account(&datadir).await;
+
+        for policy in [
+            TransparentGapLimitPolicy::Enforce,
+            TransparentGapLimitPolicy::IssuePast,
+        ] {
+            let mut addresses = std::collections::BTreeSet::new();
+            for _ in 0..addresses_across_the_gap_window() {
+                let (_, address) = transparent_address(&db, &keystore, &["orchard"], None, policy)
+                    .await
+                    .expect("issues a shielded address");
+                addresses.insert(address);
+            }
+            assert_eq!(addresses.len(), addresses_across_the_gap_window() as usize);
+        }
     });
 }
 
