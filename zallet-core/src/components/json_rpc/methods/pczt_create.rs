@@ -6,6 +6,7 @@
 
 use std::convert::Infallible;
 
+use abscissa_core::Application;
 use documented::Documented;
 use jsonrpsee::core::{JsonValue, RpcResult};
 use pczt::Pczt;
@@ -39,13 +40,14 @@ use crate::{
             fund_source::FundSource,
             payments::{
                 AmountParameter, PrivacyPolicy, build_request, confirmations_policy_for_minconf,
-                get_account_for_address, parse_privacy_policy, propose_and_check,
-                required_privacy_policy, spend_policy_for,
+                expiry_height_override, get_account_for_address, parse_privacy_policy,
+                propose_and_check, required_privacy_policy, spend_policy_for,
             },
             server::LegacyCode,
         },
     },
     fl,
+    prelude::APP,
 };
 
 /// Maximum number of recipients accepted in a single `pczt_create` call.
@@ -220,6 +222,11 @@ pub(super) fn build_pczt(
     // Build the PCZT from the proposal. This selects inputs, computes change,
     // runs IO finalization, and records the native ZIP 32 / BIP 32 derivation
     // metadata, but does not create proofs or signatures.
+    let expiry_height = expiry_height_override(
+        wallet.as_ref(),
+        &proposal,
+        APP.config().builder.tx_expiry_delta(),
+    );
     let pczt = create_pczt_from_proposal::<_, _, Infallible, _, Infallible, _>(
         wallet.as_mut(),
         &params,
@@ -228,8 +235,7 @@ pub(super) fn build_pczt(
         account.id(),
         OvkPolicy::Sender,
         &proposal,
-        // Do not override the builder-derived expiry height.
-        None,
+        expiry_height,
         // Our proposal uses the default (padded) Orchard change strategy, so the
         // padding must match it. `pczt_sign` relies on this too: the padding
         // dummies are signed here, at creation, and it skips them rather than

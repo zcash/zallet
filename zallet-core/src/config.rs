@@ -199,6 +199,66 @@ impl ZalletConfig {
     }
 }
 
+/// A number of blocks after which an unmined transaction becomes invalid, as set by
+/// `builder.tx_expiry_delta`.
+///
+/// Always at least [`TxExpiryDelta::MIN`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "u16", into = "u16")]
+pub struct TxExpiryDelta(u16);
+
+impl TxExpiryDelta {
+    /// The smallest delta accepted.
+    ///
+    /// This is `zcashd`'s minimum for `-txexpirydelta`, one more than its
+    /// `TX_EXPIRING_SOON_THRESHOLD` of 3 blocks: `zcashd` nodes do not accept into
+    /// their mempool a transaction that expires within that many blocks, so a smaller
+    /// delta produces transactions they would never relay.
+    pub const MIN: u16 = 4;
+
+    /// The delta, in blocks.
+    pub fn blocks(self) -> u32 {
+        self.0.into()
+    }
+}
+
+impl TryFrom<u16> for TxExpiryDelta {
+    type Error = TxExpiryDeltaTooSmall;
+
+    fn try_from(blocks: u16) -> Result<Self, Self::Error> {
+        if blocks >= Self::MIN {
+            Ok(Self(blocks))
+        } else {
+            Err(TxExpiryDeltaTooSmall { blocks })
+        }
+    }
+}
+
+/// A transaction expiry delta below [`TxExpiryDelta::MIN`] was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TxExpiryDeltaTooSmall {
+    blocks: u16,
+}
+
+impl std::fmt::Display for TxExpiryDeltaTooSmall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a transaction expiry delta must be at least {} blocks, but {} was given",
+            TxExpiryDelta::MIN,
+            self.blocks,
+        )
+    }
+}
+
+impl std::error::Error for TxExpiryDeltaTooSmall {}
+
+impl From<TxExpiryDelta> for u16 {
+    fn from(delta: TxExpiryDelta) -> Self {
+        delta.0
+    }
+}
+
 /// Settings that affect transactions created by Zallet.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
@@ -223,8 +283,15 @@ pub struct BuilderSection {
     /// The number of blocks after which a transaction created by Zallet that has not been
     /// mined will become invalid.
     ///
-    /// - Minimum: `TX_EXPIRING_SOON_THRESHOLD + 1`
-    pub tx_expiry_delta: Option<u16>,
+    /// A transaction is built to expire this many blocks after the first block it could
+    /// be mined in. When unset, the network's default applies: 40 blocks, or 120 blocks
+    /// once NU7 is active.
+    ///
+    /// A transfer from Orchard to Ironwood that takes the standard ZIP 318 migration
+    /// shape always uses the expiry height ZIP 318 specifies, whatever this is set to.
+    ///
+    /// - Minimum: 4
+    pub tx_expiry_delta: Option<TxExpiryDelta>,
 
     /// The number of confirmations required for an untrusted transaction output (TXO) to
     /// become spendable.
@@ -272,12 +339,12 @@ impl BuilderSection {
     }
 
     /// The number of blocks after which a transaction created by Zallet that has not been
-    /// mined will become invalid.
+    /// mined will become invalid, if the operator has set one.
     ///
-    /// - Minimum: `TX_EXPIRING_SOON_THRESHOLD + 1`
-    /// - Default: 40
-    pub fn tx_expiry_delta(&self) -> u16 {
-        self.tx_expiry_delta.unwrap_or(40)
+    /// `None` leaves the choice to the transaction builder, which uses the network's
+    /// default.
+    pub fn tx_expiry_delta(&self) -> Option<TxExpiryDelta> {
+        self.tx_expiry_delta
     }
 
     /// The number of confirmations required for an untrusted transaction output (TXO) to
@@ -1306,8 +1373,73 @@ impl ZalletConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendName, ZalletConfig};
+    use super::{BackendName, BuilderSection, TxExpiryDelta, ZalletConfig};
     use zcash_protocol::consensus::NetworkType;
+
+    /// Parses a `[builder]` section holding `options` and nothing else.
+    fn parse_builder(options: &str) -> Result<BuilderSection, toml::de::Error> {
+        toml::from_str(&format!("{options}\n[limits]\n"))
+    }
+
+    /// Leaving the option out leaves the expiry to the transaction builder.
+    #[test]
+    fn tx_expiry_delta_is_unset_by_default() {
+        let builder = parse_builder("").expect("an empty section parses");
+        assert_eq!(builder.tx_expiry_delta(), None);
+    }
+
+    /// Every delta from the minimum up is accepted and read back unchanged.
+    #[test]
+    fn tx_expiry_delta_accepts_the_minimum_and_above() {
+        for blocks in [TxExpiryDelta::MIN, TxExpiryDelta::MIN + 1, u16::MAX] {
+            let builder = parse_builder(&format!("tx_expiry_delta = {blocks}"))
+                .expect("a delta at or above the minimum parses");
+            assert_eq!(
+                builder.tx_expiry_delta().map(TxExpiryDelta::blocks),
+                Some(u32::from(blocks)),
+            );
+        }
+    }
+
+    /// A delta below the minimum is a config error that names the minimum, rather than a
+    /// setting that produces transactions other nodes will not relay.
+    #[test]
+    fn tx_expiry_delta_rejects_values_below_the_minimum() {
+        for blocks in 0..TxExpiryDelta::MIN {
+            let err = parse_builder(&format!("tx_expiry_delta = {blocks}"))
+                .expect_err("a delta below the minimum is rejected");
+            assert!(
+                err.to_string()
+                    .contains(&format!("at least {} blocks", TxExpiryDelta::MIN)),
+                "unexpected error for {blocks}: {err}",
+            );
+        }
+    }
+
+    /// Values that are not a block count at all are rejected too.
+    #[test]
+    fn tx_expiry_delta_rejects_values_that_are_not_a_block_count() {
+        for value in ["-1", "65536", "4.5", "\"40\""] {
+            let err = parse_builder(&format!("tx_expiry_delta = {value}"))
+                .expect_err("a value that is not a block count is rejected");
+            assert!(
+                err.to_string().contains("tx_expiry_delta"),
+                "unexpected error for {value}: {err}",
+            );
+        }
+    }
+
+    /// A delta is written back to a config file as the plain number it was read from.
+    #[test]
+    fn tx_expiry_delta_round_trips() {
+        let option = "tx_expiry_delta = 10";
+        let builder = parse_builder(option).expect("a valid delta parses");
+        let written = toml::to_string(&builder).expect("serializes");
+        assert!(
+            written.lines().any(|line| line == option),
+            "unexpected output: {written}",
+        );
+    }
 
     #[cfg(zallet_build = "wallet")]
     use super::{ConsensusSection, KeyStoreSection};

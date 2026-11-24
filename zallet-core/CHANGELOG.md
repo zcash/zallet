@@ -21,6 +21,17 @@ should be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `zallet_core::config::{TxExpiryDelta, TxExpiryDeltaTooSmall}`.
+
+### Changed
+
+- `zallet_core::config::BuilderSection::tx_expiry_delta` is now an
+  `Option<TxExpiryDelta>` instead of an `Option<u16>`, and
+  `BuilderSection::tx_expiry_delta()` returns an `Option<TxExpiryDelta>`
+  instead of a `u16`.
+
 ## [0.1.0-beta.4] - 2026-11-01
 
 ### Changed
