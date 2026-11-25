@@ -644,8 +644,8 @@ Use the `z_getaddressforaccount` RPC method to obtain addresses for an account.
 Sends funds from an account in one shot, signing and broadcasting the
 transaction.
 
-Unlike `z_sendmany`, the source of funds is an account UUID together
-with an explicit fund source, rather than an address. The transaction is
+The account UUID and explicit fund source are separate parameters, rather
+than a single `fromaddress` as in `z_sendmany`. The transaction is
 assembled through the same pipeline as the `pczt_*` methods (create,
 prove, sign, extract); use those methods directly to inspect a
 transaction before executing it. Unlike `z_sendmany`, the call completes
@@ -741,10 +741,10 @@ TODO: <https://github.com/zcash/zallet/issues/137>
   - `"AllowFullyTransparent"`: Allow transaction to both spend transparent funds
     and have transparent recipients. This implies revealing information described
     under `"AllowRevealedSenders"` and `"AllowRevealedRecipients"`.
-  - `"AllowLinkingAccountAddresses"`: Allow selecting transparent coins from the
-    full account, rather than just the funds sent to the transparent receiver in
-    the provided Unified Address. This implies revealing information described
-    under `"AllowRevealedSenders"`.
+  - `"AllowLinkingAccountAddresses"`: Allow linking transparent addresses of the
+    same account. This implies revealing information described under
+    `"AllowRevealedSenders"`. The source of funds is selected by `fromaddress`,
+    not by this policy.
   - `"NoPrivacy"`: Allow the transaction to reveal any information necessary to
     create it. This implies revealing information described under
     `"AllowFullyTransparent"` and `"AllowLinkingAccountAddresses"`.

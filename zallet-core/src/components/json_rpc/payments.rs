@@ -477,8 +477,9 @@ pub(super) enum PrivacyPolicy {
     /// [`PrivacyPolicy::AllowRevealedRecipients`].
     AllowFullyTransparent,
 
-    /// Allow selecting transparent coins from the full account, rather than just the
-    /// funds sent to the transparent receiver in the provided Unified Address.
+    /// Allow linking transparent addresses belonging to the same account.
+    ///
+    /// This acknowledges the proposal's linkage; it does not change input selection.
     ///
     /// This implies revealing information described under
     /// [`PrivacyPolicy::AllowRevealedSenders`].
@@ -2288,17 +2289,19 @@ mod proposal_policy_tests {
 
     use incrementalmerkletree::Position;
     use nonempty::NonEmpty;
+    use transparent::bundle::{OutPoint, TxOut};
     use zcash_client_backend::{
         data_api::wallet::{ConfirmationsPolicy, TargetHeight},
         fees::{ChangeValue, TransactionBalance},
         proposal::ShieldedInputs,
-        wallet::{Note, ReceivedNote},
+        wallet::{Note, ReceivedNote, WalletTransparentOutput},
     };
+    use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
     use zcash_protocol::consensus::BlockHeight;
 
     use super::*;
 
-    /// The value of every dummy input note.
+    /// The value of every dummy input.
     const NOTE_VALUE: u64 = 20_000;
 
     /// Constructs a dummy note in the given shielded pool.
@@ -2420,6 +2423,112 @@ mod proposal_policy_tests {
 
     fn change(pool: ShieldedPool, value: u64) -> ChangeValue {
         ChangeValue::shielded(pool, Zatoshis::const_from_u64(value), None)
+    }
+
+    /// A balanced, in-memory proposal spending two UTXOs, without a wallet or chain.
+    /// Only the input addresses and presence of transparent outputs matter to the check.
+    fn transparent_proposal(
+        addresses: [TransparentAddress; 2],
+        transparent_recipient: bool,
+        transparent_change: bool,
+    ) -> Proposal<(), u32> {
+        let inputs = addresses
+            .into_iter()
+            .enumerate()
+            .map(|(index, address)| {
+                WalletTransparentOutput::from_parts(
+                    OutPoint::new([0; 32], index as u32),
+                    TxOut::new(
+                        Zatoshis::const_from_u64(NOTE_VALUE),
+                        address.script().into(),
+                    ),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("recognizable transparent output")
+            })
+            .collect();
+        let (request, payment_pools, paid) = if transparent_recipient {
+            let payment = Payment::new(
+                arb::T_ADDR_1.parse().expect("valid transparent address"),
+                Some(MARGINAL_FEE),
+                None,
+                None,
+                None,
+                vec![],
+            )
+            .expect("valid payment");
+            (
+                TransactionRequest::new(vec![payment]).expect("valid request"),
+                BTreeMap::from([(0, PoolType::Transparent)]),
+                MARGINAL_FEE,
+            )
+        } else {
+            (TransactionRequest::empty(), BTreeMap::new(), Zatoshis::ZERO)
+        };
+        let change_value = (Zatoshis::const_from_u64(NOTE_VALUE * addresses.len() as u64) - paid)
+            .and_then(|remaining| remaining - MARGINAL_FEE)
+            .expect("inputs cover payment and fee");
+        let change = if transparent_change {
+            ChangeValue::transparent(change_value)
+        } else {
+            ChangeValue::shielded(ShieldedPool::Sapling, change_value, None)
+        };
+        // No chain is consulted; genesis and its successor are sufficient dummy heights.
+        let anchor = BlockHeight::from_u32(0);
+        Proposal::single_step(
+            request,
+            payment_pools,
+            inputs,
+            None,
+            anchor,
+            TransactionBalance::new(vec![change], MARGINAL_FEE).expect("valid balance"),
+            (),
+            TargetHeight::from(anchor + 1),
+            ConfirmationsPolicy::default(),
+            false,
+            false,
+        )
+        .expect("valid transparent-input proposal")
+    }
+
+    /// Multi-address spending needs an explicit linkage acknowledgement; transparent
+    /// recipients or change additionally require `NoPrivacy`. Multiple UTXOs at the
+    /// same address must not be mistaken for linking distinct addresses.
+    #[test]
+    fn transparent_input_linkage_is_enforced_after_selection() {
+        let a = TransparentAddress::PublicKeyHash([0; 20]);
+        let b = TransparentAddress::PublicKeyHash([1; 20]);
+        for (addresses, linked) in [([a, a], false), ([a, b], true)] {
+            for (recipient, change) in [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let proposal = transparent_proposal(addresses, recipient, change);
+                let required = match (linked, recipient || change) {
+                    (false, false) => PrivacyPolicy::AllowRevealedSenders,
+                    (false, true) => PrivacyPolicy::AllowFullyTransparent,
+                    (true, false) => PrivacyPolicy::AllowLinkingAccountAddresses,
+                    (true, true) => PrivacyPolicy::NoPrivacy,
+                };
+                assert_eq!(required_privacy_policy(&proposal), required);
+                for policy in [
+                    PrivacyPolicy::FullPrivacy,
+                    PrivacyPolicy::AllowRevealedAmounts,
+                    PrivacyPolicy::AllowRevealedRecipients,
+                    PrivacyPolicy::AllowRevealedSenders,
+                    PrivacyPolicy::AllowFullyTransparent,
+                    PrivacyPolicy::AllowLinkingAccountAddresses,
+                    PrivacyPolicy::NoPrivacy,
+                ] {
+                    assert_eq!(
+                        enforce_privacy_policy(&proposal, policy).is_ok(),
+                        policy.is_compatible_with(required),
+                        "linked={linked}, recipient={recipient}, change={change}, policy={policy}",
+                    );
+                }
+            }
+        }
     }
 
     /// A step that keeps value within a single shielded pool reveals nothing, whichever
