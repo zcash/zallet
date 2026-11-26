@@ -678,7 +678,7 @@ end = "2027-10-07"
 criteria = "safe-to-deploy"
 user-id = 6289 # Jack Grigg (str4d)
 start = "2020-06-26"
-end = "2026-03-22"
+end = "2027-11-26"
 
 [[trusted.equihash]]
 criteria = "safe-to-deploy"
@@ -1126,7 +1126,7 @@ end = "2027-10-07"
 
 [[trusted.zcash_script]]
 criteria = "safe-to-deploy"
-user-id = 228785
+user-id = 228785 # Alfredo Garcia (oxarbitrage)
 start = "2023-10-18"
 end = "2027-03-09"
 
