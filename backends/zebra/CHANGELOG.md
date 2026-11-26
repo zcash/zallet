@@ -20,6 +20,17 @@ should be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- Now built against the Zebra 7.1.0 crates — `zebra-state` 17, `zebra-rpc` 20
+  and `zebra-chain` 16 — up from `zebra-state` 16, `zebra-rpc` 19 and
+  `zebra-chain` 15.
+
+  The on-disk state format is unchanged at **v29.0.0**, so this backend still
+  reads the cache of any `zebrad` from 7.0.0 onwards and no cache migration is
+  needed. Zebra 7.1.0 fixes several denial-of-service issues in `zebrad`; see
+  its [release notes](https://github.com/ZcashFoundation/zebra/releases/tag/v7.1.0).
+
 ## [0.1.0-beta.4] - 2026-11-01
 
 ### Changed

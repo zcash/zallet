@@ -46,9 +46,9 @@ transparent = { package = "zcash_transparent", version = "0.11" }
 zcash_client_backend = "0.25"
 zcash_primitives = "0.31"
 zcash_protocol = "0.11"
-zebra-chain = "15"
-zebra-rpc = "19"
-zebra-state = { version = "16", features = ["indexer"] }
+zebra-chain = "16"
+zebra-rpc = "20"
+zebra-state = { version = "17", features = ["indexer"] }
 
 [dev-dependencies]
 abscissa_core = { version = "0.9", features = ["testing"] }
