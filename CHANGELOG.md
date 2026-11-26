@@ -26,8 +26,63 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- A `database.max_connections` configuration option overrides the wallet
+  database connection pool size. When unset (the default), Zallet sizes the
+  pool automatically from the CPU count, floored so that foreground JSON-RPC
+  and CLI work is never starved by the connections the sync engine retains.
+  Setting it at or below that number starves wallet operations, so it is
+  intended mainly for regression testing, not production use.
+
+### Changed
+
+- The wallet database file is now created with a protected owner-only ACL on
+  Windows, matching the owner-only mode `0600` it already used on Unix
+  (previously it inherited the data directory's access control there). An
+  existing database file is still tightened on Unix only.
+
 ### Fixed
 
+- `z_listtransactions` no longer fails with `Data DB is corrupted: Invalid memo
+  data` for an account whose history contains an output with a memo that is
+  not valid UTF-8 text (#794). Any sender can attach such a memo, and it made
+  the whole history of both the receiving and the sending account unreadable,
+  including after a restart. Such an output is now listed with its `memo` as
+  the hex of the full 512-byte memo, as `z_viewtransaction` reports it.
+  Arbitrary (`0xff`-type) memos are now rendered the same way; they were
+  previously rendered as 511 bytes of hex without the leading type byte.
+- `z_getnewaccount` on a synced wallet no longer makes `getwalletstatus` lose
+  its `wallet_tip` and `fully_synced_height`, hide every shielded balance, and
+  fail spends with an insufficient-balance error until the next block arrives
+  (#941). The new account's birthday is now the block after the wallet's tip
+  rather than the tip itself, so creating it no longer rewinds the wallet's
+  already-scanned tip block. If wallet sync scans that block before the account
+  is created, the birthday is chosen again; if the node's chain view stays
+  behind the wallet, the call fails with the in-warmup error instead of
+  rewinding the wallet to the view's tip.
+- `z_sendmany`, `z_sendfromaccount` and `pczt_create` now reject a payment of
+  less than 54 zatoshis to a transparent address (P2PKH, P2SH or TEX) as an
+  invalid parameter, instead of building, signing and recording a transaction
+  that the node then refuses as non-standard (#942). The rejected transaction
+  was kept in the wallet as pending, so the account's balance was reduced and
+  the notes it spent stayed unavailable until it expired, about 40 blocks
+  later. The threshold is the dust rule zcashd and zebra apply when relaying.
+- Wallet JSON-RPC methods no longer risk waiting forever for a database
+  connection while wallet sync is running (#708). Methods that use both the
+  database and stored key material (`z_getnewaccount`, `z_recoveraccounts`,
+  `z_getaddressforaccount`, `z_getbalanceforaccount`, `z_viewtransaction`,
+  `z_importkey`, `z_exportkey`, `z_exportviewingkey`, `z_sendmany`,
+  `z_sendfromaccount`, `z_shieldcoinbase`, `pczt_sign`, `pczt_extract`,
+  `signmessage`) previously held one pooled connection while acquiring
+  another, which could deadlock them (and starve every other wallet RPC,
+  including `z_listaccounts` and `getwalletinfo`) once sync's long-lived
+  connections had consumed the rest of the pool. On small machines this was
+  reachable from a fresh wallet: `z_getnewaccount` could hang before any
+  account existed. The pool's CPU-derived default sizing honours container
+  CPU quotas, so a container limited to one or two CPUs was the most common
+  way to hit this. The connection pool is now also always sized with headroom
+  above the connections sync retains.
 - `z_sendmany` and `pczt_create` now check a request's recipients against the
   account's real per-pool balances, rather than assuming every pool holds the
   entire money supply. A payment that no single shielded pool can cover has to

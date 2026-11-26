@@ -58,17 +58,13 @@ pub const CONFIG_FILE: &str = "zallet.toml";
 pub(crate) fn lock_datadir(datadir: &Path) -> Result<fmutex::Guard<'static>, Error> {
     // The datadir holds the wallet database and encryption identity; keep it
     // private to the owner.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(datadir, fs::Permissions::from_mode(0o700)).map_err(|e| {
-            ErrorKind::Init.context(fl!(
-                "err-init-failed-to-restrict-permissions",
-                path = datadir.display().to_string(),
-                error = e.to_string(),
-            ))
-        })?;
-    }
+    crate::fs::restrict_dir(datadir).map_err(|e| {
+        ErrorKind::Init.context(fl!(
+            "err-init-failed-to-restrict-permissions",
+            path = datadir.display().to_string(),
+            error = e.to_string(),
+        ))
+    })?;
 
     let lockfile_path = resolve_datadir_path(datadir, Path::new(".lock"));
 
@@ -151,6 +147,32 @@ pub(crate) fn resolve_output_target(datadir: &Path, output: Option<&str>) -> Opt
 /// a stray `--force` must not clobber it.
 pub(crate) fn overwrite_allowed(force: bool, named_explicitly: bool) -> bool {
     force && named_explicitly
+}
+
+/// Writes `body` to the config file at `path` on behalf of a config-writing
+/// command.
+///
+/// An existing file is replaced only when `overwrite` is set (see
+/// [`overwrite_allowed`]); otherwise it is left untouched and the command fails
+/// with `err-config-output-exists`. The file is created at the process umask: a
+/// config file is the operator's to read and edit.
+pub(crate) fn write_config_output(path: &Path, overwrite: bool, body: &str) -> Result<(), Error> {
+    use std::io::Write;
+
+    let mut file = crate::fs::create_or_create_new(path, overwrite).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            ErrorKind::Generic.context(fl!(
+                "err-config-output-exists",
+                path = path.display().to_string()
+            ))
+        } else {
+            ErrorKind::Generic.context(e)
+        }
+    })?;
+    file.write_all(body.as_bytes())
+        .map_err(|e| ErrorKind::Generic.context(e))?;
+
+    Ok(())
 }
 
 impl EntryPoint {
@@ -333,6 +355,74 @@ mod tests {
 
     /// `--force` consents to overwriting only an explicitly named output; the
     /// inferred default config path is never overwritten.
+    #[test]
+    fn write_config_output_refuses_an_existing_file_without_overwrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CONFIG_FILE);
+        fs::write(&path, "existing").expect("existing config");
+
+        write_config_output(&path, false, "new").expect_err("must refuse");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("readable"),
+            "existing",
+            "a refused write leaves the existing config untouched",
+        );
+    }
+
+    #[test]
+    fn write_config_output_replaces_an_existing_file_with_overwrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CONFIG_FILE);
+        fs::write(&path, "existing config that is longer").expect("existing config");
+
+        write_config_output(&path, true, "new").expect("overwrites");
+
+        assert_eq!(fs::read_to_string(&path).expect("readable"), "new");
+    }
+
+    #[test]
+    fn write_config_output_reports_other_io_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing").join(CONFIG_FILE);
+
+        write_config_output(&path, true, "new").expect_err("a missing parent must fail");
+
+        assert!(!path.exists());
+    }
+
+    /// `/dev/full` accepts the open but fails every write with `ENOSPC`, which is
+    /// the only portable way to reach the write-failure path.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn write_config_output_reports_a_failed_write() {
+        write_config_output(Path::new("/dev/full"), true, "new").expect_err("the write must fail");
+    }
+
+    #[test]
+    fn lock_datadir_refuses_a_path_that_is_not_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("file");
+        fs::write(&file, b"content").expect("file");
+
+        lock_datadir(&file).expect_err("a file cannot be a datadir");
+        assert_eq!(fs::read(&file).expect("readable"), b"content");
+
+        let missing = dir.path().join("missing");
+        lock_datadir(&missing).expect_err("a missing datadir is an error, not created");
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn write_config_output_creates_a_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CONFIG_FILE);
+
+        write_config_output(&path, false, "new").expect("creates");
+
+        assert_eq!(fs::read_to_string(&path).expect("readable"), "new");
+    }
+
     #[test]
     fn overwrite_requires_both_force_and_an_explicit_output() {
         assert!(overwrite_allowed(true, true));

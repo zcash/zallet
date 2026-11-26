@@ -16,6 +16,12 @@ use crate::{
 };
 
 impl AsyncRunnable for GenerateAccountAndMinerAddressCmd {
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "one-shot CLI command: the only task on an otherwise idle pool, which \
+                  automatic sizing keeps large enough that a nested acquisition cannot \
+                  exhaust it (see `Database::handle`)"
+    )]
     async fn run(&self) -> Result<(), Error> {
         let config = APP.config();
         let _lock = config.lock_datadir()?;

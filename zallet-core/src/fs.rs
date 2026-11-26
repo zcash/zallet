@@ -14,6 +14,22 @@ use std::path::{Path, PathBuf};
 
 use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 
+/// Unix mode of a file private to the owner: read and write for the owner, no
+/// access for the group or others. Applied at creation so the file is never
+/// observable more widely, and used to tighten files that predate it.
+#[cfg(unix)]
+pub(crate) const OWNER_ONLY_FILE_MODE: u32 = 0o600;
+
+/// Unix mode of a directory private to the owner: only the owner can list,
+/// traverse, or create entries in it, so everything created inside is reachable
+/// by the owner alone whatever its own mode.
+#[cfg(unix)]
+const OWNER_ONLY_DIR_MODE: u32 = 0o700;
+
+/// The permission bits of a Unix mode (`st_mode` also carries the file type).
+#[cfg(unix)]
+pub(crate) const MODE_PERMISSION_BITS: u32 = 0o777;
+
 /// Creates a new file that is readable and writable only by the user the Zallet
 /// process runs as.
 ///
@@ -30,17 +46,17 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
         let f = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .mode(OWNER_ONLY_FILE_MODE)
             .open(path)?;
         // `open` masks the mode with the umask, which can only remove bits, so
         // the `fchmod` repair (not itself masked) is needed only under a umask
         // that strips owner bits. Filesystems that refuse `fchmod` therefore
         // work under every sane umask.
         let repaired = f.metadata().and_then(|m| {
-            if m.permissions().mode() & 0o777 == 0o600 {
+            if m.permissions().mode() & MODE_PERMISSION_BITS == OWNER_ONLY_FILE_MODE {
                 Ok(())
             } else {
-                f.set_permissions(fs::Permissions::from_mode(0o600))
+                f.set_permissions(fs::Permissions::from_mode(OWNER_ONLY_FILE_MODE))
             }
         });
         if let Err(e) = repaired {
@@ -65,6 +81,117 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
             .write(true)
             .create_new(true)
             .open(path)
+    }
+}
+
+/// Restricts an existing file to the user the Zallet process runs as.
+///
+/// The counterpart of [`create_private_file`] for a file that already exists,
+/// such as a wallet database created before Zallet restricted it or copied into
+/// place by an operator. On Unix the mode is set to exactly `0600`. Elsewhere
+/// only the existence check runs: Windows access control is applied at creation
+/// (see [`create_private_file`]), and rewriting an existing DACL is tracked as a
+/// separate hardening item. A directory is refused with
+/// [`io::ErrorKind::IsADirectory`] on every platform.
+pub(crate) fn restrict_existing_file(path: &Path) -> io::Result<()> {
+    let metadata = fs::metadata(path)?;
+    if metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            format!("{} is a directory, not a file", path.display()),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY_FILE_MODE))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
+/// Ensures an owner-only file exists at `path`: a missing file is created with
+/// [`create_private_file`], an existing one is tightened with
+/// [`restrict_existing_file`].
+///
+/// The creation handle is closed before this returns, so the caller (such as
+/// SQLite) can open the path itself; on Windows the creation handle has no
+/// sharing and would otherwise lock the caller out of its own file.
+pub(crate) fn create_or_restrict_private_file(path: &Path) -> io::Result<()> {
+    match create_private_file(path) {
+        Ok(file) => {
+            drop(file);
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => restrict_existing_file(path),
+        Err(e) => Err(e),
+    }
+}
+
+/// Restricts an existing directory to the user the Zallet process runs as.
+///
+/// On Unix the mode is set to exactly `0700`. Elsewhere only the existence check
+/// runs; directory access control there is tracked as a separate hardening item.
+/// A path that is not a directory is refused with
+/// [`io::ErrorKind::NotADirectory`] on every platform, so a misconfigured data
+/// directory fails here rather than being silently "restricted".
+pub(crate) fn restrict_dir(path: &Path) -> io::Result<()> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            format!("{} is not a directory", path.display()),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY_DIR_MODE))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
+/// Creates the directory at `path` and every missing ancestor, each owner-only
+/// from the moment it exists.
+///
+/// Directories that already exist are left as they are: the caller may not own
+/// them (an operator-managed parent, say), and tightening a shared ancestor could
+/// lock other users out of their own files. Use [`restrict_dir`] to tighten a
+/// directory deliberately. On Unix every created directory gets mode `0700` at
+/// creation rather than the process umask (commonly `022`, which would leave it
+/// world-readable); the umask can only narrow that further. Elsewhere created
+/// directories inherit their parent's access control.
+pub(crate) fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(OWNER_ONLY_DIR_MODE);
+    }
+    builder.create(path)
+}
+
+/// Opens `path` for writing, creating it if it does not exist.
+///
+/// With `overwrite` set, an existing file is truncated in place; otherwise an
+/// existing file is refused with [`io::ErrorKind::AlreadyExists`] and left
+/// untouched, atomically with respect to a concurrent creator (`create_new`).
+/// The file is created at the process umask: this is for content the operator
+/// is expected to read and edit, such as configuration files. Secrets go through
+/// [`create_private_file`] instead.
+pub(crate) fn create_or_create_new(path: &Path, overwrite: bool) -> io::Result<File> {
+    if overwrite {
+        File::create(path)
+    } else {
+        File::create_new(path)
     }
 }
 
@@ -612,6 +739,16 @@ fn publish_via_hard_link<E>(
 mod tests {
     use super::*;
 
+    /// A file mode as a default umask of `022` leaves it: readable by everyone,
+    /// the state the helpers must tighten.
+    #[cfg(unix)]
+    const WORLD_READABLE_FILE_MODE: u32 = 0o644;
+
+    /// A directory mode as a default umask of `022` leaves it: listable and
+    /// traversable by everyone.
+    #[cfg(unix)]
+    const WORLD_READABLE_DIR_MODE: u32 = 0o755;
+
     #[cfg(unix)]
     #[test]
     fn private_file_is_owner_only_at_creation() {
@@ -621,7 +758,7 @@ mod tests {
         let path = dir.path().join("private");
         create_private_file(&path).expect("creates");
         let mode = fs::metadata(&path).expect("metadata").permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(mode & MODE_PERMISSION_BITS, OWNER_ONLY_FILE_MODE);
     }
 
     #[test]
@@ -834,5 +971,211 @@ mod tests {
             0,
             "the temporary does not survive an unwind",
         );
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).expect("metadata").permissions().mode() & MODE_PERMISSION_BITS
+    }
+
+    #[cfg(unix)]
+    fn widen(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("widens");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_existing_file_tightens_a_world_readable_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wallet.db");
+        fs::write(&path, b"content").expect("existing file");
+        widen(&path, WORLD_READABLE_FILE_MODE);
+
+        restrict_existing_file(&path).expect("restricts");
+
+        assert_eq!(mode_of(&path), OWNER_ONLY_FILE_MODE);
+        assert_eq!(
+            fs::read(&path).expect("readable"),
+            b"content",
+            "restricting never touches the content",
+        );
+    }
+
+    #[test]
+    fn restrict_existing_file_requires_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let err = restrict_existing_file(&dir.path().join("missing")).expect_err("must refuse");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        let err = restrict_existing_file(dir.path()).expect_err("must refuse a directory");
+        assert_eq!(err.kind(), io::ErrorKind::IsADirectory);
+    }
+
+    #[test]
+    fn create_or_restrict_creates_a_missing_file_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wallet.db");
+
+        create_or_restrict_private_file(&path).expect("creates");
+
+        assert_eq!(fs::metadata(&path).expect("metadata").len(), 0);
+        #[cfg(unix)]
+        assert_eq!(mode_of(&path), OWNER_ONLY_FILE_MODE);
+    }
+
+    #[test]
+    fn create_or_restrict_reports_a_missing_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing").join("wallet.db");
+
+        let err = create_or_restrict_private_file(&path).expect_err("must fail");
+
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn create_or_restrict_keeps_an_existing_file_and_its_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wallet.db");
+        fs::write(&path, b"content").expect("existing file");
+        #[cfg(unix)]
+        widen(&path, WORLD_READABLE_FILE_MODE);
+
+        create_or_restrict_private_file(&path).expect("restricts");
+
+        assert_eq!(fs::read(&path).expect("readable"), b"content");
+        #[cfg(unix)]
+        assert_eq!(mode_of(&path), OWNER_ONLY_FILE_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_dir_tightens_a_world_readable_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("datadir");
+        fs::create_dir(&path).expect("creates dir");
+        widen(&path, WORLD_READABLE_DIR_MODE);
+
+        restrict_dir(&path).expect("restricts");
+
+        assert_eq!(mode_of(&path), OWNER_ONLY_DIR_MODE);
+    }
+
+    #[test]
+    fn restrict_dir_requires_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let err = restrict_dir(&dir.path().join("missing")).expect_err("must refuse");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        let file = dir.path().join("file");
+        fs::write(&file, b"content").expect("existing file");
+        let err = restrict_dir(&file).expect_err("must refuse a file");
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
+        assert_eq!(fs::read(&file).expect("readable"), b"content");
+    }
+
+    #[test]
+    fn private_dir_all_creates_every_missing_component_owner_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let leaf = dir.path().join("a").join("b").join("c");
+
+        create_private_dir_all(&leaf).expect("creates");
+
+        assert!(leaf.is_dir());
+        #[cfg(unix)]
+        for created in [dir.path().join("a"), dir.path().join("a").join("b"), leaf] {
+            assert_eq!(
+                mode_of(&created),
+                OWNER_ONLY_DIR_MODE,
+                "{} must be owner-only",
+                created.display(),
+            );
+        }
+    }
+
+    #[test]
+    fn private_dir_all_leaves_an_existing_ancestor_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing = dir.path().join("existing");
+        fs::create_dir(&existing).expect("creates dir");
+        #[cfg(unix)]
+        widen(&existing, WORLD_READABLE_DIR_MODE);
+        let marker = existing.join("marker");
+        fs::write(&marker, b"content").expect("existing content");
+
+        create_private_dir_all(&existing.join("new")).expect("creates");
+
+        assert!(existing.join("new").is_dir());
+        assert_eq!(fs::read(&marker).expect("readable"), b"content");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                mode_of(&existing),
+                WORLD_READABLE_DIR_MODE,
+                "an existing ancestor is not tightened"
+            );
+            assert_eq!(mode_of(&existing.join("new")), OWNER_ONLY_DIR_MODE);
+        }
+    }
+
+    #[test]
+    fn private_dir_all_accepts_an_existing_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        create_private_dir_all(dir.path()).expect("an existing directory is fine");
+
+        let file = dir.path().join("file");
+        fs::write(&file, b"content").expect("existing file");
+        let err = create_private_dir_all(&file).expect_err("a file in the way is refused");
+        assert_ne!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(fs::read(&file).expect("readable"), b"content");
+    }
+
+    #[test]
+    fn create_or_create_new_refuses_an_existing_file_without_overwrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("zallet.toml");
+        fs::write(&path, b"existing").expect("existing file");
+
+        let err = create_or_create_new(&path, false).expect_err("must refuse");
+
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).expect("readable"), b"existing");
+    }
+
+    #[test]
+    fn create_or_create_new_truncates_an_existing_file_with_overwrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("zallet.toml");
+        fs::write(&path, b"existing content").expect("existing file");
+
+        let mut file = create_or_create_new(&path, true).expect("opens");
+        file.write_all(b"new").expect("writes");
+        drop(file);
+
+        assert_eq!(fs::read(&path).expect("readable"), b"new");
+    }
+
+    #[test]
+    fn create_or_create_new_creates_a_missing_file_either_way() {
+        for overwrite in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("zallet.toml");
+
+            let mut file = create_or_create_new(&path, overwrite).expect("creates");
+            file.write_all(b"content").expect("writes");
+            drop(file);
+
+            assert_eq!(
+                fs::read(&path).expect("readable"),
+                b"content",
+                "overwrite={overwrite}",
+            );
+        }
     }
 }

@@ -2,9 +2,12 @@ use documented::Documented;
 use jsonrpsee::{core::RpcResult, types::ErrorCode as RpcErrorCode};
 use schemars::JsonSchema;
 use serde::Serialize;
+// Only the non-Windows arm inspects the network type; an unconditional import
+// is an unused-import warning on Windows builds.
+#[cfg(not(target_os = "windows"))]
 use zcash_protocol::consensus::{NetworkType, Parameters};
 
-use crate::components::database::DbHandle;
+use crate::network::Network;
 
 /// Response to a `stop` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -14,9 +17,9 @@ pub(crate) type Response = RpcResult<ResultType>;
 #[serde(transparent)]
 pub(crate) struct ResultType(());
 
-pub(crate) fn call(wallet: DbHandle) -> Response {
+pub(crate) fn call(params: &Network) -> Response {
     #[cfg(not(target_os = "windows"))]
-    match wallet.params().network_type() {
+    match params.network_type() {
         NetworkType::Regtest => match nix::sys::signal::raise(nix::sys::signal::SIGINT) {
             Ok(_) => Ok(ResultType(())),
             Err(_) => Err(RpcErrorCode::InternalError.into()),
@@ -25,7 +28,7 @@ pub(crate) fn call(wallet: DbHandle) -> Response {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = wallet;
+        let _ = params;
         Err(RpcErrorCode::MethodNotFound.into())
     }
 }

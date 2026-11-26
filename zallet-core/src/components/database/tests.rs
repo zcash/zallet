@@ -8,6 +8,9 @@ use zcash_protocol::consensus::{self, NetworkType, Parameters};
 
 use crate::{components::database, config::ZalletConfig, network::Network};
 
+#[cfg(unix)]
+use crate::fs::{MODE_PERMISSION_BITS, OWNER_ONLY_FILE_MODE};
+
 #[cfg(zallet_build = "wallet")]
 use crate::components::keystore;
 
@@ -284,6 +287,70 @@ fn db_connection_forwards_ironwood_reads_and_tree_ops() {
             );
         });
 }
+
+#[test]
+fn wallet_db_path_that_is_a_directory_is_reported() {
+    let datadir = tempdir().unwrap();
+    let config = test_config(datadir.path(), NetworkType::Main);
+    std::fs::create_dir(config.wallet_db_path()).unwrap();
+
+    let err = open_database(&config).expect_err("a directory cannot be the wallet database");
+    assert!(
+        err.to_string().contains("Failed to restrict permissions")
+            && err
+                .to_string()
+                .contains(&config.wallet_db_path().display().to_string()),
+        "unexpected error: {err}",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_wallet_db_is_created_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let datadir = tempdir().unwrap();
+    let config = test_config(datadir.path(), NetworkType::Main);
+
+    open_database(&config).expect("creates the wallet database");
+
+    let mode = std::fs::metadata(config.wallet_db_path())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & MODE_PERMISSION_BITS, OWNER_ONLY_FILE_MODE);
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_world_readable_wallet_db_is_tightened_on_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let datadir = tempdir().unwrap();
+    let config = test_config(datadir.path(), NetworkType::Main);
+    create_wallet_db_for_network(
+        config.wallet_db_path(),
+        Network::Consensus(consensus::Network::MainNetwork),
+        &["0.1.0-alpha.4"],
+    );
+    std::fs::set_permissions(
+        config.wallet_db_path(),
+        std::fs::Permissions::from_mode(WORLD_READABLE_FILE_MODE),
+    )
+    .unwrap();
+
+    open_database(&config).expect("opens the existing wallet database");
+
+    let mode = std::fs::metadata(config.wallet_db_path())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & MODE_PERMISSION_BITS, OWNER_ONLY_FILE_MODE);
+}
+
+/// A file mode as a default umask leaves it: readable by everyone.
+#[cfg(unix)]
+const WORLD_READABLE_FILE_MODE: u32 = 0o644;
 
 fn test_config(datadir: &std::path::Path, network_type: NetworkType) -> ZalletConfig {
     ZalletConfig {

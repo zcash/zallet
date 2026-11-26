@@ -53,11 +53,7 @@ impl AsyncRunnable for GenerateEncryptionIdentityCmd {
             // This command does not take the data directory lock, so it cannot rely on
             // `lock_datadir` to restrict the datadir on a later run.
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                let mut builder = tokio::fs::DirBuilder::new();
-                builder.recursive(true);
-                #[cfg(unix)]
-                builder.mode(0o700);
-                builder.create(parent).await.map_err(|e| {
+                crate::fs::create_private_dir_all(parent).map_err(|e| {
                     ErrorKind::Init.context(fl!(
                         "cmd-generate-encryption-identity-write-failed",
                         path = path.display().to_string(),

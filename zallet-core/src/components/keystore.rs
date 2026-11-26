@@ -1486,14 +1486,19 @@ pub(crate) mod testing {
     use super::KeyStore;
     use crate::{components::database::Database, config::ZalletConfig};
 
-    /// Builds a keystore backed by a fresh wallet database and a fresh age identity.
+    /// Builds a keystore backed by a fresh wallet database and a fresh age identity,
+    /// returning the database as well.
     ///
     /// `configure` may adjust the config before the keystore reads it, for tests that
     /// depend on a config-derived policy such as `keystore.require_backup`.
-    pub(crate) async fn keystore_with_config(
+    /// `max_connections`, when set, bounds the database's connection pool; the
+    /// saturated-pool regression tests pass 1 so that holding a connection while
+    /// acquiring another deadlocks immediately.
+    pub(crate) async fn keystore_and_database_with_config(
         datadir: &TempDir,
+        max_connections: Option<std::num::NonZeroUsize>,
         configure: impl FnOnce(&mut ZalletConfig),
-    ) -> KeyStore {
+    ) -> (KeyStore, Database) {
         crate::i18n::load_languages(&[]);
 
         let identity = age::x25519::Identity::generate();
@@ -1513,6 +1518,12 @@ pub(crate) mod testing {
                 network: NetworkType::Test,
                 ..Default::default()
             },
+            database: crate::config::DatabaseSection {
+                // Exercise the real `database.max_connections` config plumbing, so the
+                // saturated-pool tests force the pool the same way an operator would.
+                max_connections,
+                ..Default::default()
+            },
             keystore: crate::config::KeyStoreSection {
                 encryption_identity: Some(identity_path),
                 ..Default::default()
@@ -1522,13 +1533,26 @@ pub(crate) mod testing {
         configure(&mut config);
 
         let db = Database::open(&config).await.unwrap();
-        let keystore = KeyStore::new(&config, db).unwrap();
+        let keystore = KeyStore::new(&config, db.clone()).unwrap();
         keystore
             .initialize_recipients(vec![identity.to_public().to_string()])
             .await
             .unwrap();
 
-        keystore
+        (keystore, db)
+    }
+
+    /// Builds a keystore backed by a fresh wallet database and a fresh age identity.
+    ///
+    /// `configure` may adjust the config before the keystore reads it, for tests that
+    /// depend on a config-derived policy such as `keystore.require_backup`.
+    pub(crate) async fn keystore_with_config(
+        datadir: &TempDir,
+        configure: impl FnOnce(&mut ZalletConfig),
+    ) -> KeyStore {
+        keystore_and_database_with_config(datadir, None, configure)
+            .await
+            .0
     }
 
     /// Builds a keystore with the default configuration.

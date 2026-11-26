@@ -156,6 +156,12 @@ pub(super) const PROP_BACKEND_PROPOSAL_INFO: &str = "zcash_client_backend:propos
 /// threads. Without a bound, a client retrying a timed-out `pczt_prove` stacks
 /// uncancellable proving tasks. Two permits let a prove and an extract overlap
 /// without oversubscribing the machine.
+///
+/// The `z_sendmany` and `z_shieldcoinbase` operations also prove under these
+/// permits, which additionally bounds how many wallet database connections
+/// their concurrently running operations can hold (each takes its permit
+/// before its connection; keep that order so the semaphore is never awaited
+/// while a pooled connection is held).
 pub(super) static PROVING_SLOTS: Semaphore = Semaphore::const_new(2);
 
 /// The Orchard-family circuit version in force under the given consensus

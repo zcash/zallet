@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::net::SocketAddr;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -377,6 +377,19 @@ pub struct DatabaseSection {
     /// Note that on Windows, you must either use single quotes for this field's value, or
     /// replace all backslashes `\` with forward slashes `/`.
     pub wallet: Option<PathBuf>,
+
+    /// Maximum number of connections in the wallet database connection pool.
+    ///
+    /// When unset (the default), Zallet sizes the pool automatically from the number of
+    /// CPUs, with a floor that always leaves connections free for JSON-RPC and CLI work
+    /// after the background sync engine has taken the ones it holds for the lifetime of
+    /// the process. Leave this unset unless you have a specific reason not to.
+    ///
+    /// Setting it too low starves wallet operations: the sync engine permanently retains
+    /// several connections, so a value at or below that number prevents the wallet from
+    /// servicing any JSON-RPC request. This override exists mainly so regression tests
+    /// can force a small pool; it is not recommended for production use.
+    pub max_connections: Option<NonZeroUsize>,
 }
 
 impl DatabaseSection {
@@ -923,6 +936,7 @@ impl ZalletConfig {
             ),
             consensus("regtest_nuparams", &conf.consensus.regtest_nuparams),
             database("wallet", conf.database.wallet_path()),
+            database("max_connections", conf.database.max_connections),
             external("broadcast", conf.external.broadcast()),
             external("export_dir", &conf.external.export_dir),
             external("notify", &conf.external.notify),
