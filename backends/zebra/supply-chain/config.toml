@@ -660,10 +660,6 @@ criteria = "safe-to-deploy"
 version = "1.10.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.hyper-rustls]]
-version = "0.27.9"
-criteria = "safe-to-deploy"
-
 [[exemptions.hyper-timeout]]
 version = "0.5.2"
 criteria = "safe-to-deploy"
@@ -750,10 +746,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.io_tee]]
 version = "0.1.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.ipnet]]
-version = "2.12.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.is-terminal]]
@@ -878,10 +870,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.log]]
 version = "0.4.33"
-criteria = "safe-to-deploy"
-
-[[exemptions.lru-slab]]
-version = "0.1.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.lz4-sys]]
@@ -1152,14 +1140,6 @@ criteria = "safe-to-deploy"
 version = "22.0.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.quinn]]
-version = "0.11.11"
-criteria = "safe-to-deploy"
-
-[[exemptions.quinn-proto]]
-version = "0.11.15"
-criteria = "safe-to-deploy"
-
 [[exemptions.quote]]
 version = "1.0.46"
 criteria = "safe-to-deploy"
@@ -1218,10 +1198,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.regex-syntax]]
 version = "0.8.11"
-criteria = "safe-to-deploy"
-
-[[exemptions.reqwest]]
-version = "0.12.28"
 criteria = "safe-to-deploy"
 
 [[exemptions.ring]]
@@ -1308,10 +1284,6 @@ criteria = "safe-to-deploy"
 version = "0.103.10"
 criteria = "safe-to-deploy"
 
-[[exemptions.ryu]]
-version = "1.0.23"
-criteria = "safe-to-deploy"
-
 [[exemptions.safe_arch]]
 version = "0.7.4"
 criteria = "safe-to-deploy"
@@ -1374,10 +1346,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.serde_json]]
 version = "1.0.150"
-criteria = "safe-to-deploy"
-
-[[exemptions.serde_urlencoded]]
-version = "0.7.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.serde_with]]
@@ -1568,10 +1536,6 @@ criteria = "safe-to-deploy"
 version = "0.5.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.tower-http]]
-version = "0.6.11"
-criteria = "safe-to-deploy"
-
 [[exemptions.tower-layer]]
 version = "0.3.3"
 criteria = "safe-to-deploy"
@@ -1590,10 +1554,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tracing-error]]
 version = "0.2.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.tracing-futures]]
-version = "0.2.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.tracing-subscriber]]
@@ -1664,10 +1624,6 @@ criteria = "safe-to-deploy"
 version = "0.2.126"
 criteria = "safe-to-deploy"
 
-[[exemptions.wasm-bindgen-futures]]
-version = "0.4.76"
-criteria = "safe-to-deploy"
-
 [[exemptions.wasm-bindgen-macro]]
 version = "0.2.126"
 criteria = "safe-to-deploy"
@@ -1678,10 +1634,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.wasm-bindgen-shared]]
 version = "0.2.126"
-criteria = "safe-to-deploy"
-
-[[exemptions.web-sys]]
-version = "0.3.103"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-roots]]
