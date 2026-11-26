@@ -58,11 +58,11 @@ user-login = "emilio"
 user-name = "Emilio Cobos Álvarez"
 
 [[publisher.equihash]]
-version = "0.3.0"
-when = "2026-04-24"
-user-id = 169181
-user-login = "nuttycom"
-user-name = "Kris Nuttycombe"
+version = "0.3.1"
+when = "2026-10-27"
+user-id = 6289
+user-login = "str4d"
+user-name = "Jack Grigg"
 
 [[publisher.f4jumble]]
 version = "0.1.2"
@@ -233,18 +233,14 @@ user-login = "str4d"
 user-name = "Jack Grigg"
 
 [[publisher.tower-batch-control]]
-version = "1.1.1"
-when = "2026-07-17"
-user-id = 235397
-user-login = "upbqdn"
-user-name = "Marek"
+version = "1.2.0"
+when = "2026-11-16"
+trusted-publisher = "github:ZcashFoundation/zebra"
 
 [[publisher.tower-fallback]]
-version = "0.2.43"
-when = "2026-07-17"
-user-id = 235397
-user-login = "upbqdn"
-user-name = "Marek"
+version = "0.2.44"
+when = "2026-11-16"
+trusted-publisher = "github:ZcashFoundation/zebra"
 
 [[publisher.unicode-normalization]]
 version = "0.1.25"
@@ -581,38 +577,38 @@ user-login = "nuttycom"
 user-name = "Kris Nuttycombe"
 
 [[publisher.zebra-chain]]
-version = "15.0.0"
-when = "2026-10-22"
+version = "16.0.0"
+when = "2026-11-16"
 trusted-publisher = "github:ZcashFoundation/zebra"
 
 [[publisher.zebra-consensus]]
-version = "18.0.0"
-when = "2026-10-22"
+version = "19.0.0"
+when = "2026-11-16"
 trusted-publisher = "github:ZcashFoundation/zebra"
 
 [[publisher.zebra-network]]
-version = "15.0.0"
-when = "2026-10-22"
+version = "16.0.0"
+when = "2026-11-16"
 trusted-publisher = "github:ZcashFoundation/zebra"
 
 [[publisher.zebra-node-services]]
-version = "13.0.0"
-when = "2026-10-22"
+version = "14.0.0"
+when = "2026-11-16"
 trusted-publisher = "github:ZcashFoundation/zebra"
 
 [[publisher.zebra-rpc]]
-version = "19.0.0"
-when = "2026-10-22"
+version = "20.0.0"
+when = "2026-11-16"
 trusted-publisher = "github:ZcashFoundation/zebra"
 
 [[publisher.zebra-script]]
-version = "14.0.0"
-when = "2026-10-22"
+version = "15.0.0"
+when = "2026-11-16"
 trusted-publisher = "github:ZcashFoundation/zebra"
 
 [[publisher.zebra-state]]
-version = "16.0.0"
-when = "2026-10-22"
+version = "17.0.0"
+when = "2026-11-16"
 trusted-publisher = "github:ZcashFoundation/zebra"
 
 [[publisher.zewif]]

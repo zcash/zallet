@@ -878,11 +878,23 @@ user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
 
+[[trusted.tower-batch-control]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:ZcashFoundation/zebra"
+start = "2026-07-10"
+end = "2027-11-26"
+
 [[trusted.tower-fallback]]
 criteria = "safe-to-deploy"
 user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
+
+[[trusted.tower-fallback]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:ZcashFoundation/zebra"
+start = "2026-11-16"
+end = "2027-11-26"
 
 [[trusted.windows-core]]
 criteria = "safe-to-deploy"
