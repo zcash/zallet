@@ -410,25 +410,26 @@ fn check_recipients_against_privacy_policy(
                 }
             }
             Address::Unified(ua) => {
+                // Input selection pays the Orchard receiver whenever the address has one,
+                // and never falls back to the Sapling receiver. Sapling funds therefore
+                // count only for an address with no Orchard receiver.
+                let has_orchard = ua.receiver_types().contains(&unified::Typecode::ORCHARD);
+                let pays_sapling =
+                    !has_orchard && ua.receiver_types().contains(&unified::Typecode::SAPLING);
+
                 match (
                     privacy_policy.allow_revealed_amounts(),
-                    (
-                        ua.receiver_types().contains(&unified::Typecode::ORCHARD),
-                        max_orchard_receiver_available - value,
-                    ),
-                    (
-                        ua.receiver_types().contains(&unified::Typecode::SAPLING),
-                        max_sapling_available - value,
-                    ),
+                    (has_orchard, max_orchard_receiver_available - value),
+                    (pays_sapling, max_sapling_available - value),
                 ) {
-                    // The preferred receiver is Orchard, and we either allow revealed
-                    // amounts or have sufficient funds in the pool that receiver is paid
-                    // from to avoid it.
+                    // The receiver paid is Orchard, and we either allow revealed amounts
+                    // or have sufficient funds in the pool that receiver is paid from to
+                    // avoid it.
                     (true, (true, _), _) => (),
                     (false, (true, Some(rest)), _) => max_orchard_receiver_available = rest,
 
-                    // The preferred receiver is Sapling, and we either allow revealed
-                    // amounts or have sufficient Sapling funds available to avoid it.
+                    // The receiver paid is Sapling, and we either allow revealed amounts
+                    // or have sufficient Sapling funds available to avoid it.
                     (true, _, (true, _)) => (),
                     (false, _, (true, Some(rest))) => max_sapling_available = rest,
 
@@ -2558,11 +2559,12 @@ mod recipient_preflight_tests {
         ReceiverRequirement::Omit,
     );
 
-    /// A unified address carrying both shielded receivers, so either pool can pay it.
+    /// A unified address carrying both shielded receivers. Input selection pays its Orchard
+    /// receiver, never its Sapling one.
     ///
     /// `Require` rather than [`UnifiedAddressRequest::SHIELDED`], which is `Allow` and so
-    /// only promises *at least one* of them — not enough for a test whose whole point is
-    /// that the check may choose between two pools.
+    /// only promises *at least one* of them — not enough for tests about which of the two
+    /// receivers is paid.
     ///
     /// ZIP 316 forbids a unified address with no shielded receiver, so there is no way to
     /// build one without — which is why [`IncompatiblePrivacyPolicy::TransparentReceiver`],
@@ -2756,8 +2758,8 @@ mod recipient_preflight_tests {
         .expect("a payment the Sapling pool covers reveals nothing");
     }
 
-    /// A unified address can be paid into either of its shielded receivers, so it is
-    /// rejected only when *neither* pool covers the payment alone.
+    /// A unified address is rejected when the pool behind the receiver it is paid at cannot
+    /// cover the payment alone, even though the account's pools together could.
     #[test]
     fn unified_recipient_is_rejected_when_no_single_pool_covers_it() {
         let addr = ua(BOTH_SHIELDED);
@@ -2775,12 +2777,11 @@ mod recipient_preflight_tests {
         );
     }
 
-    /// Either shielded pool covering the payment on its own is enough, whichever receiver
-    /// the address carries.
+    /// The pool behind the receiver a unified address is paid at covering the payment on
+    /// its own is enough.
     #[test]
-    fn unified_recipient_is_accepted_when_one_pool_covers_it() {
+    fn unified_recipient_is_accepted_when_its_paying_pool_covers_it() {
         for (request, sapling, orchard) in [
-            (BOTH_SHIELDED, PAYMENT, 0),
             (BOTH_SHIELDED, 0, PAYMENT),
             (ORCHARD_ONLY, 0, PAYMENT),
             (SAPLING_ONLY, PAYMENT, 0),
@@ -2794,6 +2795,27 @@ mod recipient_preflight_tests {
                 &account_balance(sapling, orchard, 0),
             )
             .expect("a pool that covers the payment alone reveals nothing");
+        }
+    }
+
+    /// Input selection pays the Orchard receiver of a unified address that has one and never
+    /// falls back to its Sapling receiver, so Sapling funds reach such an address only by
+    /// crossing, in either era. Counting them accepts the send here and leaves
+    /// `enforce_privacy_policy` to reject it after input selection has run.
+    #[test]
+    fn sapling_funds_do_not_pay_a_unified_address_with_an_orchard_receiver() {
+        let addr = ua(BOTH_SHIELDED);
+
+        for height in [before_ironwood(), from_ironwood()] {
+            assert_rejects(
+                check(
+                    &[(&addr, PAYMENT_ZEC)],
+                    PrivacyPolicy::FullPrivacy,
+                    height,
+                    &account_balance(AMPLE, 0, 0),
+                ),
+                IncompatiblePrivacyPolicy::RevealingReceiverAmounts,
+            );
         }
     }
 

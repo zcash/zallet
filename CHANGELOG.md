@@ -101,6 +101,10 @@ be considered breaking changes.
   against shielded recipients; the transaction proposal reports the
   sender-revealing policy such a send requires.
 
+  A unified address that has an Orchard receiver is always paid at that
+  receiver, never at its Sapling receiver. Sapling funds therefore cannot pay
+  such an address without crossing, however much of them the account holds.
+
   Which pool pays an Orchard receiver depends on the height the transaction
   targets. From NU6.3 the Orchard turnstile is one-way — value may leave the
   Orchard pool but never enter it — so a payment to an Orchard receiver is
