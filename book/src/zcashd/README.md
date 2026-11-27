@@ -142,9 +142,23 @@ you need.
 
 - Mnemonic seeds and the keys derived from them. Accounts are re-created following the
   structure of the `zcashd` wallet.
-- Standalone (imported) Sapling spending keys and transparent keys.
+- Standalone (imported) transparent keys. Sapling spending keys are stored too, but
+  see the warning below.
 - Transparent watch-only entries that include their public key or redeem script.
 - Account birthdays, so that chain scanning starts from the right height.
+
+> **⚠️ Sapling addresses outside a unified account are not detected yet.** The migration
+> stores the Sapling spending keys present in `wallet.dat`, but registers Sapling viewing
+> keys with Zallet only for the receivers of `zcashd`'s unified accounts (those created
+> with `z_getnewaccount`). Sapling addresses created with `z_getnewaddress`, and keys
+> imported with `z_importkey` or `z_importviewingkey`, belong to no Zallet account after
+> migration, so funds sent to them are not detected and appear in no balance ([#838]).
+> An address imported with `z_importviewingkey` is watch-only: `zcashd` never held its
+> spending key, so there is none to migrate. The migration does not report any of this.
+> Until it is fixed, keep `zcashd` and your `wallet.dat`, which preserves the access you
+> already had to these addresses.
+
+[#838]: https://github.com/zcash/zallet/issues/838
 
 ## What is not migrated
 

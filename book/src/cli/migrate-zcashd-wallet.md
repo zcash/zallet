@@ -189,6 +189,16 @@ recognise are discarded without any message. See
 [What is not migrated](../zcashd/README.md#what-is-not-migrated) for what each
 of these means for you.
 
+Separately, and also without any message, Sapling addresses that do not belong
+to one of `zcashd`'s unified accounts (from `z_getnewaddress`, `z_importkey` or
+`z_importviewingkey`) are not yet registered with any Zallet account, so their
+funds are not detected
+([#838](https://github.com/zcash/zallet/issues/838)). The Sapling spending keys
+present in `wallet.dat` are stored; `z_importviewingkey` addresses are
+watch-only and have none. Keep `zcashd` and `wallet.dat` until this is fixed,
+which preserves the access you already had; see the
+[warning in the migration guide](../zcashd/README.md#what-is-migrated).
+
 [ZeWIF]: https://github.com/zcash/zewif
 
 [`zcashd`]: https://github.com/zcash/zcash
