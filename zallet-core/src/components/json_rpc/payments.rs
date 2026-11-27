@@ -114,9 +114,16 @@ const fn transparent_dust_threshold(output_size: u64) -> u64 {
 
 /// Parses an array of output amounts into a ZIP 321 transaction request.
 ///
-/// Rejects an empty array, duplicate recipient addresses, malformed addresses, addresses
-/// that cannot be interpreted on this network, dust outputs to transparent recipients, and
-/// total output value overflow.
+/// Rejects an empty array, a transparent or TEX recipient named more than once, malformed
+/// addresses, addresses that cannot be interpreted on this network, dust outputs to
+/// transparent recipients, and total output value overflow.
+///
+/// A shielded recipient (one that can receive a memo) may be paid more than once, as
+/// ZIP 321 permits: several payments to one address can carry a message split across
+/// several memos, or deliver separately sized notes. A transparent recipient gains nothing
+/// from a second output that a single larger one would not give it, and every extra
+/// transparent output to the same address is one more public link between them, so a
+/// repeated transparent recipient stays an error, as in `zcashd`.
 ///
 /// Everything downstream may therefore treat a request's recipients as decodable; several
 /// callers rely on that rather than re-reporting a decoding failure of their own.
@@ -130,7 +137,8 @@ pub(super) fn build_request(
         );
     }
 
-    let mut recipient_addrs = HashSet::new();
+    // Only recipients that cannot receive a memo are tracked; see the doc comment.
+    let mut transparent_recipients = HashSet::new();
     let mut payments = vec![];
     let mut total_out = Zatoshis::ZERO;
 
@@ -142,7 +150,7 @@ pub(super) fn build_request(
             ))
         })?;
 
-        if !recipient_addrs.insert(addr.clone()) {
+        if !addr.can_receive_memo() && !transparent_recipients.insert(addr.clone()) {
             return Err(LegacyCode::InvalidParameter.with_message(format!(
                 "Invalid parameter, duplicated recipient address: {}",
                 amount.address(),
@@ -2047,6 +2055,7 @@ mod build_request_tests {
 
     use proptest::prelude::*;
 
+    use transparent::address::TransparentAddress;
     use zcash_address::ToAddress;
     use zcash_protocol::consensus;
 
@@ -2098,6 +2107,63 @@ mod build_request_tests {
             msg,
             format!("Invalid parameter, duplicated recipient address: {T_ADDR_1}"),
         );
+    }
+
+    /// A TEX address (ZIP 320) is a transparent recipient too, and so is rejected when
+    /// repeated like any other.
+    #[test]
+    fn rejects_a_repeated_tex_recipient() {
+        let Address::Transparent(TransparentAddress::PublicKeyHash(hash)) =
+            Address::decode(&params(), T_ADDR_1).expect("T_ADDR_1 is a valid mainnet address")
+        else {
+            panic!("T_ADDR_1 is a P2PKH address");
+        };
+        let tex = ZcashAddress::from_tex(consensus::NetworkType::Main, hash).encode();
+
+        let msg = err_message(&[amount(&tex, "0.1"), amount(&tex, "0.2")]);
+        assert_eq!(
+            msg,
+            format!("Invalid parameter, duplicated recipient address: {tex}"),
+        );
+    }
+
+    /// A shielded recipient may be paid more than once, as ZIP 321 permits. Each payment
+    /// keeps its own amount and memo, in order, so a message split across several memos to
+    /// one recipient arrives as written.
+    #[test]
+    fn accepts_a_repeated_shielded_recipient() {
+        for addr in [SAPLING_ADDR, UNIFIED_ADDR_1] {
+            let amounts = [
+                amount_with_memo(addr, "0.1", "6669727374"),
+                amount_with_memo(addr, "0.2", "7365636f6e64"),
+                amount(addr, "0.3"),
+            ];
+            let request = build_request(&params(), &amounts)
+                .expect("a repeated shielded recipient should build a request");
+
+            let built = request
+                .payments()
+                .values()
+                .map(|p| (p.recipient_address().clone(), p.amount(), p.memo().cloned()))
+                .collect::<Vec<_>>();
+            let expected = amounts
+                .iter()
+                .map(|a| {
+                    (
+                        a.address()
+                            .parse::<ZcashAddress>()
+                            .expect("a valid address"),
+                        Some(zatoshis_from_value(a.amount()).expect("a valid amount")),
+                        a.memo()
+                            .as_deref()
+                            .map(parse_memo)
+                            .transpose()
+                            .expect("a valid memo"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(built, expected, "payments to {addr}");
+        }
     }
 
     #[test]
@@ -2219,10 +2285,11 @@ mod build_request_tests {
 
     proptest! {
         /// For any non-empty list of recipients drawn from the address pool, `build_request`
-        /// succeeds with one payment per recipient exactly when all addresses are distinct,
-        /// and otherwise rejects the request as a duplicate.
+        /// succeeds with one payment per recipient exactly when no transparent recipient
+        /// appears more than once, and otherwise rejects the request as a duplicate. Shielded
+        /// recipients may repeat freely.
         #[test]
-        fn dedups_iff_all_recipients_distinct(
+        fn rejects_iff_a_transparent_recipient_repeats(
             indices in prop::collection::vec(0..ADDR_POOL.len(), 1..8),
         ) {
             let amounts = indices
@@ -2230,15 +2297,25 @@ mod build_request_tests {
                 .map(|&i| amount(ADDR_POOL[i], "0.1"))
                 .collect::<Vec<_>>();
 
-            let unique = indices.iter().collect::<HashSet<_>>().len();
+            let transparent = indices
+                .iter()
+                .filter(|&&i| {
+                    ADDR_POOL[i]
+                        .parse::<ZcashAddress>()
+                        .expect("the pool holds valid addresses")
+                        .is_transparent_only()
+                })
+                .collect::<Vec<_>>();
+            let transparent_repeats =
+                transparent.iter().collect::<HashSet<_>>().len() != transparent.len();
             let result = build_request(&params(), &amounts);
 
-            if unique == indices.len() {
-                let request = result.expect("distinct recipients should build a request");
-                prop_assert_eq!(request.payments().len(), indices.len());
-            } else {
-                let err = result.expect_err("duplicate recipients should be rejected");
+            if transparent_repeats {
+                let err = result.expect_err("a repeated transparent recipient should be rejected");
                 prop_assert!(err.message().contains("duplicated recipient address"));
+            } else {
+                let request = result.expect("only shielded recipients repeat, which is allowed");
+                prop_assert_eq!(request.payments().len(), indices.len());
             }
         }
 
