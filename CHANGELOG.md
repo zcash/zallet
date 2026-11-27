@@ -37,6 +37,13 @@ be considered breaking changes.
 
 ### Changed
 
+- `z_sendmany`, `z_sendfromaccount` and `pczt_create` now accept a shielded
+  recipient (a Sapling or unified address) named more than once in the same
+  call, as ZIP 321 allows. Each entry becomes its own output with its own
+  amount and memo, so a message can be split across several memos to one
+  recipient. A transparent or TEX recipient named more than once is still
+  rejected with `Invalid parameter, duplicated recipient address`, as in
+  `zcashd` (#978).
 - The wallet database file is now created with a protected owner-only ACL on
   Windows, matching the owner-only mode `0600` it already used on Unix
   (previously it inherited the data directory's access control there). An

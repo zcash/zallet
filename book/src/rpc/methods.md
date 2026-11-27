@@ -108,6 +108,9 @@ are not supported: a ZIP 320 (TEX) recipient must be paid with
   - `address` (string, required) Recipient address.
   - `amount` (numeric, required) Amount in ZEC.
   - `memo` (string, optional) Optional memo for shielded recipients.
+
+  A shielded address may appear more than once, as in `z_sendmany`; a
+  transparent or TEX address may not.
 - `minconf` (numeric, optional) Minimum confirmations for inputs.
 - `privacy_policy` (string, optional, default=`"FullPrivacy"`) The most
   the transaction is permitted to reveal, using the same values as
@@ -716,6 +719,11 @@ TODO: <https://github.com/zcash/zallet/issues/137>
   - `memo` (string, optional) If the address is a zaddr, raw data represented in
     hexadecimal string format. If the output is being sent to a transparent
     address, it’s an error to include this field.
+
+  A zaddr or Unified Address may appear more than once, each entry becoming its
+  own output with its own amount and memo (for example, to send a message split
+  across several memos to one recipient). A taddr or TEX address may appear only
+  once.
 - `minconf` (numeric, optional) Only use funds confirmed at least this many times.
 - `fee` (numeric, optional) If set, it must be null. Zallet always uses a fee
   calculated according to ZIP 317.
