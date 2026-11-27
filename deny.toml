@@ -50,6 +50,8 @@ exceptions = [
     { name = "icu_properties", allow = ["Unicode-3.0"] },
     { name = "icu_properties_data", allow = ["Unicode-3.0"] },
     { name = "icu_provider", allow = ["Unicode-3.0"] },
+    { name = "imbl", allow = ["MPL-2.0"] },
+    { name = "imbl-sized-chunks", allow = ["MPL-2.0"] },
     { name = "known-values", allow = ["BSD-2-Clause-Patent"] },
     { name = "konst", allow = ["Zlib"] },
     { name = "konst_macro_rules", allow = ["Zlib"] },

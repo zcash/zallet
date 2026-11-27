@@ -94,6 +94,10 @@ be considered breaking changes.
 - `signmessage` reports "Private key not available" for a transparent pubkey
   or address imported without its private key, instead of
   "Error: Query returned no rows". P2SH addresses remain unsupported.
+- `pczt_extract` no longer fails for a PCZT that spends a P2SH multisig output
+  whose redeem script has 4 to 7 public keys (#976). Previously the length of
+  the redeem script was encoded incorrectly in the input's `scriptSig`, and
+  extraction failed with an `InvalidScriptSig` error.
 
 ## [0.1.0-beta.4] - 2026-11-01
 
