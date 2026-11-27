@@ -180,17 +180,17 @@ pub(crate) async fn call<C: Chain>(
         // connection is still held; the matching keys are decrypted below, after it is
         // released.
         #[cfg(feature = "zcashd-import")]
-        let standalone_addrs = standalone_transparent_receivers(handle.as_ref(), account.id())?;
+        let standalone_pubkeys = standalone_transparent_receivers(handle.as_ref(), account.id())?;
 
         (
             account,
             proposal,
             #[cfg(feature = "zcashd-import")]
-            standalone_addrs,
+            standalone_pubkeys,
         )
     };
     #[cfg(feature = "zcashd-import")]
-    let (account, proposal, standalone_addrs) = staged;
+    let (account, proposal, standalone_pubkeys) = staged;
     #[cfg(not(feature = "zcashd-import"))]
     let (account, proposal) = staged;
 
@@ -216,7 +216,7 @@ pub(crate) async fn call<C: Chain>(
 
     #[cfg(feature = "zcashd-import")]
     let standalone_keys =
-        decrypt_standalone_transparent_keys(&keystore, &standalone_addrs, &proposal).await?;
+        decrypt_standalone_transparent_keys(&keystore, &standalone_pubkeys, &proposal).await?;
 
     // TODO: verify that the proposal satisfies the requested privacy policy
 

@@ -326,7 +326,7 @@ pub(crate) async fn call<C: Chain>(
         // connection is still held; the matching keys are decrypted below, after it is
         // released.
         #[cfg(feature = "zcashd-import")]
-        let standalone_addrs = standalone_transparent_receivers(handle.as_ref(), account_id)?;
+        let standalone_pubkeys = standalone_transparent_receivers(handle.as_ref(), account_id)?;
 
         (
             account_id,
@@ -334,11 +334,11 @@ pub(crate) async fn call<C: Chain>(
             proposal,
             preflight,
             #[cfg(feature = "zcashd-import")]
-            standalone_addrs,
+            standalone_pubkeys,
         )
     };
     #[cfg(feature = "zcashd-import")]
-    let (account_id, account, proposal, preflight, standalone_addrs) = staged;
+    let (account_id, account, proposal, preflight, standalone_pubkeys) = staged;
     #[cfg(not(feature = "zcashd-import"))]
     let (account_id, account, proposal, preflight) = staged;
 
@@ -364,7 +364,7 @@ pub(crate) async fn call<C: Chain>(
 
     #[cfg(feature = "zcashd-import")]
     let standalone_keys =
-        decrypt_standalone_transparent_keys(&keystore, &standalone_addrs, &proposal).await?;
+        decrypt_standalone_transparent_keys(&keystore, &standalone_pubkeys, &proposal).await?;
 
     Ok((
         preflight,
