@@ -2,8 +2,8 @@
 # cargo-vet imports lock
 
 [[publisher.addchain]]
-version = "0.3.0"
-when = "2026-02-26"
+version = "0.3.1"
+when = "2026-11-11"
 user-id = 6289
 user-login = "str4d"
 user-name = "Jack Grigg"
@@ -86,8 +86,8 @@ user-login = "str4d"
 user-name = "Jack Grigg"
 
 [[publisher.groth16]]
-version = "0.2.0"
-when = "2026-09-26"
+version = "0.2.2"
+when = "2026-11-14"
 user-id = 6289
 user-login = "str4d"
 user-name = "Jack Grigg"
