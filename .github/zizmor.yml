@@ -13,4 +13,4 @@ rules:
       # on. The action is already SHA-pinned and runs under a job-scoped
       # contents:write token, so the supply-chain gain from dropping it is small
       # relative to that added, lossier script. Keep the action.
-      - binaries-and-deb-release.yml:754
+      - binaries-and-deb-release.yml:950
