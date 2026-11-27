@@ -970,7 +970,10 @@ mod tests {
         );
     }
 
-    /// Fifteen compressed public keys fit within the 520-byte P2SH redeem-script limit.
+    /// The most members a standard P2SH multisig redeem script can name: fifteen compressed
+    /// public keys fit within the 520-byte redeem-script limit. Scripts with more than seven
+    /// uncompressed members exceed that limit; `multisig_pubkeys` does not check it, so the
+    /// property draws both encodings from the same range.
     #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
     const MAX_COMPRESSED_P2SH_MEMBERS: usize = 15;
 
@@ -1001,30 +1004,57 @@ mod tests {
         }
     }
 
-    /// Synthetic proposal inputs exercise key collection without chain state or proving.
+    /// The keys Zallet collects for a proposal are exactly those the keystore holds for each
+    /// standalone input address, collected once per address, and signing with them through
+    /// the `create_proposed_transactions` call that `z_sendmany` makes succeeds exactly when
+    /// they meet a multisig address's threshold. The spend is purely transparent, so no
+    /// chain state or proving is involved.
     #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
     #[test]
-    fn standalone_proposal_keys_are_complete_and_not_duplicated_per_input() {
-        use std::{collections::BTreeMap, num::NonZeroUsize};
+    fn collected_standalone_keys_sign_a_multisig_spend_at_its_threshold() {
+        use std::{
+            collections::{BTreeMap, HashMap},
+            convert::Infallible,
+            num::NonZeroUsize,
+        };
+
+        use rand::{rand_core::UnwrapErr, rngs::SysRng};
         use transparent::{
             address::TransparentAddress,
-            builder::{SpendInfo, TransparentBuilder, TransparentInputInfo, TransparentSigningSet},
+            builder::{SpendInfo, TransparentInputInfo},
             bundle::{OutPoint, TxOut},
         };
         use zcash_client_backend::{
             data_api::{
                 AccountBirthday, WalletRead, WalletWrite,
                 chain::ChainState,
-                wallet::{ConfirmationsPolicy, TargetHeight},
+                error::Error as CreateError,
+                wallet::{
+                    ConfirmationsPolicy, SpendingKeys, TargetHeight, create_proposed_transactions,
+                },
             },
             fees::{StandardFeeRule, TransactionBalance},
             proposal::Proposal,
-            wallet::WalletTransparentOutput,
-            zip321::TransactionRequest,
+            wallet::{OvkPolicy, TransparentAddressSource, WalletTransparentOutput},
+            zip321::{Payment, TransactionRequest},
         };
-        use zcash_keys::keys::transparent::Key;
-        use zcash_primitives::block::BlockHash;
-        use zcash_protocol::consensus::BlockHeight;
+        use zcash_client_sqlite::util::SystemClock;
+        use zcash_keys::{address::Address, keys::transparent::Key};
+        use zcash_primitives::{
+            block::BlockHash,
+            transaction::{
+                builder::Error as BuilderError,
+                fees::{
+                    FeeRule,
+                    transparent::{InputView, OutputView},
+                },
+            },
+        };
+        use zcash_proofs::prover::LocalTxProver;
+        use zcash_protocol::{
+            PoolType,
+            consensus::{H0, NetworkUpgrade, Parameters},
+        };
         use zcash_script::{
             pattern::{check_multisig, pay_to_script_hash},
             script::Component,
@@ -1033,35 +1063,44 @@ mod tests {
         use super::{decrypt_standalone_transparent_keys, standalone_transparent_receivers};
         use crate::components::keystore::testing::keystore_and_database_with_config;
 
-        let datadir = tempdir().unwrap();
-        run_async(|| async {
+        let secrets = [1, 2, 3].map(|byte| {
+            secp256k1::SecretKey::from_secret_bytes([byte; 32]).expect("valid secret key")
+        });
+        let pubkeys = secrets.map(|sk| sk.public_key());
+        let serialized = pubkeys.map(|pk| pk.serialize());
+        let redeem =
+            Component(check_multisig(2, &serialized.each_ref().map(|pk| &pk[..]), false).unwrap());
+        let p2sh = TransparentAddress::from_script_pubkey(&Component(pay_to_script_hash(&redeem)))
+            .unwrap();
+        let p2pkh = TransparentAddress::from_pubkey(&pubkeys[0]);
+        let recipient = TransparentAddress::from_pubkey(
+            &secp256k1::SecretKey::from_secret_bytes([4; 32])
+                .expect("valid secret key")
+                .public_key(),
+        );
+
+        // Imports the multisig address and the first member's P2PKH address into a fresh
+        // wallet whose keystore holds the first `held` member keys, then collects the
+        // standalone keys for a proposal spending two outputs of the multisig address, one
+        // of the P2PKH address, and one of an HD-derived address, and builds it.
+        let collect_and_build = async |held: usize| {
+            let datadir = tempdir().unwrap();
             let (keystore, database) =
                 keystore_and_database_with_config(&datadir, Some(NonZeroUsize::MIN), |_| {}).await;
-            let secrets = [1, 2, 3].map(|byte| {
-                secp256k1::SecretKey::from_secret_bytes([byte; 32]).expect("valid secret key")
-            });
-            for secret in &secrets[..2] {
+            for secret in &secrets[..held] {
                 keystore
                     .encrypt_and_store_standalone_transparent_key(&Key::new(*secret, true))
                     .await
                     .unwrap();
             }
-            let pubkeys = secrets.map(|sk| sk.public_key());
-            let serialized = pubkeys.map(|pk| pk.serialize());
-            let redeem = Component(
-                check_multisig(2, &serialized.each_ref().map(|pk| &pk[..]), false).unwrap(),
-            );
-            let p2sh =
-                TransparentAddress::from_script_pubkey(&Component(pay_to_script_hash(&redeem)))
-                    .unwrap();
-            let p2pkh = TransparentAddress::from_pubkey(&pubkeys[0]);
-            let birthday = AccountBirthday::from_parts(
-                ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
-                None,
-            );
-            let (account, standalone) = {
+
+            // Stage the database work on a connection that is released before the keystore
+            // acquires one, as `z_sendmany` does.
+            let (usk, standalone, derived, derived_pubkey) = {
                 let mut wallet = database.handle().await.unwrap();
-                let (account, _) = wallet
+                let birthday =
+                    AccountBirthday::from_parts(ChainState::empty(H0, BlockHash([0; 32])), None);
+                let (account, usk) = wallet
                     .create_account(
                         "test",
                         &secrecy::SecretVec::new(vec![0; 32]),
@@ -1075,91 +1114,158 @@ mod tests {
                 wallet
                     .import_standalone_transparent_pubkey(account, pubkeys[0])
                     .unwrap();
-                (
-                    account,
-                    standalone_transparent_receivers(wallet.as_ref(), account).unwrap(),
-                )
-            };
-            let derived = database
-                .handle()
-                .await
-                .unwrap()
-                .get_transparent_receivers(account, true, true)
-                .unwrap()
-                .into_iter()
-                .find_map(|(address, metadata)| metadata.source().scope().map(|_| address))
-                .expect("the account has an HD receiver");
-            let addresses = [p2sh, p2sh, p2pkh, derived];
-            let inputs: Vec<_> = addresses
-                .into_iter()
-                .enumerate()
-                .map(|(index, address)| {
-                    WalletTransparentOutput::from_parts(
-                        OutPoint::new([0; 32], u32::try_from(index).unwrap()),
-                        TxOut::new(Zatoshis::const_from_u64(COIN), address.script().into()),
-                        None,
-                        Some(()),
-                        None,
-                        None,
-                    )
+                let (derived, derived_pubkey) = wallet
+                    .get_transparent_receivers(account, true, true)
                     .unwrap()
-                })
-                .collect();
-            let proposal: Proposal<_, ()> = Proposal::single_step(
-                TransactionRequest::empty(),
-                BTreeMap::new(),
-                inputs,
-                None,
-                BlockHeight::from_u32(0),
-                TransactionBalance::new(
-                    vec![],
-                    Zatoshis::from_u64(COIN * addresses.len() as u64).unwrap(),
+                    .into_iter()
+                    .find_map(|(address, metadata)| match metadata.source() {
+                        TransparentAddressSource::Derived {
+                            scope,
+                            address_index,
+                        } => Some((
+                            address,
+                            usk.transparent()
+                                .derive_secret_key(*scope, *address_index)
+                                .expect("derivation succeeds for a wallet-derived address")
+                                .public_key(),
+                        )),
+                        _ => None,
+                    })
+                    .expect("the account has an HD receiver");
+                let standalone =
+                    standalone_transparent_receivers(wallet.as_ref(), account).unwrap();
+                (usk, standalone, derived, derived_pubkey)
+            };
+
+            let multisig_spend = || SpendInfo::P2sh {
+                redeem_script: redeem.weaken(),
+            };
+            let inputs: Vec<_> = [
+                (p2sh, multisig_spend()),
+                (p2sh, multisig_spend()),
+                (p2pkh, SpendInfo::P2pkh { pubkey: pubkeys[0] }),
+                (
+                    derived,
+                    SpendInfo::P2pkh {
+                        pubkey: derived_pubkey,
+                    },
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (address, spend_info))| {
+                TransparentInputInfo::from_parts(
+                    OutPoint::new([0; 32], u32::try_from(index).unwrap()),
+                    TxOut::new(Zatoshis::const_from_u64(COIN), address.script().into()),
+                    spend_info,
                 )
-                .unwrap(),
-                StandardFeeRule::Zip317,
-                TargetHeight::from(BlockHeight::from_u32(1)),
+                .unwrap()
+            })
+            .collect();
+
+            // Pay everything but the fee to a single transparent recipient, so that the
+            // transaction needs no change output.
+            let params = *database.params();
+            let target_height = params
+                .activation_height(NetworkUpgrade::Nu5)
+                .expect("NU5 is active on the test network");
+            let fee_rule = StandardFeeRule::Zip317;
+            let recipient_output_size =
+                TxOut::new(Zatoshis::ZERO, recipient.script().into()).serialized_size();
+            let fee = fee_rule
+                .fee_required(
+                    &params,
+                    target_height,
+                    inputs.iter().map(InputView::serialized_size),
+                    [recipient_output_size],
+                    0,
+                    0,
+                    0,
+                    0,
+                )
+                .unwrap();
+            let total = inputs
+                .iter()
+                .map(|input| input.coin().value())
+                .sum::<Option<Zatoshis>>()
+                .unwrap();
+            let request = TransactionRequest::new(vec![Payment::without_memo(
+                Address::Transparent(recipient).to_zcash_address(&params),
+                (total - fee).unwrap(),
+            )])
+            .unwrap();
+            let proposal: Proposal<_, ()> = Proposal::single_step(
+                request,
+                BTreeMap::from([(0, PoolType::Transparent)]),
+                inputs
+                    .iter()
+                    .map(|input| {
+                        WalletTransparentOutput::from_parts(
+                            input.outpoint().clone(),
+                            input.coin().clone(),
+                            None,
+                            Some(()),
+                            None,
+                            None,
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+                None,
+                H0,
+                TransactionBalance::new(vec![], fee).unwrap(),
+                fee_rule,
+                TargetHeight::from(target_height),
                 ConfirmationsPolicy::default(),
                 false,
                 false,
             )
             .unwrap();
+
             let keys = decrypt_standalone_transparent_keys(&keystore, &standalone, &proposal)
                 .await
                 .unwrap();
+
+            let mut wallet = database.handle().await.unwrap();
+            let prover = LocalTxProver::bundled();
+            let built = match create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
+                wallet.as_mut(),
+                &params,
+                &SystemClock,
+                &mut UnwrapErr(SysRng),
+                &prover,
+                &prover,
+                &SpendingKeys::new(usk, keys.clone()),
+                OvkPolicy::Sender,
+                &proposal,
+                None,
+            ) {
+                Ok(_) => Ok(()),
+                Err(CreateError::Builder(BuilderError::TransparentBuild(e))) => Err(e),
+                Err(e) => panic!("building failed for a reason other than signing: {e:?}"),
+            };
+
+            (keys, built)
+        };
+
+        run_async(|| async {
+            // Two of the three members meet the threshold.
             assert_eq!(
-                keys,
-                std::collections::HashMap::from([
-                    (p2sh, secrets[..2].to_vec()),
-                    (p2pkh, vec![secrets[0]]),
-                ])
+                collect_and_build(2).await,
+                (
+                    HashMap::from([(p2sh, secrets[..2].to_vec()), (p2pkh, vec![secrets[0]])]),
+                    Ok(()),
+                ),
             );
 
-            // The collected two keys meet this 2-of-3 threshold; one key does not.
-            let mut builder = TransparentBuilder::empty();
-            for input in &proposal.steps().head.transparent_inputs()[..2] {
-                builder.add_input(
-                    TransparentInputInfo::from_parts(
-                        input.outpoint().clone(),
-                        input.txout().clone(),
-                        SpendInfo::P2sh {
-                            redeem_script: redeem.weaken(),
-                        },
-                    )
-                    .unwrap(),
-                );
-            }
-            let bundle = builder.build().unwrap();
-            let mut signing_set = TransparentSigningSet::new();
-            signing_set.add_key(keys[&p2sh][0]);
+            // One member does not.
             assert_eq!(
-                bundle
-                    .clone()
-                    .apply_signatures(|_| [0; 32], &signing_set)
-                    .unwrap_err(),
-                transparent::builder::Error::MissingSigningKey
+                collect_and_build(1).await,
+                (
+                    HashMap::from([(p2sh, vec![secrets[0]]), (p2pkh, vec![secrets[0]])]),
+                    Err(transparent::builder::Error::MissingSigningKey),
+                ),
             );
-            signing_set.add_key(keys[&p2sh][1]);
-            bundle.apply_signatures(|_| [0; 32], &signing_set).unwrap();
         });
     }
 }

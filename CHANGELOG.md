@@ -88,6 +88,9 @@ be considered breaking changes.
   enough member keys to meet its signature threshold (#797). These spends
   previously failed with "Error: Query returned no rows". If too few keys are
   available, transaction construction reports "Missing signing key" instead.
+- `z_sendmany` and `z_shieldcoinbase` report "Missing signing key" when spending
+  from a transparent pubkey imported without its private key, instead of
+  "Error: Query returned no rows".
 - `signmessage` reports "Private key not available" for a transparent pubkey
   or address imported without its private key, instead of
   "Error: Query returned no rows". P2SH addresses remain unsupported.
