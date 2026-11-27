@@ -4,6 +4,7 @@
 // expansion; allow it module-wide until jsonrpsee ships a fix.
 #![allow(clippy::double_must_use)]
 
+use abscissa_core::Application;
 use async_trait::async_trait;
 use jsonrpsee::{
     core::{JsonValue, RpcResult},
@@ -12,10 +13,13 @@ use jsonrpsee::{
 #[cfg(zallet_build = "wallet")]
 use zcash_protocol::consensus::Parameters;
 
-use crate::components::{
-    chain::Chain,
-    database::{Database, DbHandle},
-    sync::SyncStatusReader,
+use crate::{
+    components::{
+        chain::Chain,
+        database::{Database, DbHandle},
+        sync::SyncStatusReader,
+    },
+    prelude::APP,
 };
 
 #[cfg(zallet_build = "wallet")]
@@ -1110,6 +1114,7 @@ impl<C: Chain> RpcServer for RpcImpl<C> {
             account,
             receiver_types,
             diversifier_index,
+            APP.config().rpc.transparent_gap_limit_policy(),
         )
         .await
     }

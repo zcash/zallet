@@ -34,9 +34,19 @@ be considered breaking changes.
   and CLI work is never starved by the connections the sync engine retains.
   Setting it at or below that number starves wallet operations, so it is
   intended mainly for regression testing, not production use.
+- An `rpc.issue_past_transparent_gap_limit` configuration option lets
+  `z_getaddressforaccount` keep issuing addresses with a transparent receiver
+  once the transparent gap limit is reached, continuing at the next index that
+  has not been issued instead of failing. It is off by default. Funds sent to
+  an address issued this way are not found when the wallet is recovered from
+  its mnemonic phrase alone, so it is intended for operators who back up the
+  wallet database.
 
 ### Changed
 
+- The `z_getaddressforaccount` error returned when the transparent gap limit is
+  reached now also describes how to continue: fund an issued address, request
+  a specific diversifier index, or set `rpc.issue_past_transparent_gap_limit`.
 - The wallet database file is now created with a protected owner-only ACL on
   Windows, matching the owner-only mode `0600` it already used on Unix
   (previously it inherited the data directory's access control there). An
