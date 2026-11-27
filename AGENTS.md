@@ -163,6 +163,24 @@ Key external dependencies from the Zcash ecosystem:
 
   This applies to production code and tests alike.
 
+- **Use `TargetHeight` for the height a transaction is being built for, and
+  `BlockHeight` for blocks that exist.** `zcash_client_backend` keeps the two
+  apart: `TargetHeight` is the *next* chain tip, the height a transaction under
+  construction would be mined at (`get_target_and_anchor_heights` returns it
+  first, and `Proposal::min_target_height` and network-upgrade decisions for a
+  new transaction are made against it), while `BlockHeight` names an existing
+  block: the chain tip, an anchor, a mined height, a birthday, a scan range.
+  - Type a parameter, field, or return value that carries a target height as
+    `TargetHeight`, not `BlockHeight`, so it cannot be confused with the tip
+    one block below it. An off-by-one here decides which network upgrade a
+    transaction is built under.
+  - Convert only at a boundary that genuinely needs the other type (e.g.
+    `params.is_nu_active(nu, target_height.into())`), not to pass the value
+    through. If a function converts a `TargetHeight` to `BlockHeight` only to
+    hand it to a helper that converts it back, retype the helper instead.
+  - Tests follow the same rule: a fixture standing for "the height this
+    transaction targets" is a `TargetHeight`.
+
 ## Build, Test, and Development Commands
 
 The workspaces have separate lockfiles, so every check runs once **per
