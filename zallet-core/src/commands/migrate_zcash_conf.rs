@@ -13,7 +13,7 @@ use tokio::{
 use crate::{
     cli::MigrateZcashConfCmd,
     commands::{AsyncRunnable, overwrite_allowed, resolve_output_target, write_config_output},
-    config::{RpcAuthSection, ZalletConfig},
+    config::{RpcAuthSection, TxExpiryDelta, ZalletConfig},
     error::{Error, ErrorKind},
     fl,
     network::RegTestNuParam,
@@ -371,11 +371,11 @@ fn build_actions() -> HashMap<&'static str, Action> {
         .chain(Action::map(
             "txexpirydelta",
             |config| &mut config.builder.tx_expiry_delta,
-            |value| match value.parse() {
-                // Minimum is `TX_EXPIRING_SOON_THRESHOLD + 1`.
-                Ok(0..=3) => Err(()),
-                Ok(n @ 4..) => Ok(n),
-                Err(_) => Err(()),
+            |value| {
+                value
+                    .parse::<u16>()
+                    .map_err(|_| ())
+                    .and_then(|blocks| TxExpiryDelta::try_from(blocks).map_err(|_| ()))
             },
         ))
         // TODO: Decide if we want to distinguish between database migrations (which we
@@ -701,4 +701,44 @@ fn build_actions() -> HashMap<&'static str, Action> {
                 .filter_map(Action::ignore),
         )
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs the `txexpirydelta` migration on `value`, returning the migrated setting.
+    fn migrate_tx_expiry_delta(value: &str) -> Result<Option<TxExpiryDelta>, Error> {
+        let actions = build_actions();
+        let Some(Action::MapTo { f, .. }) = actions.get("txexpirydelta") else {
+            panic!("txexpirydelta maps to a Zallet option");
+        };
+        let mut config = ZalletConfig::default();
+        f(&mut config, value)?;
+        Ok(config.builder.tx_expiry_delta)
+    }
+
+    /// The migration accepts exactly the deltas the config file accepts.
+    #[test]
+    fn tx_expiry_delta_migrates_values_the_config_accepts() {
+        for blocks in [TxExpiryDelta::MIN, TxExpiryDelta::MIN + 1, u16::MAX] {
+            let migrated = migrate_tx_expiry_delta(&blocks.to_string())
+                .expect("a delta at or above the minimum migrates");
+            assert_eq!(migrated, TxExpiryDelta::try_from(blocks).ok());
+        }
+    }
+
+    /// A delta the config file would refuse is refused by the migration too, rather
+    /// than written into a config Zallet then cannot start with.
+    #[test]
+    fn tx_expiry_delta_migration_rejects_values_the_config_rejects() {
+        let below_minimum = (0..TxExpiryDelta::MIN).map(|blocks| blocks.to_string());
+        let not_a_block_count = ["-1", "65536", "4.5", "", "forty"].map(String::from);
+        for value in below_minimum.chain(not_a_block_count) {
+            assert!(
+                migrate_tx_expiry_delta(&value).is_err(),
+                "{value:?} should be rejected",
+            );
+        }
+    }
 }

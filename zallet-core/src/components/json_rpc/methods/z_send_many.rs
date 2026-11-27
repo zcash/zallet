@@ -36,8 +36,9 @@ use crate::{
             asyncop::{ContextInfo, OperationId},
             payments::{
                 AmountParameter, SendResult, broadcast_transactions, build_request,
-                confirmations_policy_for_minconf, get_account_for_address, get_legacy_pool_account,
-                parse_privacy_policy, propose_and_check, spend_policy_for, verify_transactions,
+                confirmations_policy_for_minconf, expiry_height_override, get_account_for_address,
+                get_legacy_pool_account, parse_privacy_policy, propose_and_check, spend_policy_for,
+                verify_transactions,
             },
             server::LegacyCode,
             utils::wallet_handle,
@@ -283,6 +284,11 @@ async fn run<C: Chain>(
     let prover = LocalTxProver::bundled();
     let (wallet, proposal, txids) = crate::spawn_blocking!("z_sendmany prover", move || {
         let params = *wallet.params();
+        let expiry_height = expiry_height_override(
+            wallet.as_ref(),
+            &proposal,
+            APP.config().builder.tx_expiry_delta(),
+        );
         create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             wallet.as_mut(),
             &params,
@@ -293,8 +299,7 @@ async fn run<C: Chain>(
             &spending_keys,
             OvkPolicy::Sender,
             &proposal,
-            // No expiry-height override; each transaction keeps its builder-derived expiry.
-            None,
+            expiry_height,
         )
         .map(|txids| (wallet, proposal, txids))
     })

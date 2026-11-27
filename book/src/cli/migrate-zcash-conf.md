@@ -60,7 +60,7 @@ Every option `zcashd` accepts falls into one of three groups.
 | --- | --- | --- |
 | `orchardactionlimit` | `builder.limits.orchard_actions` | |
 | `spendzeroconfchange` | `builder.spend_zeroconf_change` | `0` / `1` become `false` / `true` |
-| `txexpirydelta` | `builder.tx_expiry_delta` | Values below `4` are rejected as invalid |
+| `txexpirydelta` | `builder.tx_expiry_delta` | Values below `4` are rejected as invalid, as they are in `zallet.toml` |
 | `walletbroadcast` | `external.broadcast` | `0` / `1` become `false` / `true` |
 | `walletnotify` | `external.notify` | Migrated, but not yet implemented: `zallet start` warns and ignores it ([#773]) |
 | `exportdir` | `external.export_dir` | Migrated, but not yet implemented: `zallet start` warns and ignores it ([#773]) |

@@ -37,6 +37,17 @@ be considered breaking changes.
 
 ### Changed
 
+- The `builder.tx_expiry_delta` configuration option now takes effect. When it
+  is set, transactions created by `z_sendmany`, `z_shieldcoinbase` and
+  `pczt_create` expire that many blocks after the first block they could be
+  mined in. Previously the option was read but ignored. When it is unset,
+  transactions keep the network's default (40 blocks, or 120 blocks once NU7 is
+  active); the example config no longer shows a default of 40 for it. A
+  transfer from Orchard to Ironwood in the standard ZIP 318 migration shape
+  always uses the expiry height ZIP 318 specifies, whatever the option is set
+  to.
+- Zallet now refuses to start with `builder.tx_expiry_delta` set below 4,
+  instead of accepting the value and ignoring it.
 - The wallet database file is now created with a protected owner-only ACL on
   Windows, matching the owner-only mode `0600` it already used on Unix
   (previously it inherited the data directory's access control there). An

@@ -51,8 +51,15 @@
 # The number of blocks after which a transaction created by Zallet that has not been
 # mined will become invalid.
 #
-# - Minimum: `TX_EXPIRING_SOON_THRESHOLD + 1`
-#tx_expiry_delta = 40
+# A transaction is built to expire this many blocks after the first block it could
+# be mined in. When unset, the network's default applies: 40 blocks, or 120 blocks
+# once NU7 is active.
+#
+# A transfer from Orchard to Ironwood that takes the standard ZIP 318 migration
+# shape always uses the expiry height ZIP 318 specifies, whatever this is set to.
+#
+# - Minimum: 4
+#tx_expiry_delta = UNSET
 
 # The number of confirmations required for an untrusted transaction output (TXO) to
 # become spendable.

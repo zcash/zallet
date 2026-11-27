@@ -42,7 +42,8 @@ use crate::{
         json_rpc::{
             asyncop::{ContextInfo, OperationId},
             payments::{
-                PrivacyPolicy, SendResult, broadcast_transactions, parse_memo, verify_transactions,
+                PrivacyPolicy, SendResult, broadcast_transactions, expiry_height_override,
+                parse_memo, verify_transactions,
             },
             server::LegacyCode,
             utils::{JsonZec, value_from_zatoshis, wallet_handle},
@@ -598,6 +599,11 @@ async fn run<C: Chain>(
     let prover = LocalTxProver::bundled();
     let (wallet, proposal, txids) = crate::spawn_blocking!("z_shieldcoinbase runner", move || {
         let params = *wallet.params();
+        let expiry_height = expiry_height_override(
+            wallet.as_ref(),
+            &proposal,
+            APP.config().builder.tx_expiry_delta(),
+        );
         create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             wallet.as_mut(),
             &params,
@@ -608,8 +614,7 @@ async fn run<C: Chain>(
             &spending_keys,
             OvkPolicy::Sender,
             &proposal,
-            // No expiry-height override; the transaction keeps its builder-derived expiry.
-            None,
+            expiry_height,
         )
         .map(|txids| (wallet, proposal, txids))
     })

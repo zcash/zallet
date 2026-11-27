@@ -144,10 +144,6 @@ impl StartCmd {
         if config.builder.spend_zeroconf_change.is_some() {
             warn_unused("builder.spend_zeroconf_change");
         }
-        // TODO: https://github.com/zcash/zallet/issues/200
-        if config.builder.tx_expiry_delta.is_some() {
-            warn_unused("builder.tx_expiry_delta");
-        }
         // These are accepted, documented, and migrated from zcashd config, but nothing
         // reads them at runtime, so a migrated wallet silently loses the behaviour.
         if config.external.export_dir.is_some() {

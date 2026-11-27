@@ -10,14 +10,15 @@ use zcash_address::{ZcashAddress, unified};
 use zcash_client_backend::{
     data_api::{
         Account as _, WalletRead,
+        anchor_retention::PoolMigrationParams,
         wallet::{
-            ConfirmationsPolicy,
+            ConfirmationsPolicy, TargetHeight,
             input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy},
             propose_transfer,
         },
     },
     fees::{
-        DustOutputPolicy, StandardFeeRule, TransparentChangePolicy,
+        DustOutputPolicy, StandardFeeRule, TransparentChangePolicy, canonical_crossing_fee,
         standard::MultiOutputChangeStrategy,
     },
     proposal::{Proposal, Step},
@@ -29,6 +30,7 @@ use zcash_keys::{address::Address, keys::UnifiedFullViewingKey};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
     PoolType, ShieldedPool, TxId,
+    consensus::BlockHeight,
     memo::MemoBytes,
     value::{MAX_MONEY, Zatoshis},
 };
@@ -36,6 +38,7 @@ use zip32::{AccountId, fingerprint::SeedFingerprint};
 
 use crate::{
     components::{chain::Chain, database::DbConnection},
+    config::TxExpiryDelta,
     fl,
     network::Network,
     prelude::APP,
@@ -766,6 +769,54 @@ pub(super) struct ShieldedActionLimitExceeded {
     /// Which side of the pool's bundle exceeds the limit: `"inputs"`, `"outputs"`, or
     /// `"actions"` when both do.
     pub(super) kind: &'static str,
+}
+
+/// Returns the expiry height to build `proposal`'s transactions with, or `None` to
+/// leave the choice to the transaction builder.
+///
+/// With `builder.tx_expiry_delta` set, that is the configured number of blocks past the
+/// proposal's target height. A proposal containing a canonical ZIP 318 crossing gets no
+/// override: such a transaction must carry the expiry height ZIP 318 specifies, and the
+/// backend refuses to build it with any other.
+pub(super) fn expiry_height_override<FeeRuleT, NoteRef>(
+    wallet: &DbConnection,
+    proposal: &Proposal<FeeRuleT, NoteRef>,
+    delta: Option<TxExpiryDelta>,
+) -> Option<BlockHeight> {
+    let params = wallet.params();
+    expiry_height_for_proposal(
+        params,
+        &wallet.pool_migration_params(params),
+        proposal,
+        delta,
+    )
+}
+
+/// [`expiry_height_override`], given the ZIP 318 parameters the wallet reports.
+fn expiry_height_for_proposal<FeeRuleT, NoteRef>(
+    params: &Network,
+    zip318: &PoolMigrationParams,
+    proposal: &Proposal<FeeRuleT, NoteRef>,
+    delta: Option<TxExpiryDelta>,
+) -> Option<BlockHeight> {
+    let target_height = proposal.min_target_height();
+    // The same test the backend applies to each step when it builds the transaction.
+    let has_canonical_crossing =
+        canonical_crossing_fee(params, target_height.into()).is_ok_and(|fee| {
+            proposal
+                .steps()
+                .iter()
+                .any(|step| step.is_canonical_crossing(zip318, fee))
+        });
+
+    delta
+        .filter(|_| !has_canonical_crossing)
+        .map(|delta| expiry_height_after(target_height, delta))
+}
+
+/// The height at which a transaction built for `target_height` expires under `delta`.
+fn expiry_height_after(target_height: TargetHeight, delta: TxExpiryDelta) -> BlockHeight {
+    BlockHeight::from(target_height) + delta.blocks()
 }
 
 /// Checks every step of the proposal against the per-pool action limit.
@@ -2580,5 +2631,169 @@ mod proposal_policy_tests {
             vec![],
         );
         assert_eq!(check_shielded_action_limits(&proposal, 2), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod expiry_height_tests {
+    //! Tests for how `builder.tx_expiry_delta` becomes a transaction's expiry height.
+
+    use std::collections::BTreeMap;
+
+    use incrementalmerkletree::Position;
+    use nonempty::NonEmpty;
+    use proptest::prelude::*;
+    use zcash_client_backend::{
+        data_api::anchor_retention::AnchorRetentionInterval,
+        fees::TransactionBalance,
+        proposal::ShieldedInputs,
+        wallet::{Note, ReceivedNote},
+    };
+    use zcash_protocol::{consensus, value::COIN, zip318::BlockSpacing};
+
+    use super::*;
+
+    /// A height on the ZIP 318 anchor grid, which a canonical crossing must be anchored to.
+    const ANCHOR_HEIGHT: u32 = 2 * 144;
+
+    /// A canonical ZIP 318 denomination.
+    const CANONICAL_VALUE: u64 = COIN;
+
+    /// An amount that is not a canonical ZIP 318 denomination.
+    const ORDINARY_VALUE: u64 = COIN + 1;
+
+    fn params() -> Network {
+        Network::Consensus(consensus::Network::MainNetwork)
+    }
+
+    fn zip318() -> PoolMigrationParams {
+        PoolMigrationParams::new(BlockSpacing::UNIFORM, AnchorRetentionInterval::ZIP_318)
+    }
+
+    fn target_height() -> TargetHeight {
+        TargetHeight::from(BlockHeight::from_u32(ANCHOR_HEIGHT + 1))
+    }
+
+    fn delta(blocks: u16) -> TxExpiryDelta {
+        TxExpiryDelta::try_from(blocks).expect("the delta is at least the minimum")
+    }
+
+    fn orchard_note(value: u64) -> Note {
+        let sk: orchard::keys::SpendingKey =
+            Option::from(orchard::keys::SpendingKey::from_bytes([0x2a; 32]))
+                .expect("valid spending key");
+        let recipient =
+            orchard::keys::FullViewingKey::from(&sk).address_at(0u32, zip32::Scope::External);
+        let rho = Option::from(orchard::note::Rho::from_bytes(&[0; 32])).expect("valid rho");
+        let rseed = Option::from(orchard::note::RandomSeed::from_bytes([0x1b; 32], &rho))
+            .expect("valid rseed");
+        Note::Orchard {
+            note: Option::from(orchard::note::Note::from_parts(
+                recipient,
+                orchard::value::NoteValue::from_raw(value),
+                rho,
+                rseed,
+                orchard::note::NoteVersion::V2,
+            ))
+            .expect("valid note"),
+            pool: orchard::ValuePool::Orchard,
+        }
+    }
+
+    /// A proposal spending one Orchard note to pay `value` into Ironwood, with no change,
+    /// at the fee a canonical ZIP 318 crossing pays.
+    ///
+    /// This is a canonical crossing exactly when `value` is a canonical denomination.
+    fn crossing_proposal(value: u64) -> Proposal<(), u32> {
+        let fee = canonical_crossing_fee(&params(), target_height().into())
+            .expect("the canonical shape has a ZIP 317 fee");
+        let note_value = value + u64::from(fee);
+        let inputs = ShieldedInputs::from_parts(NonEmpty::singleton(ReceivedNote::from_parts(
+            0u32,
+            TxId::from_bytes([0; 32]),
+            0,
+            orchard_note(note_value),
+            zip32::Scope::External,
+            Position::from(0u64),
+            Some(BlockHeight::from_u32(ANCHOR_HEIGHT)),
+            None,
+        )));
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            arb::UNIFIED_ADDR_2
+                .parse::<ZcashAddress>()
+                .expect("a valid unified address"),
+            Zatoshis::const_from_u64(value),
+        )])
+        .expect("a valid transaction request");
+
+        Proposal::single_step(
+            request,
+            BTreeMap::from([(0usize, PoolType::IRONWOOD)]),
+            vec![],
+            Some(inputs),
+            BlockHeight::from_u32(ANCHOR_HEIGHT),
+            TransactionBalance::new(vec![], fee).expect("valid balance"),
+            (),
+            target_height(),
+            ConfirmationsPolicy::default(),
+            false,
+            true,
+        )
+        .expect("valid proposal")
+    }
+
+    /// With the option unset, the transaction builder chooses the expiry height.
+    #[test]
+    fn unset_delta_leaves_the_expiry_to_the_builder() {
+        let proposal = crossing_proposal(ORDINARY_VALUE);
+        assert_eq!(
+            expiry_height_for_proposal(&params(), &zip318(), &proposal, None),
+            None,
+        );
+    }
+
+    /// A configured delta counts from the proposal's target height.
+    #[test]
+    fn delta_counts_from_the_target_height() {
+        let proposal = crossing_proposal(ORDINARY_VALUE);
+        let delta = delta(TxExpiryDelta::MIN);
+        assert_eq!(
+            expiry_height_for_proposal(&params(), &zip318(), &proposal, Some(delta)),
+            Some(BlockHeight::from(target_height()) + delta.blocks()),
+        );
+    }
+
+    /// A canonical ZIP 318 crossing keeps the expiry height ZIP 318 gives it, whether or
+    /// not a delta is configured.
+    #[test]
+    fn canonical_crossing_is_not_overridden() {
+        let proposal = crossing_proposal(CANONICAL_VALUE);
+        for delta in [None, Some(delta(TxExpiryDelta::MIN)), Some(delta(u16::MAX))] {
+            assert_eq!(
+                expiry_height_for_proposal(&params(), &zip318(), &proposal, delta),
+                None,
+                "with delta {delta:?}",
+            );
+        }
+    }
+
+    proptest! {
+        /// The expiry height is the target height plus the delta. It is never below the
+        /// target height, which the backend would refuse, even at the top of the height
+        /// range.
+        #[test]
+        fn expiry_is_target_plus_delta(
+            target in any::<u32>(),
+            blocks in TxExpiryDelta::MIN..=u16::MAX,
+        ) {
+            let delta = delta(blocks);
+            let expiry = expiry_height_after(
+                TargetHeight::from(BlockHeight::from_u32(target)),
+                delta,
+            );
+
+            prop_assert_eq!(u32::from(expiry), target.saturating_add(delta.blocks()));
+            prop_assert!(u32::from(expiry) >= target);
+        }
     }
 }
