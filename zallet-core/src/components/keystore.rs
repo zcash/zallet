@@ -139,9 +139,6 @@ use crate::fl;
 
 use sapling::zip32::{DiversifiableFullViewingKey, ExtendedSpendingKey};
 
-#[cfg(feature = "transparent-key-import")]
-use {transparent::address::TransparentAddress, zcash_keys::address::Address};
-
 pub(super) mod db;
 
 mod error;
@@ -1110,54 +1107,81 @@ impl KeyStore {
         Ok(None)
     }
 
+    /// Decrypts the standalone (non-HD) transparent spending keys corresponding to the
+    /// given public keys.
+    ///
+    /// A public key the keystore does not hold is omitted from the result rather than
+    /// being reported as an error: for a multisig address another party may hold some of
+    /// the members, and whether the keys we do hold are sufficient to reach the address's
+    /// threshold is determined when its inputs are signed.
+    ///
+    /// The keystore is keyed by public key, so callers must supply the keys they expect to
+    /// find: a P2PKH address's own public key, or the members of a P2SH address's multisig
+    /// redeem script.
+    ///
+    /// The returned keys are in the order of their public keys in `pubkeys`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the wallet is locked, if the keystore database cannot be read,
+    /// if a stored key cannot be decrypted, or if a decrypted key does not correspond to
+    /// the public key it is stored under. No keys are returned when any error occurs.
     #[cfg(feature = "transparent-key-import")]
-    pub(crate) async fn decrypt_standalone_transparent_key(
+    pub(crate) async fn decrypt_standalone_transparent_keys(
         &self,
-        address: &TransparentAddress,
-    ) -> Result<secp256k1::SecretKey, Error> {
+        pubkeys: &[secp256k1::PublicKey],
+    ) -> Result<Vec<secp256k1::SecretKey>, Error> {
         // Acquire a read lock on the identities for decryption.
         let identities = self.identities.read().await;
         if identities.is_empty() {
             return Err(ErrorKind::Generic.context(fl!("err-wallet-locked")).into());
         }
 
-        let (pubkey_bytes, encrypted_key_bytes) = self
-            .with_db(|conn, network| {
-                let addr_str = Address::Transparent(*address).encode(network);
-                let row = conn
-                    .query_row(
-                        "SELECT ztk.pubkey, encrypted_transparent_privkey
-                         FROM ext_zallet_keystore_standalone_transparent_keys ztk
-                         JOIN addresses a ON ztk.pubkey = a.imported_transparent_receiver_pubkey
-                         WHERE a.cached_transparent_receiver_address = :address",
-                        named_params! {
-                            ":address": addr_str,
-                        },
-                        |row| {
-                            Ok((
-                                row.get::<_, Vec<u8>>("pubkey")?,
-                                row.get::<_, Vec<u8>>("encrypted_transparent_privkey")?,
-                            ))
-                        },
+        let encrypted_keys = self
+            .with_db(|conn, _| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT encrypted_transparent_privkey
+                         FROM ext_zallet_keystore_standalone_transparent_keys
+                         WHERE pubkey = :pubkey",
                     )
                     .map_err(|e| ErrorKind::Generic.context(e))?;
-                Ok(row)
+
+                let mut encrypted_keys = Vec::with_capacity(pubkeys.len());
+                for pubkey in pubkeys {
+                    let encrypted_key = stmt
+                        .query_row(named_params! { ":pubkey": pubkey.serialize() }, |row| {
+                            row.get::<_, Vec<u8>>(0)
+                        })
+                        .optional()
+                        .map_err(|e| ErrorKind::Generic.context(e))?;
+                    encrypted_keys.push(encrypted_key);
+                }
+
+                Ok(encrypted_keys)
             })
             .await?;
 
-        let secret_key =
-            decrypt_standalone_transparent_privkey(&identities, &encrypted_key_bytes[..])?;
+        let mut secret_keys = Vec::with_capacity(pubkeys.len());
+        for (pubkey, encrypted_key) in pubkeys.iter().zip(&encrypted_keys) {
+            let Some(encrypted_key) = encrypted_key else {
+                continue;
+            };
 
-        // The ciphertext is not bound to the pubkey the row is keyed by, so verify that
-        // the decrypted key reproduces the pubkey used for the lookup.
-        let pubkey = secret_key.public_key();
-        if pubkey.serialize()[..] != pubkey_bytes[..] {
-            return Err(ErrorKind::Generic
-                .context(fl!("err-keystore-key-material-mismatch"))
-                .into());
+            let secret_key = decrypt_standalone_transparent_privkey(&identities, encrypted_key)?;
+
+            // The ciphertext is not bound to the pubkey the row is keyed by, so verify
+            // that the decrypted key reproduces the pubkey used for the lookup.
+            if secret_key.public_key() != *pubkey {
+                return Err(ErrorKind::Generic
+                    .context(fl!("err-keystore-key-material-mismatch"))
+                    .into());
+            }
+
+            secret_keys.push(secret_key);
         }
 
-        Ok(secret_key)
+        Ok(secret_keys)
     }
 }
 
@@ -1843,5 +1867,79 @@ mod tests {
                 "@/etc/age/recipients.txt".into()
             )),
         );
+    }
+
+    #[cfg(feature = "zcashd-import")]
+    #[test]
+    fn standalone_key_batch_lookup_checks_each_ciphertext_and_requires_unlock() {
+        use super::EncryptedStandaloneTransparentKey;
+
+        let datadir = tempdir().unwrap();
+        run_async(|| async {
+            let keystore = test_keystore(&datadir).await;
+            let secrets = [1, 2, 3, 4].map(|byte| {
+                secp256k1::SecretKey::from_secret_bytes([byte; 32]).expect("valid secret key")
+            });
+            let [first, second, absent, mismatched] = secrets.map(|sk| sk.public_key());
+            let encryptor = keystore.encryptor().await.unwrap();
+            let encrypt = |sk: &secp256k1::SecretKey| {
+                encryptor
+                    .encrypt_standalone_transparent_privkey(sk)
+                    .unwrap()
+            };
+            keystore
+                .store_encrypted_standalone_transparent_keys(&[
+                    EncryptedStandaloneTransparentKey {
+                        pubkey: first,
+                        encrypted_key_bytes: encrypt(&secrets[0]),
+                    },
+                    EncryptedStandaloneTransparentKey {
+                        pubkey: second,
+                        encrypted_key_bytes: encrypt(&secrets[1]),
+                    },
+                    EncryptedStandaloneTransparentKey {
+                        pubkey: mismatched,
+                        encrypted_key_bytes: encrypt(&secrets[0]),
+                    },
+                ])
+                .await
+                .unwrap();
+
+            for pubkeys in [&[][..], &[absent][..]] {
+                assert!(
+                    keystore
+                        .decrypt_standalone_transparent_keys(pubkeys)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            assert_eq!(
+                keystore
+                    .decrypt_standalone_transparent_keys(&[absent, second, absent, first, absent])
+                    .await
+                    .unwrap(),
+                vec![secrets[1], secrets[0]],
+            );
+            let error = keystore
+                .decrypt_standalone_transparent_keys(&[first, mismatched])
+                .await
+                .expect_err("a valid earlier key must not hide mismatched key material");
+            assert_eq!(
+                std::error::Error::source(&error).unwrap().to_string(),
+                crate::fl!("err-keystore-key-material-mismatch")
+            );
+
+            // Simulate the relock task clearing the cached identities.
+            keystore.identities.write().await.clear();
+            let error = keystore
+                .decrypt_standalone_transparent_keys(&[first])
+                .await
+                .expect_err("stored ciphertext must not bypass the wallet lock");
+            assert_eq!(
+                std::error::Error::source(&error).unwrap().to_string(),
+                crate::fl!("err-wallet-locked")
+            );
+        });
     }
 }

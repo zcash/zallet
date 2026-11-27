@@ -131,6 +131,17 @@ be considered breaking changes.
   Previously such an address was reported later, from the privacy check, as a
   bare "Address is for Main but we expected Test" with nothing to identify which
   recipient was at fault.
+- `z_sendmany` and `z_shieldcoinbase` can spend transparent outputs held by a
+  P2SH address imported from a multisig redeem script when the wallet holds
+  enough member keys to meet its signature threshold (#797). These spends
+  previously failed with "Error: Query returned no rows". If too few keys are
+  available, transaction construction reports "Missing signing key" instead.
+- `z_sendmany` and `z_shieldcoinbase` report "Missing signing key" when spending
+  from a transparent pubkey imported without its private key, instead of
+  "Error: Query returned no rows".
+- `signmessage` reports "Private key not available" for a transparent pubkey
+  or address imported without its private key, instead of
+  "Error: Query returned no rows". P2SH addresses remain unsupported.
 
 ## [0.1.0-beta.4] - 2026-11-01
 
