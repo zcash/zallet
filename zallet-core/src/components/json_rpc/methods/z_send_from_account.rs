@@ -60,7 +60,7 @@ pub(crate) async fn call<C: Chain>(
     minconf: Option<u32>,
     privacy_policy: String,
 ) -> Response {
-    let request = build_request(&recipients)?;
+    let request = build_request(wallet.params(), &recipients)?;
 
     // `parse_account_parameter` queries the keystore and acquires its own wallet
     // connection, so it must run before this task takes one (see `Database::handle`).

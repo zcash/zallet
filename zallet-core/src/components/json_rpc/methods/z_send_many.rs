@@ -110,7 +110,7 @@ pub(crate) async fn call<C: Chain>(
             .with_static("Zallet always calculates fees internally; the fee field must be null."));
     }
 
-    let request = build_request(&amounts)?;
+    let request = build_request(wallet.params(), &amounts)?;
 
     let params = *wallet.params();
 
