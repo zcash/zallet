@@ -393,6 +393,86 @@ fn signmessage_completes_on_a_saturated_pool() {
     });
 }
 
+/// Standalone metadata must not imply that the keystore holds a private key.
+#[cfg(feature = "zcashd-import")]
+#[test]
+fn signmessage_handles_standalone_sources_on_a_saturated_pool() {
+    use transparent::address::TransparentAddress;
+    use zcash_keys::keys::transparent::Key;
+
+    let datadir = tempfile::tempdir().unwrap();
+    run_async(|| async {
+        let (keystore, db, account) = wallet_with_account(&datadir).await;
+        let secret = secp256k1::SecretKey::from_secret_bytes([1; 32]).unwrap();
+        let pubkey = secret.public_key();
+        let address = TransparentAddress::from_pubkey(&pubkey);
+        db.handle()
+            .await
+            .unwrap()
+            .import_standalone_transparent_address(account, address)
+            .unwrap();
+
+        for with_pubkey in [false, true] {
+            if with_pubkey {
+                db.handle()
+                    .await
+                    .unwrap()
+                    .import_standalone_transparent_pubkey(account, pubkey)
+                    .unwrap();
+            }
+            let error = completes(sign_message::call(
+                &db,
+                &keystore,
+                &address.encode(db.params()),
+                "standalone",
+            ))
+            .await
+            .expect_err("an address or public key alone cannot sign");
+            assert_eq!(
+                (error.code(), error.message()),
+                (LegacyCode::Wallet as i32, "Private key not available")
+            );
+        }
+
+        keystore
+            .encrypt_and_store_standalone_transparent_key(&Key::new(secret, true))
+            .await
+            .unwrap();
+        let signature = completes(sign_message::call(
+            &db,
+            &keystore,
+            &address.encode(db.params()),
+            "standalone",
+        ))
+        .await
+        .expect("signs with the stored standalone key");
+        let signature: String =
+            serde_json::from_value(serde_json::to_value(signature).unwrap()).unwrap();
+        let verified = super::verify_message::call(
+            db.params(),
+            &address.encode(db.params()),
+            &signature,
+            "standalone",
+        )
+        .unwrap();
+        assert!(serde_json::to_value(verified).unwrap().as_bool().unwrap());
+
+        let script_address = TransparentAddress::ScriptHash([0; 20]).encode(db.params());
+        let error = completes(sign_message::call(
+            &db,
+            &keystore,
+            &script_address,
+            "standalone",
+        ))
+        .await
+        .expect_err("P2SH addresses cannot sign messages");
+        assert_eq!(
+            (error.code(), error.message()),
+            (LegacyCode::Type as i32, "Address does not refer to key")
+        );
+    });
+}
+
 /// `z_exportviewingkey` for a bare Sapling address reads the account through the wallet
 /// database, decrypts the seed via the keystore, and re-derives the key; with one
 /// pooled connection those must not overlap.
