@@ -41,6 +41,10 @@ be considered breaking changes.
   Windows, matching the owner-only mode `0600` it already used on Unix
   (previously it inherited the data directory's access control there). An
   existing database file is still tightened on Unix only.
+- `zallet rpc` now accepts bare values for known string parameters, preserves
+  JSON-quoted strings, and validates known methods' positional argument counts
+  locally. Methods unknown to this Zallet binary retain JSON-only parameter
+  parsing without a local count check.
 
 ### Fixed
 
