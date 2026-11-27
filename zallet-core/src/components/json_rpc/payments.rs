@@ -11,7 +11,7 @@ use zcash_client_backend::{
     data_api::{
         Account as _, AccountBalance, WalletRead,
         wallet::{
-            ConfirmationsPolicy,
+            ConfirmationsPolicy, TargetHeight,
             input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy},
             propose_transfer,
         },
@@ -29,7 +29,7 @@ use zcash_keys::{address::Address, keys::UnifiedFullViewingKey};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
     PoolType, ShieldedPool, TxId,
-    consensus::{BlockHeight, NetworkUpgrade, Parameters as _},
+    consensus::{NetworkUpgrade, Parameters as _},
     memo::MemoBytes,
     value::Zatoshis,
 };
@@ -308,8 +308,8 @@ pub(super) fn transparent_change_policy_for(spend_policy: &SpendPolicy) -> Trans
 /// applies to the same target height when it assigns a payment its output pool. Both that
 /// predicate and the classification built on it (`resolve_shielded_destination`) are private
 /// upstream, so the rule is restated here rather than shared.
-fn orchard_receiver_pool(params: &Network, target_height: BlockHeight) -> ShieldedPool {
-    if params.is_nu_active(NetworkUpgrade::Nu6_3, target_height) {
+fn orchard_receiver_pool(params: &Network, target_height: TargetHeight) -> ShieldedPool {
+    if params.is_nu_active(NetworkUpgrade::Nu6_3, target_height.into()) {
         ShieldedPool::Ironwood
     } else {
         ShieldedPool::Orchard
@@ -351,7 +351,7 @@ fn spendable_in(balance: &AccountBalance, pool: ShieldedPool) -> Zatoshis {
 /// names the policy the send actually requires.
 fn check_recipients_against_privacy_policy(
     params: &Network,
-    target_height: BlockHeight,
+    target_height: TargetHeight,
     request: &TransactionRequest,
     privacy_policy: PrivacyPolicy,
     spend_policy: &SpendPolicy,
@@ -502,7 +502,7 @@ pub(super) fn propose_and_check(
 
     check_recipients_against_privacy_policy(
         params,
-        target_height.into(),
+        target_height,
         &request,
         privacy_policy,
         spend_policy,
@@ -2521,16 +2521,17 @@ mod recipient_preflight_tests {
     ///
     /// Read from the network rather than written out, so these tests follow the activation
     /// rather than pinning a second copy of it.
-    fn from_ironwood() -> BlockHeight {
+    fn from_ironwood() -> TargetHeight {
         params()
             .activation_height(NetworkUpgrade::Nu6_3)
             .expect("NU6.3 has a scheduled activation height on mainnet")
+            .into()
     }
 
     /// The last height at which a payment to an Orchard receiver is built in the Orchard
     /// pool.
-    fn before_ironwood() -> BlockHeight {
-        from_ironwood() - 1
+    fn before_ironwood() -> TargetHeight {
+        (from_ironwood() - 1).into()
     }
 
     /// Every payment in these tests is one ZEC, so a pool's funding can be stated in whole
@@ -2645,7 +2646,7 @@ mod recipient_preflight_tests {
     fn check(
         recipients: &[(&str, &str)],
         privacy_policy: PrivacyPolicy,
-        target_height: BlockHeight,
+        target_height: TargetHeight,
         balance: &AccountBalance,
     ) -> Result<(), IncompatiblePrivacyPolicy> {
         check_from(
@@ -2663,7 +2664,7 @@ mod recipient_preflight_tests {
         recipients: &[(&str, &str)],
         privacy_policy: PrivacyPolicy,
         spend_policy: &SpendPolicy,
-        target_height: BlockHeight,
+        target_height: TargetHeight,
         balance: &AccountBalance,
     ) -> Result<(), IncompatiblePrivacyPolicy> {
         let amounts = recipients
@@ -2707,7 +2708,7 @@ mod recipient_preflight_tests {
     /// activation height itself.
     #[test]
     fn orchard_receiver_pool_is_ironwood_from_nu6_3() {
-        for height in [from_ironwood(), from_ironwood() + 1] {
+        for height in [from_ironwood(), (from_ironwood() + 1).into()] {
             assert_eq!(
                 orchard_receiver_pool(&params(), height),
                 ShieldedPool::Ironwood,
