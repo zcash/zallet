@@ -7,7 +7,6 @@ use documented::Documented;
 use jsonrpsee::core::{JsonValue, RpcResult};
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use schemars::JsonSchema;
-use secrecy::ExposeSecret;
 use serde::Serialize;
 use transparent::address::TransparentAddress;
 use uuid::Uuid;
@@ -26,10 +25,7 @@ use zcash_client_backend::{
     wallet::OvkPolicy,
 };
 use zcash_client_sqlite::{AccountUuid, util::SystemClock};
-use zcash_keys::{
-    address::Address,
-    keys::{UnifiedFullViewingKey, UnifiedSpendingKey},
-};
+use zcash_keys::{address::Address, keys::UnifiedFullViewingKey};
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{PoolType, TxId, value::Zatoshis};
 
@@ -42,7 +38,8 @@ use crate::{
         json_rpc::{
             asyncop::{ContextInfo, OperationId},
             payments::{
-                PrivacyPolicy, SendResult, broadcast_transactions, parse_memo, verify_transactions,
+                PrivacyPolicy, SendResult, broadcast_transactions, parse_memo,
+                spending_key_for_account, verify_transactions,
             },
             server::LegacyCode,
             utils::{JsonZec, value_from_zatoshis, wallet_handle},
@@ -348,18 +345,7 @@ pub(crate) async fn call<C: Chain>(
             account_id.expose_uuid(),
         ))
     })?;
-    let seed = keystore
-        .decrypt_seed(derivation.seed_fingerprint())
-        .await
-        .map_err(|e| match e.kind() {
-            crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
-                LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
-            }
-            _ => LegacyCode::Database.with_message(e.to_string()),
-        })?;
-    let usk =
-        UnifiedSpendingKey::from_seed(&params, seed.expose_secret(), derivation.account_index())
-            .map_err(|e| LegacyCode::InvalidAddressOrKey.with_message(e.to_string()))?;
+    let usk = spending_key_for_account(&wallet, &keystore, account_id, derivation).await?;
 
     #[cfg(feature = "zcashd-import")]
     let standalone_keys =
