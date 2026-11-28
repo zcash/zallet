@@ -3391,6 +3391,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "openrpsee"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a799f74f3fbfeb30ef447d33a409fc874caaf34107df593dd2989c453c316501"
+dependencies = [
+ "documented",
+ "jsonrpsee",
+ "phf 0.12.1",
+ "quote",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "optfield"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6579,6 +6595,7 @@ dependencies = [
  "known-folders",
  "nix",
  "nonempty",
+ "openrpsee 0.3.1",
  "orchard",
  "pczt",
  "phf 0.12.1",
@@ -7176,7 +7193,7 @@ dependencies = [
  "lazy_static",
  "metrics",
  "nix",
- "openrpsee",
+ "openrpsee 0.1.1",
  "orchard",
  "phf 0.12.1",
  "prost",
