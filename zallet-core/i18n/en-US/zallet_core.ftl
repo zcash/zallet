@@ -337,7 +337,9 @@ err-account-no-payment-source = Account has no payment source.
 err-legacy-pool-disabled =
     The legacy pool of funds is disabled. To enable it, set
     '{-legacy_pool_seed_fingerprint}' in the Zallet config file to the seed
-    fingerprint of the {-zcashd} wallet migrated into this wallet.
+    fingerprint of the {-zcashd} wallet migrated into this wallet. To spend
+    the transparent funds of a regular account instead, pass its account UUID
+    as the 'fromaddress'.
 err-legacy-pool-not-found =
     This wallet holds no legacy account for seed fingerprint {$seed_fp}. Check
     that '{-legacy_pool_seed_fingerprint}' names a {-zcashd} wallet migrated

@@ -1,7 +1,7 @@
 //! `z_sendfromaccount` — send funds from an account in one shot.
 //!
-//! Unlike `z_sendmany`, the source of funds is an account UUID together with an
-//! explicit, isolating `fund_source`, rather than an address. The transaction
+//! The account UUID and explicit, isolating `fund_source` are separate parameters,
+//! rather than a single `fromaddress` as in `z_sendmany`. The transaction
 //! is assembled by driving a PCZT through the same pipeline the `pczt_*`
 //! methods expose — create, prove, sign, extract — so this method differs from
 //! that flow only in doing it in one call and broadcasting the result.
